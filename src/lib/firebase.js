@@ -20,16 +20,16 @@ import {
   deleteDoc,
   serverTimestamp,
   writeBatch,
-  onSnapshot  // ✅ AGREGAR AQUÍ
+  onSnapshot
 } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: "samy-fidabel.firebaseapp.com",
-  projectId: "samy-fidabel",
-  storageBucket: "samy-fidabel.firebasestorage.app",
-  messagingSenderId: "184842107847",
-  appId: "1:184842107847:web:75dfb34197774edfbff7e2"
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 }
 
 const app = initializeApp(firebaseConfig)
@@ -220,7 +220,6 @@ export async function createUserFromAdmin(email, password, userData) {
   }
 }
 
-// ✅ CONTROL DE DÍA D (FIRESTORE MODULAR API)
 export const onElectionDayChange = (callback) => {
   return onSnapshot(
     doc(db, 'config', 'electionDay'),
