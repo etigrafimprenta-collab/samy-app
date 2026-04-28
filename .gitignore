@@ -1,5 +1,8 @@
 node_modules/
 dist/
 .env
-serviceAccount.json
-*.local
+.env.local
+serviceAccountKey.json
+serviceAccountKey.json.json
+*firebase-adminsdk*.json
+samy-fidabel-firebase-adminsdk-fbsvc-*.json
