@@ -6,7 +6,7 @@ export function renderLogin(root) {
   function render() {
     root.innerHTML = `
       <div class="login-page">
-        <img src="/samy.jpg" alt="Samy Fidabel" class="login-logo" />
+        <img src="/logo.png" alt="Samy Fidabel" class="login-logo" />
         <div class="login-title">SAMY FIDABEL</div>
         <div class="login-sub">Lista 6 · Opción 1 · Concejal 2026</div>
 

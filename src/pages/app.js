@@ -22,7 +22,7 @@ export function renderApp(root, user, profile) {
           
           <!-- Primera fila: Logo + Nombres -->
           <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
-            <img src="/samy.jpg" alt="Samy Fidabel" style="width: 48px; height: 48px; border-radius: 6px; object-fit: cover; box-shadow: 0 2px 8px rgba(0,0,0,0.2); flex-shrink: 0;" />
+            <img src="/logo.png" alt="Samy Fidabel" style="width: 48px; height: 48px; border-radius: 6px; object-fit: cover; box-shadow: 0 2px 8px rgba(0,0,0,0.2); flex-shrink: 0;" />
             
             <div style="display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;">
               <div style="font-family: 'Barlow Condensed', sans-serif; font-size: 1rem; font-weight: 700; color: #fff; text-transform: uppercase; letter-spacing: 0.5px; line-height: 1;">
