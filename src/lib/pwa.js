@@ -3,23 +3,19 @@ let deferredPrompt = null
 let isIOSStandalone = false
 
 export function initPWA() {
-  // Registrar Service Worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js')
       .then(reg => console.log('✅ Service Worker registrado'))
       .catch(err => console.error('❌ Error SW:', err))
   }
 
-  // Android: escuchar beforeinstallprompt
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault()
     deferredPrompt = e
     console.log('📱 App es instalable (Android)')
-    // Disparar evento para que los componentes se enteres
     window.dispatchEvent(new CustomEvent('pwa-ready'))
   })
 
-  // iOS: detectar si está en modo standalone
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   const isStandalone = window.navigator.standalone === true
   
@@ -29,7 +25,6 @@ export function initPWA() {
     window.dispatchEvent(new CustomEvent('pwa-ios'))
   }
 
-  // Cuando se instala: limpiar prompt
   window.addEventListener('appinstalled', () => {
     console.log('✅ App instalada')
     deferredPrompt = null
@@ -42,7 +37,6 @@ export async function promptInstall() {
     console.warn('Install prompt no disponible')
     return false
   }
-
   deferredPrompt.prompt()
   const { outcome } = await deferredPrompt.userChoice
   console.log(`Usuario eligió: ${outcome}`)
@@ -85,12 +79,14 @@ export function createInstallButton() {
     }
   })
 
-  // Mostrar cuando esté listo
   window.addEventListener('pwa-ready', () => {
     btn.style.display = 'flex'
   })
 
-  // Para iOS: mostrar siempre instrucciones
+  if (/Android|webOS|iPhone|iPad|iPod/.test(navigator.userAgent)) {
+    btn.style.display = 'flex'
+  }
+
   window.addEventListener('pwa-ios', () => {
     btn.innerHTML = '📱 Ver instrucciones de instalación'
     btn.style.display = 'flex'
