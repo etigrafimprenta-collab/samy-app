@@ -9,9 +9,9 @@ import { renderDiaDAdmin } from '../modules/dia-d-admin.js'
 export function renderApp(root, user, profile) {
   let currentPage = 'search'
   const isAdmin = profile?.role === 'admin'
-  const installBtn = createInstallButton()
 
   function render() {
+    const installBtn = createInstallButton()
     root.innerHTML = `
       <div class="header" style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); padding: 0; position: sticky; top: 0; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
         <div class="header-inner" style="display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; width: 100%;">
