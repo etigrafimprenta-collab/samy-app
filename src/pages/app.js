@@ -51,7 +51,10 @@ export function renderApp(root, user, profile) {
     })
 
     const content = document.getElementById('page-content')
-    content.appendChild(installBtn)
+    const btnContainer = document.createElement('div')
+    btnContainer.style.marginBottom = '16px'
+    btnContainer.appendChild(installBtn)
+    content.insertBefore(btnContainer, content.firstChild)
 
     if (currentPage === 'search') renderSearch(content, user, profile)
     else if (currentPage === 'records') renderMyRecords(content, user)
