@@ -24,8 +24,8 @@ export async function renderMyRecords(container, user) {
 
         ${records.length > 0 ? `
           <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;align-items:center;">
-            <input class="form-input" id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." style="flex:1; min-width:250px; padding:10px 12px; border-radius:6px;" />
-            <button class="btn btn-gold" id="btn-export">📥 Exportar a Excel</button>
+            <input id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." style="flex:1; min-width:250px; padding:10px 12px; border-radius:6px; border: 1px solid #ddd; font-size: 0.95rem; box-sizing: border-box; appearance: none; -webkit-appearance: none;" />
+            <button class="btn btn-gold" id="btn-export" style="padding: 10px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: 700;">📥 Exportar a Excel</button>
           </div>
         ` : ''}
 
