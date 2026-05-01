@@ -138,14 +138,14 @@ async function loadAndRender(container) {
     const { doc: docFn, collection: collectionFn, getDocs: getDocsFn, onSnapshot: onSnapshotFn, setDoc: setDocFn, addDoc: addDocFn, deleteDoc: deleteDocFn } = await import('firebase/firestore')
     const fbLib = await import('../lib/firebase.js')
     
-    // Asignar a variables globales
+    // Asignar SOLO lo que se usa en funciones externas
     doc = docFn
     collection = collectionFn
     getDocs = getDocsFn
-    onSnapshot = onSnapshotFn
     setDoc = setDocFn
     addDoc = addDocFn
     deleteDoc = deleteDocFn
+    onSnapshot = onSnapshotFn  // Asignar también
     
     db = fbLib.db
     const auth = fbLib.auth
@@ -184,15 +184,15 @@ async function loadAndRender(container) {
     choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
     // Listener en tiempo real para choferes
-    onSnapshotFn(collectionFn(db, 'choferes'), (choferesRealtime) => {
+    onSnapshot(collection(db, 'choferes'), (choferesRealtime) => {
       choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
       // Actualizar tab de choferes si está visible
       renderChoferes(choferes, db, setDoc, doc, addDoc, deleteDoc, currentUser)
     })
 
     // Listener Día D Config
-    onSnapshotFn(
-      docFn(db, 'config', 'electionDay'),
+    onSnapshot(
+      doc(db, 'config', 'electionDay'),
       docSnap => {
         const enabled = docSnap.exists() ? docSnap.data().enabled : false
         const toggle = document.getElementById('toggle-election-day')
@@ -213,8 +213,8 @@ async function loadAndRender(container) {
       }
     )
 
-    onSnapshotFn(
-      collectionFn(db, 'dia_d_votos'),
+    onSnapshot(
+      collection(db, 'dia_d_votos'),
       votosSnap => {
         allVotos = votosSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
