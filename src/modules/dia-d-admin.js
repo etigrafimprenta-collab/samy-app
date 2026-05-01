@@ -156,15 +156,6 @@ async function loadAndRender(container) {
       return
     }
 
-    // Usar las funciones asignadas
-    onSnapshot(
-      doc(db, 'config', 'electionDay'),
-      docSnap => {
-        const enabled = docSnap.exists() ? docSnap.data().enabled : false
-        updateToggle(enabled, db, setDoc, doc, currentUser.uid)
-      }
-    )
-
     const usersSnap = await getDocs(collection(db, 'users'))
     militantes = []
     const locales = new Set()
@@ -180,25 +171,50 @@ async function loadAndRender(container) {
     allRecords.forEach(r => { if (r.local) locales.add(r.local) })
 
     const selectLocal = document.getElementById('chofer-local')
-    locales.forEach(local => {
-      const opt = document.createElement('option')
-      opt.value = local
-      opt.textContent = local
-      selectLocal.appendChild(opt)
-    })
+    if (selectLocal) {
+      locales.forEach(local => {
+        const opt = document.createElement('option')
+        opt.value = local
+        opt.textContent = local
+        selectLocal.appendChild(opt)
+      })
+    }
 
     const choferesSnap = await getDocs(collection(db, 'choferes'))
-    let choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
     // Listener en tiempo real para choferes
-    onSnapshot(collection(db, 'choferes'), (choferesRealtime) => {
+    onSnapshotFn(collectionFn(db, 'choferes'), (choferesRealtime) => {
       choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
       // Actualizar tab de choferes si está visible
       renderChoferes(choferes, db, setDoc, doc, addDoc, deleteDoc, currentUser)
     })
 
-    onSnapshot(
-      collection(db, 'dia_d_votos'),
+    // Listener Día D Config
+    onSnapshotFn(
+      docFn(db, 'config', 'electionDay'),
+      docSnap => {
+        const enabled = docSnap.exists() ? docSnap.data().enabled : false
+        const toggle = document.getElementById('toggle-election-day')
+        const label = document.getElementById('toggle-label')
+        const warning = document.getElementById('toggle-warning')
+        
+        if (toggle) {
+          toggle.checked = enabled
+          if (label) label.textContent = enabled ? 'Habilitado' : 'Deshabilitado'
+          if (label) label.style.color = enabled ? '#2e7d32' : '#ff9800'
+          if (warning) {
+            warning.innerHTML = enabled ? '<strong>Día D HABILITADO</strong>' : '<strong>Día D DESHABILITADO</strong>'
+            warning.style.background = enabled ? '#c8e6c9' : '#fff3cd'
+            warning.style.borderLeftColor = enabled ? '#2e7d32' : '#ff9800'
+            warning.style.color = enabled ? '#1b5e20' : '#e65100'
+          }
+        }
+      }
+    )
+
+    onSnapshotFn(
+      collectionFn(db, 'dia_d_votos'),
       votosSnap => {
         allVotos = votosSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
