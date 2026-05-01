@@ -10,6 +10,7 @@ export function renderDiaDAdmin(container) {
   let allRecords = []
   let allVotos = []
   let choferes = []
+  let militantes = []
 
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
@@ -165,7 +166,7 @@ async function loadAndRender(container) {
     )
 
     const usersSnap = await getDocs(collection(db, 'users'))
-    const militantes = []
+    militantes = []
     const locales = new Set()
     usersSnap.forEach(d => {
       const data = d.data()
@@ -175,7 +176,7 @@ async function loadAndRender(container) {
     })
 
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
-    const allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
     allRecords.forEach(r => { if (r.local) locales.add(r.local) })
 
     const selectLocal = document.getElementById('chofer-local')
