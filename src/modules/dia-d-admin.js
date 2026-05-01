@@ -183,17 +183,15 @@ async function loadAndRender(container) {
       collection(db, 'dia_d_votos'),
       votosSnap => {
         const allVotos = votosSnap.docs.map(d => d.data())
-        
-        // Contar solo votos con estado 'votó'
-        const votosActuales = allVotos.filter(v => v.estado === 'votó').length
 
         getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
           const totalV = votantesSnap.size
-          const pct = totalV > 0 ? ((votosActuales / totalV) * 100).toFixed(2) : 0
+          const totalVotos = votosSnap.size
+          const pct = totalV > 0 ? ((totalVotos / totalV) * 100).toFixed(2) : 0
 
           document.getElementById('total-militantes').textContent = militantes.length
           document.getElementById('total-votantes').textContent = totalV
-          document.getElementById('total-votos').textContent = votosActuales
+          document.getElementById('total-votos').textContent = totalVotos
           document.getElementById('total-pct').textContent = pct
 
           const porMil = {}
@@ -285,10 +283,7 @@ function updateToggle(enabled, db, setDoc, doc, uid) {
 function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc) {
   const ranking = Object.entries(porMil)
     .map(([uid, data]) => ({ uid, ...data }))
-    .sort((a, b) => {
-      // Ordenar por: más votos primero
-      return b.votos - a.votos
-    })
+    .sort((a, b) => b.votos - a.votos)
 
   let html = ''
   ranking.forEach((m, idx) => {
