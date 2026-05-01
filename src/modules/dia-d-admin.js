@@ -188,19 +188,22 @@ async function loadAdminData(container) {
       })
     })
 
-    // Cargar choferes
-    const choferesSnap = await getDocs(collection(db, 'choferes'))
-    const choferes = []
-    choferesSnap.forEach(doc => {
-      choferes.push({
-        id: doc.id,
-        ...doc.data()
+    // Cargar choferes CON LISTENER EN TIEMPO REAL
+    const { onSnapshot } = await import('firebase/firestore')
+    
+    onSnapshot(collection(db, 'choferes'), (choferesSnap) => {
+      const choferes = []
+      choferesSnap.forEach(doc => {
+        choferes.push({
+          id: doc.id,
+          ...doc.data()
+        })
       })
-    })
 
-    // Renderizar tabs
-    renderMilitantesRanking(container, militantes, votos, records, choferes)
-    renderChoferes(container, choferes)
+      // Renderizar tabs
+      renderMilitantesRanking(container, militantes, votos, records, choferes)
+      renderChoferes(container, choferes)
+    })
 
   } catch (err) {
     console.error('Error cargando datos:', err)
