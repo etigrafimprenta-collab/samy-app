@@ -487,23 +487,25 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
       html += '<div style="font-weight: 600; margin-bottom: 6px;">' + (r.nombre || 'N/A') + '</div>'
       html += '<div style="font-size: 0.8rem; color: #333; margin-bottom: 8px;">CI: ' + r.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + ' | 📱 ' + (r.telefono || 'Sin teléfono') + '</div>'
       
-      html += '<div style="display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 8px; align-items: center;">'
-      html += '<label style="font-weight: 600; font-size: 0.85rem;">Asignar chofer?</label>'
-      html += '<select class="chofer-selector" data-cedula="' + r.cedula + '" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem;">'
-      html += '<option value="">No</option>'
-      html += '<option value="si">Si</option>'
-      html += '</select>'
+      html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">'
+      html += '<div><label style="font-size: 0.8rem; font-weight: 600;">🚗 Chofer:</label>'
+      html += '<select class="chofer-select-' + r.cedula + '" data-cedula="' + r.cedula + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;">'
+      html += '<option value="">Selecciona chofer</option>'
+      choferes.forEach(c => {
+        html += '<option value="' + c.nombre + '">' + c.nombre + ' (' + (c.telefono || 'sin tel') + ')</option>'
+      })
+      html += '<option value="NUEVO">➕ Nuevo chofer</option>'
+      html += '</select></div>'
+      
+      html += '<div><label style="font-size: 0.8rem; font-weight: 600;">⏰ Horario:</label>'
+      html += '<input type="time" class="hora-' + r.cedula + '" data-cedula="' + r.cedula + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
       html += '</div>'
       
-      html += '<div class="chofer-select-container-' + r.cedula + '" style="display: none; margin-bottom: 8px;">'
-      html += '<select class="chofer-select" data-cedula="' + r.cedula + '" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; width: 100%; margin-bottom: 8px;">'
-      html += '<option value="">Selecciona chofer</option>'
-      choferes.filter(c => c.local === r.local).forEach(c => {
-        html += '<option value="' + c.id + '">' + c.nombre + ' (' + c.telefono + ')</option>'
-      })
-      html += '</select>'
-      html += '<button class="btn-asignar-chofer" data-cedula="' + r.cedula + '" style="background: #c41e3a; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; width: 100%;">Asignar</button>'
-      html += '</div>'
+      html += '<div style="margin-bottom: 8px;"><label style="font-size: 0.8rem; font-weight: 600;">📍 Dirección de recogida:</label>'
+      html += '<input type="text" class="dir-' + r.cedula + '" data-cedula="' + r.cedula + '" placeholder="Calle y nº" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
+      
+      html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">'
+      html += '<button class="btn-guardar-' + r.cedula + '" data-cedula="' + r.cedula + '" style="background: #1976d2; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: 600;">💾 Guardar</button>'
 
       if (r.telefono) {
         html += '<a href="' + waLink + '" target="_blank" style="background: #25d366; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 0.8rem; font-weight: 600; display: inline-block;">Enviar WA</a>'
@@ -518,37 +520,72 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
   modal.innerHTML = html
   document.body.appendChild(modal)
 
-  document.querySelectorAll('.chofer-selector').forEach(sel => {
-    sel.addEventListener('change', (e) => {
-      const cedula = sel.dataset.cedula
-      const container = document.querySelector('.chofer-select-container-' + cedula)
-      if (e.target.value === 'si') {
-        container.style.display = 'block'
-      } else {
-        container.style.display = 'none'
-      }
-    })
-  })
+  // Event listeners para botones Guardar
+  faltantes.forEach(r => {
+    const btnGuardar = modal.querySelector('.btn-guardar-' + r.cedula)
+    const choferSelect = modal.querySelector('.chofer-select-' + r.cedula)
+    const horaInput = modal.querySelector('.hora-' + r.cedula)
+    const dirInput = modal.querySelector('.dir-' + r.cedula)
 
-  document.querySelectorAll('.btn-asignar-chofer').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const cedula = btn.dataset.cedula
-      const choferSelect = document.querySelector('.chofer-select[data-cedula="' + cedula + '"]')
-      const choferId = choferSelect.value
+    if (btnGuardar) {
+      btnGuardar.addEventListener('click', async () => {
+        const choferNombre = choferSelect.value
+        const hora = horaInput.value
+        const direccion = dirInput.value
 
-      if (!choferId) {
-        alert('Selecciona chofer')
-        return
-      }
+        if (choferNombre === 'NUEVO') {
+          const nombre = prompt('Nombre del nuevo chofer:')
+          if (nombre) {
+            const tel = prompt('Teléfono:') || ''
+            const { addDoc, collection } = await import('firebase/firestore')
+            try {
+              await addDoc(collection(db, 'choferes'), {
+                nombre: nombre,
+                telefono: tel,
+                vehiculo: 'Vehículo',
+                activo: true,
+                createdAt: new Date()
+              })
+              choferSelect.innerHTML += '<option value="' + nombre + '">' + nombre + ' (' + tel + ')</option>'
+              choferSelect.value = nombre
+              alert('✅ Chofer agregado')
+            } catch (err) {
+              alert('Error: ' + err.message)
+            }
+          }
+          return
+        }
 
-      try {
-        const record = registros.find(r => r.cedula === cedula)
-        await setDoc(doc(db, 'savedRecords', record.id), { chofer_asignado: choferId }, { merge: true })
-        alert('Asignado')
-      } catch (err) {
-        alert('Error: ' + err.message)
-      }
-    })
+        // Crear voto si no existe, o actualizar si existe
+        const votoExistente = votos.find(v => v.cedula === r.cedula)
+        try {
+          if (votoExistente) {
+            // Actualizar voto existente
+            await setDoc(modal.ownerDocument.defaultView.db ? modal.ownerDocument.defaultView.doc : doc, 
+              { choferAsignado: choferNombre || null, horarioBusqueda: hora || null, direccionRecogida: direccion || null, ultimoCambio: new Date() }, 
+              { merge: true })
+          } else {
+            // Crear nuevo voto
+            const { addDoc, collection } = await import('firebase/firestore')
+            await addDoc(collection(db, 'dia_d_votos'), {
+              cedula: r.cedula,
+              nombre: r.nombre,
+              militar_id: 'admin',
+              estado: 'no_votó',
+              choferAsignado: choferNombre || null,
+              horarioBusqueda: hora || null,
+              direccionRecogida: direccion || null,
+              timestamp: new Date(),
+              ultimoCambio: new Date()
+            })
+          }
+          alert('✅ Guardado')
+          btnGuardar.style.background = '#2e7d32'
+        } catch (err) {
+          alert('Error: ' + err.message)
+        }
+      })
+    }
   })
 
   modal.onclick = (e) => {
