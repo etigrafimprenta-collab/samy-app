@@ -218,7 +218,7 @@ function renderPanel(container, user, votantes, votantesMap, estadoVotos, db, se
   // Calcular estadísticas
   const total = votantes.length
   const votaron = Object.keys(estadoVotos).filter(c => estadoVotos[c]?.voted).length
-  const pct = total > 0 ? Math.round((votaron / total) * 100) : 0
+  const pct = total > 0 ? ((votaron / total) * 100).toFixed(2) : 0
 
   // Estado visual
   let html = ''
