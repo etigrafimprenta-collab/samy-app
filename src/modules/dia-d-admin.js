@@ -533,6 +533,7 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
         const hora = horaInput.value
         const direccion = dirInput.value
 
+        // Crear nuevo chofer si selecciona "NUEVO"
         if (choferNombre === 'NUEVO') {
           const nombre = prompt('Nombre del nuevo chofer:')
           if (nombre) {
@@ -549,28 +550,36 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
               choferSelect.innerHTML += '<option value="' + nombre + '">' + nombre + ' (' + tel + ')</option>'
               choferSelect.value = nombre
               alert('✅ Chofer agregado')
+              return
             } catch (err) {
               alert('Error: ' + err.message)
+              return
             }
           }
           return
         }
 
-        // Crear voto si no existe, o actualizar si existe
+        // Guardar chofer + hora + dirección
         const votoExistente = votos.find(v => v.cedula === r.cedula)
         try {
+          const { getDoc, doc: firebaseDoc } = await import('firebase/firestore')
+          
           if (votoExistente) {
             // Actualizar voto existente
-            await setDoc(modal.ownerDocument.defaultView.db ? modal.ownerDocument.defaultView.doc : doc, 
-              { choferAsignado: choferNombre || null, horarioBusqueda: hora || null, direccionRecogida: direccion || null, ultimoCambio: new Date() }, 
-              { merge: true })
+            const votoDocRef = firebaseDoc(db, 'dia_d_votos', votoExistente.id || r.cedula)
+            await setDoc(votoDocRef, { 
+              choferAsignado: choferNombre || null, 
+              horarioBusqueda: hora || null, 
+              direccionRecogida: direccion || null, 
+              ultimoCambio: new Date() 
+            }, { merge: true })
           } else {
             // Crear nuevo voto
             const { addDoc, collection } = await import('firebase/firestore')
             await addDoc(collection(db, 'dia_d_votos'), {
               cedula: r.cedula,
               nombre: r.nombre,
-              militar_id: 'admin',
+              militante_id: 'admin',
               estado: 'no_votó',
               choferAsignado: choferNombre || null,
               horarioBusqueda: hora || null,
@@ -579,8 +588,19 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
               ultimoCambio: new Date()
             })
           }
-          alert('✅ Guardado')
+          
+          // Actualizar UI después de guardar
+          btnGuardar.textContent = '✅ Guardado'
           btnGuardar.style.background = '#2e7d32'
+          choferSelect.disabled = true
+          horaInput.disabled = true
+          dirInput.disabled = true
+          
+          setTimeout(() => {
+            btnGuardar.textContent = '💾 Guardar'
+            btnGuardar.style.background = '#1976d2'
+          }, 2000)
+          
         } catch (err) {
           alert('Error: ' + err.message)
         }
