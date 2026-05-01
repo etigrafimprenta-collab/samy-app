@@ -207,7 +207,7 @@ async function loadAndRender(container) {
             if (porMil[v.militante_id] && v.estado === 'votó') porMil[v.militante_id].votos++
           })
 
-          renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc)
+          renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc, doc)
           renderLocales(allRecords, allVotos)
           renderChoferes(choferes, allRecords, allVotos, db, deleteDoc)
         })
@@ -280,7 +280,7 @@ function updateToggle(enabled, db, setDoc, doc, uid) {
   }
 }
 
-function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc) {
+function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc, doc) {
   const ranking = Object.entries(porMil)
     .map(([uid, data]) => ({ uid, ...data }))
     .sort((a, b) => b.votos - a.votos)
