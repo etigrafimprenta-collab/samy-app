@@ -257,7 +257,8 @@ async function loadAndRender(container) {
     })
 
   } catch (err) {
-    console.error('Error:', err)
+    console.error('Error en loadAndRender:', err)
+    alert('Error cargando admin: ' + err.message)
   }
 }
 
