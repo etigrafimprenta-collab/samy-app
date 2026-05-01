@@ -4,6 +4,13 @@
  */
 
 export function renderDiaDAdmin(container) {
+  // Variables globales para Firebase (accesibles en todas las funciones)
+  let doc, db, setDoc, addDoc, deleteDoc, collection, getDocs, onSnapshot
+  let currentUser
+  let allRecords = []
+  let allVotos = []
+  let choferes = []
+
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
       <h2 style="margin: 0; font-family: 'Barlow Condensed'; font-size: 2rem; text-transform: uppercase;">⚙️ DÍA D - PANEL ADMINISTRADOR</h2>
@@ -128,12 +135,22 @@ function actualizarHora() {
 async function loadAndRender(container) {
   try {
     const firebaseImport = await import('firebase/firestore')
-    const { collection, getDocs, doc, onSnapshot, setDoc, addDoc, deleteDoc, serverTimestamp } = firebaseImport
     const fbLib = await import('../lib/firebase.js')
-    const db = fbLib.db
+    
+    // Asignar a las variables declaradas en renderDiaDAdmin
+    const imports = firebaseImport
+    doc = imports.doc
+    collection = imports.collection
+    getDocs = imports.getDocs
+    onSnapshot = imports.onSnapshot
+    setDoc = imports.setDoc
+    addDoc = imports.addDoc
+    deleteDoc = imports.deleteDoc
+    
+    db = fbLib.db
     const auth = fbLib.auth
 
-    const currentUser = auth.currentUser
+    currentUser = auth.currentUser
     if (!currentUser) {
       console.error('No autenticado')
       return
