@@ -276,6 +276,12 @@ function renderPanel(container, user, votantes, votantesMap, estadoVotos, db, se
         if (est.choferAsignado) {
           html += '<div style="font-size: 0.75rem; color: #1976d2; font-weight: 600;">🚗 Chofer: ' + est.choferAsignado + '</div>'
         }
+        if (est.horarioBusqueda) {
+          html += '<div style="font-size: 0.75rem; color: #f57c00; font-weight: 600;">⏰ Hora: ' + est.horarioBusqueda + '</div>'
+        }
+        if (est.direccionRecogida) {
+          html += '<div style="font-size: 0.75rem; color: #558b2f; font-weight: 600;">📍 ' + est.direccionRecogida + '</div>'
+        }
         html += '</div>'
 
         html += '<button id="' + editBtnId + '" style="background: #1976d2; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-weight: 700; white-space: nowrap;">⚙️ Editar</button>'
@@ -302,7 +308,13 @@ function renderPanel(container, user, votantes, votantesMap, estadoVotos, db, se
       btn.addEventListener('click', () => {
         const cedula = btn.id.replace('edit-', '').replace(/-/g, '.')
         const votante = votantesMap[cedula]
-        const est = estadoVotos[cedula] || { voted: false, estado: 'no_votó', choferAsignado: null }
+        const est = estadoVotos[cedula] || { 
+          voted: false, 
+          estado: 'no_votó', 
+          choferAsignado: null,
+          horarioBusqueda: '09:00',
+          direccionRecogida: null
+        }
         abrirModalEditar(votante, est, user, db, setDoc, doc, choferes)
       })
     })
