@@ -10,7 +10,6 @@ export function renderDiaDAdmin(container) {
   let allRecords = []
   let allVotos = []
   let choferes = []
-  let militantes = []
 
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
@@ -138,19 +137,15 @@ async function loadAndRender(container) {
     const firebaseImport = await import('firebase/firestore')
     const fbLib = await import('../lib/firebase.js')
     
-    // Validar que los imports existen
-    if (!firebaseImport || !firebaseImport.doc) {
-      throw new Error('Firebase Firestore import inválido: ' + JSON.stringify(Object.keys(firebaseImport || {})))
-    }
-    
     // Asignar a las variables declaradas en renderDiaDAdmin
-    doc = firebaseImport.doc
-    collection = firebaseImport.collection
-    getDocs = firebaseImport.getDocs
-    onSnapshot = firebaseImport.onSnapshot
-    setDoc = firebaseImport.setDoc
-    addDoc = firebaseImport.addDoc
-    deleteDoc = firebaseImport.deleteDoc
+    const imports = firebaseImport
+    doc = imports.doc
+    collection = imports.collection
+    getDocs = imports.getDocs
+    onSnapshot = imports.onSnapshot
+    setDoc = imports.setDoc
+    addDoc = imports.addDoc
+    deleteDoc = imports.deleteDoc
     
     db = fbLib.db
     const auth = fbLib.auth
@@ -170,7 +165,7 @@ async function loadAndRender(container) {
     )
 
     const usersSnap = await getDocs(collection(db, 'users'))
-    militantes = []
+    const militantes = []
     const locales = new Set()
     usersSnap.forEach(d => {
       const data = d.data()
@@ -180,7 +175,7 @@ async function loadAndRender(container) {
     })
 
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
-    allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    const allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
     allRecords.forEach(r => { if (r.local) locales.add(r.local) })
 
     const selectLocal = document.getElementById('chofer-local')
@@ -204,7 +199,7 @@ async function loadAndRender(container) {
     onSnapshot(
       collection(db, 'dia_d_votos'),
       votosSnap => {
-        allVotos = votosSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+        const allVotos = votosSnap.docs.map(d => d.data())
 
         getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
           const totalV = votantesSnap.size
@@ -261,8 +256,7 @@ async function loadAndRender(container) {
     })
 
   } catch (err) {
-    console.error('Error en loadAndRender:', err)
-    alert('Error cargando admin: ' + err.message)
+    console.error('Error:', err)
   }
 }
 
@@ -340,7 +334,7 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
             return
           }
           const registros = porMil[uid].registros
-          const votos = allVotos.filter(v => v.militante_id === uid || registros.some(r => r.cedula === v.cedula))
+          const votos = allVotos.filter(v => v.militante_id === uid)
           mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
         } catch (err) {
           alert('Error al abrir detalle: ' + err.message)
