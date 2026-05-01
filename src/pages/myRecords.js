@@ -24,8 +24,8 @@ export async function renderMyRecords(container, user) {
 
         ${records.length > 0 ? `
           <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;align-items:center;">
-            <input id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." style="flex:1; min-width:250px; padding:10px 12px; border-radius:6px; border: 1px solid #ddd; font-size: 0.95rem; box-sizing: border-box; appearance: none; -webkit-appearance: none;" />
-            <button class="btn btn-gold" id="btn-export" style="padding: 10px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: 700;">📥 Exportar a Excel</button>
+            <input id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." style="flex:1 !important; min-width:250px !important; padding:10px 12px !important; border-radius:6px !important; border: 2px solid #ddd !important; font-size: 0.95rem !important; box-sizing: border-box !important; appearance: none !important; -webkit-appearance: none !important; background: white !important; color: #333 !important; pointer-events: auto !important;" />
+            <button class="btn btn-gold" id="btn-export" style="padding: 10px 16px !important; border: none !important; border-radius: 6px !important; cursor: pointer !important; font-weight: 700 !important; background: #d4af37 !important; color: black !important;">📥 Exportar a Excel</button>
           </div>
         ` : ''}
 
@@ -79,6 +79,12 @@ export async function renderMyRecords(container, user) {
     // Campo de búsqueda
     const filterInput = container.querySelector('#filter-inp')
     if (filterInput) {
+      // Forzar interactividad
+      filterInput.style.pointerEvents = 'auto'
+      filterInput.style.zIndex = '1000'
+      filterInput.disabled = false
+      filterInput.readOnly = false
+      
       filterInput.addEventListener('input', (e) => {
         const term = e.target.value.toLowerCase().trim()
         if (!term) {
@@ -91,6 +97,11 @@ export async function renderMyRecords(container, user) {
           )
           render(filtered)
         }
+      })
+      
+      // Prevenir que eventos se propaguen
+      filterInput.addEventListener('click', (e) => {
+        e.stopPropagation()
       })
     }
 
