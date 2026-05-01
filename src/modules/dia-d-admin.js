@@ -309,7 +309,7 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
         const nombre = btn.dataset.nombre
         const registros = porMil[uid].registros
         const votos = allVotos.filter(v => v.militante_id === uid)
-        mostrarDetalle(nombre, registros, votos, choferes, db, setDoc)
+        mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
       }
     })
   }
@@ -423,7 +423,7 @@ function renderChoferes(choferes, allRecords, allVotos, db, deleteDoc) {
   }
 }
 
-function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
+function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
   const modal = document.createElement('div')
   modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; z-index: 9999; overflow-y: auto; padding: 20px;'
 
@@ -562,11 +562,11 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
         // Guardar chofer + hora + dirección
         const votoExistente = votos.find(v => v.cedula === r.cedula)
         try {
-          const { getDoc, doc: firebaseDoc } = await import('firebase/firestore')
+          const { getDoc } = await import('firebase/firestore')
           
           if (votoExistente) {
-            // Actualizar voto existente
-            const votoDocRef = firebaseDoc(db, 'dia_d_votos', votoExistente.id || r.cedula)
+            // Actualizar voto existente - usar ID del documento
+            const votoDocRef = doc(db, 'dia_d_votos', votoExistente.id || r.cedula)
             await setDoc(votoDocRef, { 
               choferAsignado: choferNombre || null, 
               horarioBusqueda: hora || null, 
