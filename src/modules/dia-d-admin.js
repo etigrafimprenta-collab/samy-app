@@ -199,7 +199,7 @@ async function loadAndRender(container) {
     onSnapshot(
       collection(db, 'dia_d_votos'),
       votosSnap => {
-        const allVotos = votosSnap.docs.map(d => d.data())
+        allVotos = votosSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
         getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
           const totalV = votantesSnap.size
