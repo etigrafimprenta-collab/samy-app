@@ -10,6 +10,7 @@ export function renderDiaDAdmin(container) {
   let allRecords = []
   let allVotos = []
   let choferes = []
+  let militantes = []
 
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
@@ -137,15 +138,18 @@ async function loadAndRender(container) {
     const firebaseImport = await import('firebase/firestore')
     const fbLib = await import('../lib/firebase.js')
     
-    // Asignar a las variables declaradas en renderDiaDAdmin
-    const imports = firebaseImport
-    doc = imports.doc
-    collection = imports.collection
-    getDocs = imports.getDocs
-    onSnapshot = imports.onSnapshot
-    setDoc = imports.setDoc
-    addDoc = imports.addDoc
-    deleteDoc = imports.deleteDoc
+    // ASIGNAR PRIMERO - antes de usar
+    if (!firebaseImport || !firebaseImport.doc) {
+      throw new Error('Firebase Firestore import inválido')
+    }
+    
+    doc = firebaseImport.doc
+    collection = firebaseImport.collection
+    getDocs = firebaseImport.getDocs
+    onSnapshot = firebaseImport.onSnapshot
+    setDoc = firebaseImport.setDoc
+    addDoc = firebaseImport.addDoc
+    deleteDoc = firebaseImport.deleteDoc
     
     db = fbLib.db
     const auth = fbLib.auth
@@ -156,6 +160,7 @@ async function loadAndRender(container) {
       return
     }
 
+    // AHORA doc está disponible, podemos usarlo
     onSnapshot(
       doc(db, 'config', 'electionDay'),
       docSnap => {
@@ -165,7 +170,7 @@ async function loadAndRender(container) {
     )
 
     const usersSnap = await getDocs(collection(db, 'users'))
-    const militantes = []
+    militantes = []
     const locales = new Set()
     usersSnap.forEach(d => {
       const data = d.data()
@@ -175,7 +180,7 @@ async function loadAndRender(container) {
     })
 
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
-    const allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    allRecords = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
     allRecords.forEach(r => { if (r.local) locales.add(r.local) })
 
     const selectLocal = document.getElementById('chofer-local')
@@ -199,7 +204,7 @@ async function loadAndRender(container) {
     onSnapshot(
       collection(db, 'dia_d_votos'),
       votosSnap => {
-        const allVotos = votosSnap.docs.map(d => d.data())
+        allVotos = votosSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
         getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
           const totalV = votantesSnap.size
@@ -256,7 +261,8 @@ async function loadAndRender(container) {
     })
 
   } catch (err) {
-    console.error('Error:', err)
+    console.error('Error en loadAndRender:', err)
+    alert('Error cargando admin: ' + err.message)
   }
 }
 
@@ -334,7 +340,7 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
             return
           }
           const registros = porMil[uid].registros
-          const votos = allVotos.filter(v => v.militante_id === uid)
+          const votos = allVotos.filter(v => v.militante_id === uid || registros.some(r => r.cedula === v.cedula))
           mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
         } catch (err) {
           alert('Error al abrir detalle: ' + err.message)
