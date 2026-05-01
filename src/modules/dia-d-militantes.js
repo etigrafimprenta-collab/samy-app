@@ -402,8 +402,18 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
               <option value="">— Sin chofer —</option>
               ${choferesHTML}
             </select>
-            <button id="btn-nuevo-chofer" style="background: #1976d2; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-weight: 700; white-space: nowrap;">➕ Nuevo</button>
+            <button id="btn-nuevo-chofer" style="background: #1976d2; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-weight: 700; white-space: nowrap; display: block;">➕ Nuevo</button>
           </div>
+        </div>
+
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Horario de Búsqueda:</label>
+          <input id="horario-input" type="time" value="${estado.horarioBusqueda || '09:00'}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        </div>
+
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Dirección de Recogida:</label>
+          <input id="direccion-input" type="text" placeholder="Ej: Calle Principal 123" value="${estado.direccionRecogida || ''}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
         </div>
 
         <div style="display: flex; gap: 12px; margin-top: 20px;">
@@ -448,6 +458,8 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
 
   document.getElementById('btn-guardar-edicion').addEventListener('click', async () => {
     const choferSeleccionado = document.getElementById('chofer-select').value
+    const horarioBusqueda = document.getElementById('horario-input').value
+    const direccionRecogida = document.getElementById('direccion-input').value
     const btn = document.getElementById('btn-guardar-edicion')
     btn.disabled = true
     btn.textContent = 'Guardando...'
@@ -459,6 +471,8 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
         nombre: votante.nombre,
         estado: estadoSeleccionado,
         choferAsignado: choferSeleccionado || null,
+        horarioBusqueda: horarioBusqueda || null,
+        direccionRecogida: direccionRecogida || null,
         ultimoCambio: new Date(),
         voted: estadoSeleccionado === 'votó',
         timestamp: new Date()
@@ -476,9 +490,9 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
 
 function abrirModalNuevoChofer(db, setDoc, doc, onGuardar) {
   const html = `
-    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 10000; padding: 20px;">
+    <div id="overlay-nuevo-chofer" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 10000; padding: 20px;">
       <div style="background: white; border-radius: 8px; padding: 24px; max-width: 400px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
-        <h3 style="margin: 0 0 16px 0; font-family: Barlow Condensed; font-size: 1.2rem; text-transform: uppercase; color: #1976d2;">➕ AGREGAR CHOFER</h3>
+        <h3 style="margin: 0 0 16px 0; font-family: Barlow Condensed; font-size: 1.2rem; text-transform: uppercase; color: #1976d2;">➕ AGREGAR NUEVO CHOFER</h3>
         
         <div style="margin-bottom: 16px;">
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nombre del Chofer:</label>
@@ -489,6 +503,8 @@ function abrirModalNuevoChofer(db, setDoc, doc, onGuardar) {
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Teléfono <span style="color: #999;">(opcional)</span>:</label>
           <input id="input-chofer-tel" type="tel" placeholder="Ej: 981234567" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
         </div>
+
+        <div id="alert-chofer" style="margin-bottom: 12px;"></div>
 
         <div style="display: flex; gap: 12px;">
           <button id="btn-guardar-chofer" style="flex: 1; background: #2e7d32; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">✅ Guardar</button>
@@ -502,41 +518,57 @@ function abrirModalNuevoChofer(db, setDoc, doc, onGuardar) {
   modalOverlay.innerHTML = html
   document.body.appendChild(modalOverlay)
 
-  document.getElementById('btn-cancelar-chofer').addEventListener('click', () => {
+  const btnCancelar = document.getElementById('btn-cancelar-chofer')
+  const btnGuardar = document.getElementById('btn-guardar-chofer')
+  const inputNombre = document.getElementById('input-chofer-nombre')
+  const inputTel = document.getElementById('input-chofer-tel')
+  const alertDiv = document.getElementById('alert-chofer')
+
+  btnCancelar.addEventListener('click', () => {
     modalOverlay.remove()
   })
 
-  document.getElementById('btn-guardar-chofer').addEventListener('click', async () => {
-    const nombre = document.getElementById('input-chofer-nombre').value.trim()
-    const telefono = document.getElementById('input-chofer-tel').value.trim()
-    const btn = document.getElementById('btn-guardar-chofer')
+  btnGuardar.addEventListener('click', async () => {
+    const nombre = inputNombre.value.trim()
+    const telefono = inputTel.value.trim()
 
     if (!nombre) {
-      alert('Por favor ingresa el nombre del chofer')
+      alertDiv.innerHTML = '<div style="background: #ffebee; border-left: 4px solid #ff6b6b; color: #c62828; padding: 10px; border-radius: 4px; font-size: 0.85rem;">⚠️ El nombre es obligatorio</div>'
       return
     }
 
-    btn.disabled = true
-    btn.textContent = 'Guardando...'
+    btnGuardar.disabled = true
+    btnGuardar.textContent = 'Guardando...'
 
     try {
+      // Generar ID único basado en el nombre
+      const choferId = nombre.toLowerCase().replace(/\s+/g, '_').replace(/[áéíóú]/g, (char) => {
+        const map = { á: 'a', é: 'e', í: 'i', ó: 'o', ú: 'u' }
+        return map[char] || char
+      })
+
       // Guardar en Firestore
-      await setDoc(doc(db, 'choferes', nombre.toLowerCase().replace(/\s+/g, '_')), {
+      await setDoc(doc(db, 'choferes', choferId), {
         nombre: nombre,
         telefono: telefono || '',
         activo: true,
         createdAt: new Date()
       })
 
-      alert('✅ Chofer guardado correctamente')
+      // Cerrar modal y callback
       modalOverlay.remove()
-      onGuardar(nombre) // Callback para actualizar el dropdown
+      onGuardar(nombre)
+      alert('✅ Chofer "' + nombre + '" guardado correctamente')
     } catch (err) {
-      alert('❌ Error: ' + err.message)
-      btn.disabled = false
-      btn.textContent = '✅ Guardar'
+      console.error('Error:', err)
+      alertDiv.innerHTML = '<div style="background: #ffebee; border-left: 4px solid #ff6b6b; color: #c62828; padding: 10px; border-radius: 4px; font-size: 0.85rem;">❌ Error: ' + err.message + '</div>'
+      btnGuardar.disabled = false
+      btnGuardar.textContent = '✅ Guardar'
     }
   })
+
+  // Focus en input de nombre
+  inputNombre.focus()
 }
 
 function enviarWhatsApp(votante) {
