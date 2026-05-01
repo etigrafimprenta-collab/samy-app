@@ -397,10 +397,13 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
 
         <div style="margin-bottom: 16px;">
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Chofer Asignado:</label>
-          <select id="chofer-select" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
-            <option value="">— Sin chofer —</option>
-            ${choferesHTML}
-          </select>
+          <div style="display: flex; gap: 8px;">
+            <select id="chofer-select" style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+              <option value="">— Sin chofer —</option>
+              ${choferesHTML}
+            </select>
+            <button id="btn-nuevo-chofer" style="background: #1976d2; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-weight: 700; white-space: nowrap;">➕ Nuevo</button>
+          </div>
         </div>
 
         <div style="display: flex; gap: 12px; margin-top: 20px;">
@@ -431,6 +434,18 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
     modalContainer.innerHTML = ''
   })
 
+  document.getElementById('btn-nuevo-chofer').addEventListener('click', () => {
+    abrirModalNuevoChofer(db, setDoc, doc, (nuevoChofer) => {
+      // Actualizar dropdown con el nuevo chofer
+      const select = document.getElementById('chofer-select')
+      const option = document.createElement('option')
+      option.value = nuevoChofer
+      option.textContent = nuevoChofer
+      option.selected = true
+      select.appendChild(option)
+    })
+  })
+
   document.getElementById('btn-guardar-edicion').addEventListener('click', async () => {
     const choferSeleccionado = document.getElementById('chofer-select').value
     const btn = document.getElementById('btn-guardar-edicion')
@@ -451,6 +466,71 @@ function abrirModalEditar(votante, estado, user, db, setDoc, doc, choferes) {
 
       alert('✅ Cambios guardados')
       modalContainer.innerHTML = ''
+    } catch (err) {
+      alert('❌ Error: ' + err.message)
+      btn.disabled = false
+      btn.textContent = '✅ Guardar'
+    }
+  })
+}
+
+function abrirModalNuevoChofer(db, setDoc, doc, onGuardar) {
+  const html = `
+    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 10000; padding: 20px;">
+      <div style="background: white; border-radius: 8px; padding: 24px; max-width: 400px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+        <h3 style="margin: 0 0 16px 0; font-family: Barlow Condensed; font-size: 1.2rem; text-transform: uppercase; color: #1976d2;">➕ AGREGAR CHOFER</h3>
+        
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nombre del Chofer:</label>
+          <input id="input-chofer-nombre" type="text" placeholder="Ej: Juampi García" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        </div>
+
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Teléfono <span style="color: #999;">(opcional)</span>:</label>
+          <input id="input-chofer-tel" type="tel" placeholder="Ej: 981234567" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        </div>
+
+        <div style="display: flex; gap: 12px;">
+          <button id="btn-guardar-chofer" style="flex: 1; background: #2e7d32; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">✅ Guardar</button>
+          <button id="btn-cancelar-chofer" style="flex: 1; background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">❌ Cancelar</button>
+        </div>
+      </div>
+    </div>
+  `
+
+  const modalOverlay = document.createElement('div')
+  modalOverlay.innerHTML = html
+  document.body.appendChild(modalOverlay)
+
+  document.getElementById('btn-cancelar-chofer').addEventListener('click', () => {
+    modalOverlay.remove()
+  })
+
+  document.getElementById('btn-guardar-chofer').addEventListener('click', async () => {
+    const nombre = document.getElementById('input-chofer-nombre').value.trim()
+    const telefono = document.getElementById('input-chofer-tel').value.trim()
+    const btn = document.getElementById('btn-guardar-chofer')
+
+    if (!nombre) {
+      alert('Por favor ingresa el nombre del chofer')
+      return
+    }
+
+    btn.disabled = true
+    btn.textContent = 'Guardando...'
+
+    try {
+      // Guardar en Firestore
+      await setDoc(doc(db, 'choferes', nombre.toLowerCase().replace(/\s+/g, '_')), {
+        nombre: nombre,
+        telefono: telefono || '',
+        activo: true,
+        createdAt: new Date()
+      })
+
+      alert('✅ Chofer guardado correctamente')
+      modalOverlay.remove()
+      onGuardar(nombre) // Callback para actualizar el dropdown
     } catch (err) {
       alert('❌ Error: ' + err.message)
       btn.disabled = false
