@@ -334,7 +334,7 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
             return
           }
           const registros = porMil[uid].registros
-          const votos = allVotos.filter(v => v.militante_id === uid)
+          const votos = allVotos.filter(v => v.militante_id === uid || registros.some(r => r.cedula === v.cedula))
           mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
         } catch (err) {
           alert('Error al abrir detalle: ' + err.message)
