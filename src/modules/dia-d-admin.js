@@ -169,15 +169,8 @@ async function loadAndRender(container) {
       selectLocal.appendChild(opt)
     })
 
-    const choferesSnap = await getDocs(collection(db, 'choferes'))
-    let choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-
-    // Listener en tiempo real para choferes
-    onSnapshot(collection(db, 'choferes'), (choferesRealtime) => {
-      choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
-      // Actualizar tab de choferes si está visible
-      renderChoferes(choferes, db, setDoc, doc, addDoc, deleteDoc, currentUser)
-    })
+    const choferesSnap = await getDocs(collection(db, 'dia_d_choferes'))
+    const choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
     onSnapshot(
       collection(db, 'dia_d_votos'),
@@ -412,7 +405,7 @@ function renderChoferes(choferes, allRecords, allVotos, db, deleteDoc) {
       btn.onclick = async () => {
         if (confirm('Eliminar chofer?')) {
           try {
-            await deleteDoc(doc(db, 'choferes', btn.dataset.id))
+            await deleteDoc(doc(db, 'dia_d_choferes', btn.dataset.id))
             alert('Eliminado')
           } catch (err) {
             alert('Error: ' + err.message)
@@ -427,8 +420,9 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
   const modal = document.createElement('div')
   modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; z-index: 9999; overflow-y: auto; padding: 20px;'
 
-  const votados = votos.filter(v => v.voted)
-  const faltantes = registros.filter(r => !votos.some(v => v.cedula === r.cedula && v.voted))
+  const votados = votos.filter(v => v.estado === 'votó')
+  const enCamino = votos.filter(v => v.estado === 'en_camino')
+  const faltantes = registros.filter(r => !votos.some(v => v.cedula === r.cedula))
 
   let html = '<div style="background: white; border-radius: 8px; max-width: 900px; width: 100%; margin: 40px auto;">'
   html += '<div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between;">'
@@ -438,13 +432,33 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
   html += '<div style="padding: 20px; max-height: 70vh; overflow-y: auto;">'
 
   if (votados.length > 0) {
-    html += '<div style="margin-bottom: 24px;"><h3 style="background: #2e7d32; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">YA VOTARON (' + votados.length + ')</h3>'
+    html += '<div style="margin-bottom: 24px;"><h3 style="background: #2e7d32; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🟢 YA VOTARON (' + votados.length + ')</h3>'
     votados.forEach(v => {
       const r = registros.find(x => x.cedula === v.cedula)
       if (r) {
         html += '<div style="background: #e8f5e9; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #2e7d32;">'
         html += '<div style="font-weight: 600;">' + (v.nombre || r.nombre) + '</div>'
         html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + v.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + '</div>'
+        if (v.choferAsignado) {
+          html += '<div style="font-size: 0.8rem; color: #1b5e20; margin-top: 4px;">🚗 Chofer: ' + v.choferAsignado + '</div>'
+        }
+        html += '</div>'
+      }
+    })
+    html += '</div>'
+  }
+
+  if (enCamino.length > 0) {
+    html += '<div style="margin-bottom: 24px;"><h3 style="background: #ff9800; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🟡 EN CAMINO (' + enCamino.length + ') - SOLO LECTURA</h3>'
+    enCamino.forEach(v => {
+      const r = registros.find(x => x.cedula === v.cedula)
+      if (r) {
+        html += '<div style="background: #fff9e6; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #ff9800;">'
+        html += '<div style="font-weight: 600;">' + (v.nombre || r.nombre) + '</div>'
+        html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + v.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + ' | 📱 ' + (r.telefono || 'N/A') + '</div>'
+        if (v.choferAsignado) {
+          html += '<div style="font-size: 0.8rem; color: #e65100; margin-top: 4px;">🚗 Chofer: ' + v.choferAsignado + ' | ⏰ ' + (v.horarioBusqueda || 'N/A') + ' | 📍 ' + (v.direccionRecogida || 'N/A') + '</div>'
+        }
         html += '</div>'
       }
     })
@@ -452,7 +466,7 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
   }
 
   if (faltantes.length > 0) {
-    html += '<div><h3 style="background: #ff9800; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">FALTANTES (' + faltantes.length + ')</h3>'
+    html += '<div><h3 style="background: #c41e3a; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🔴 FALTANTES (' + faltantes.length + ')</h3>'
     faltantes.forEach(r => {
       const msgWA = encodeURIComponent('Buen día, ' + r.nombre + '.\nTe estamos esperando para que juntos cambiemos el destino de nuestra ciudad.\n🗳️ Votá Lista 6 – Opción 1 Samy Fidabel\n📍 Lugar: ' + (r.local || 'N/A') + '\n📋 Mesa: ' + (r.mesa || 'N/A') + '\n🔢 Orden: ' + (r.orden || 'N/A') + '\nTu voto hace la diferencia.')
       const waLink = 'https://wa.me/' + (r.telefono || '') + '?text=' + msgWA
