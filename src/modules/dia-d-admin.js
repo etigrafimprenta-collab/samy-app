@@ -135,21 +135,17 @@ function actualizarHora() {
 
 async function loadAndRender(container) {
   try {
-    const firebaseImport = await import('firebase/firestore')
+    const { doc: docFn, collection: collectionFn, getDocs: getDocsFn, onSnapshot: onSnapshotFn, setDoc: setDocFn, addDoc: addDocFn, deleteDoc: deleteDocFn } = await import('firebase/firestore')
     const fbLib = await import('../lib/firebase.js')
     
-    // ASIGNAR PRIMERO - antes de usar
-    if (!firebaseImport || !firebaseImport.doc) {
-      throw new Error('Firebase Firestore import inválido')
-    }
-    
-    doc = firebaseImport.doc
-    collection = firebaseImport.collection
-    getDocs = firebaseImport.getDocs
-    onSnapshot = firebaseImport.onSnapshot
-    setDoc = firebaseImport.setDoc
-    addDoc = firebaseImport.addDoc
-    deleteDoc = firebaseImport.deleteDoc
+    // Asignar a variables globales
+    doc = docFn
+    collection = collectionFn
+    getDocs = getDocsFn
+    onSnapshot = onSnapshotFn
+    setDoc = setDocFn
+    addDoc = addDocFn
+    deleteDoc = deleteDocFn
     
     db = fbLib.db
     const auth = fbLib.auth
@@ -160,7 +156,7 @@ async function loadAndRender(container) {
       return
     }
 
-    // AHORA doc está disponible, podemos usarlo
+    // Usar las funciones asignadas
     onSnapshot(
       doc(db, 'config', 'electionDay'),
       docSnap => {
