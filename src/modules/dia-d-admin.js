@@ -59,11 +59,6 @@ export function renderDiaDAdmin(container) {
           </div>
 
           <h3 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed'; font-size: 1.3rem; color: #2e7d32; text-transform: uppercase;">Ranking</h3>
-          
-          <div style="margin-bottom: 16px;">
-            <input type="text" id="buscar-militante" placeholder="🔍 Busca militante por nombre..." style="width: 100%; padding: 10px; border: 2px solid #2e7d32; border-radius: 4px; font-size: 0.9rem;">
-          </div>
-
           <div id="militantes-ranking" style="display: grid; gap: 12px;">
             <div style="text-align: center; padding: 40px; color: #999;">Cargando...</div>
           </div>
@@ -174,22 +169,31 @@ async function loadAndRender(container) {
       selectLocal.appendChild(opt)
     })
 
-    const choferesSnap = await getDocs(collection(db, 'dia_d_choferes'))
-    const choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    const choferesSnap = await getDocs(collection(db, 'choferes'))
+    let choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+
+    // Listener en tiempo real para choferes
+    onSnapshot(collection(db, 'choferes'), (choferesRealtime) => {
+      choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
+      // Actualizar tab de choferes si está visible
+      renderChoferes(choferes, db, setDoc, doc, addDoc, deleteDoc, currentUser)
+    })
 
     onSnapshot(
       collection(db, 'dia_d_votos'),
       votosSnap => {
         const allVotos = votosSnap.docs.map(d => d.data())
+        
+        // Contar solo votos con estado 'votó'
+        const votosActuales = allVotos.filter(v => v.estado === 'votó').length
 
         getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
           const totalV = votantesSnap.size
-          const totalVotos = votosSnap.size
-          const pct = totalV > 0 ? ((totalVotos / totalV) * 100).toFixed(2) : 0
+          const pct = totalV > 0 ? ((votosActuales / totalV) * 100).toFixed(2) : 0
 
           document.getElementById('total-militantes').textContent = militantes.length
           document.getElementById('total-votantes').textContent = totalV
-          document.getElementById('total-votos').textContent = totalVotos
+          document.getElementById('total-votos').textContent = votosActuales
           document.getElementById('total-pct').textContent = pct
 
           const porMil = {}
@@ -281,7 +285,10 @@ function updateToggle(enabled, db, setDoc, doc, uid) {
 function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc) {
   const ranking = Object.entries(porMil)
     .map(([uid, data]) => ({ uid, ...data }))
-    .sort((a, b) => b.votos - a.votos)
+    .sort((a, b) => {
+      // Ordenar por: más votos primero
+      return b.votos - a.votos
+    })
 
   let html = ''
   ranking.forEach((m, idx) => {
@@ -307,21 +314,8 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
         const nombre = btn.dataset.nombre
         const registros = porMil[uid].registros
         const votos = allVotos.filter(v => v.militante_id === uid)
-        mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
+        mostrarDetalle(nombre, registros, votos, choferes, db, setDoc)
       }
-    })
-  }
-
-  // Buscador de militante
-  const buscador = document.getElementById('buscar-militante')
-  if (buscador) {
-    buscador.addEventListener('input', (e) => {
-      const filtro = e.target.value.toLowerCase()
-      const items = document.querySelectorAll('[style*="border-left"]')
-      items.forEach(item => {
-        const nombre = item.querySelector('div').textContent.toLowerCase()
-        item.style.display = nombre.includes(filtro) ? 'block' : 'none'
-      })
     })
   }
 }
@@ -423,7 +417,7 @@ function renderChoferes(choferes, allRecords, allVotos, db, deleteDoc) {
       btn.onclick = async () => {
         if (confirm('Eliminar chofer?')) {
           try {
-            await deleteDoc(doc(db, 'dia_d_choferes', btn.dataset.id))
+            await deleteDoc(doc(db, 'choferes', btn.dataset.id))
             alert('Eliminado')
           } catch (err) {
             alert('Error: ' + err.message)
@@ -434,17 +428,12 @@ function renderChoferes(choferes, allRecords, allVotos, db, deleteDoc) {
   }
 }
 
-// ============================================
-// MOSTRAR DETALLE - VERSIÓN COMPLETA FUNCIONAL
-// ============================================
-
-function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
+function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc) {
   const modal = document.createElement('div')
   modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; z-index: 9999; overflow-y: auto; padding: 20px;'
 
-  const votados = votos.filter(v => v.estado === 'votó')
-  const enCamino = votos.filter(v => v.estado === 'en_camino')
-  const faltantes = registros.filter(r => !votos.some(v => v.cedula === r.cedula))
+  const votados = votos.filter(v => v.voted)
+  const faltantes = registros.filter(r => !votos.some(v => v.cedula === r.cedula && v.voted))
 
   let html = '<div style="background: white; border-radius: 8px; max-width: 900px; width: 100%; margin: 40px auto;">'
   html += '<div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between;">'
@@ -453,82 +442,51 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
   html += '</div>'
   html += '<div style="padding: 20px; max-height: 70vh; overflow-y: auto;">'
 
-  // SECCIÓN 1: YA VOTARON
   if (votados.length > 0) {
-    html += '<div style="margin-bottom: 24px;"><h3 style="background: #2e7d32; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🟢 YA VOTARON (' + votados.length + ')</h3>'
+    html += '<div style="margin-bottom: 24px;"><h3 style="background: #2e7d32; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">YA VOTARON (' + votados.length + ')</h3>'
     votados.forEach(v => {
       const r = registros.find(x => x.cedula === v.cedula)
       if (r) {
         html += '<div style="background: #e8f5e9; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #2e7d32;">'
         html += '<div style="font-weight: 600;">' + (v.nombre || r.nombre) + '</div>'
         html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + v.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + '</div>'
-        if (v.choferAsignado) {
-          html += '<div style="font-size: 0.8rem; color: #1b5e20; margin-top: 4px;">🚗 Chofer: ' + v.choferAsignado + '</div>'
-        }
         html += '</div>'
       }
     })
     html += '</div>'
   }
 
-  // SECCIÓN 2: EN CAMINO
-  if (enCamino.length > 0) {
-    html += '<div style="margin-bottom: 24px;"><h3 style="background: #ff9800; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🟡 EN CAMINO (' + enCamino.length + ')</h3>'
-    enCamino.forEach(v => {
-      const r = registros.find(x => x.cedula === v.cedula)
-      if (r) {
-        html += '<div style="background: #fff9e6; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #ff9800;">'
-        html += '<div style="font-weight: 600;">' + (v.nombre || r.nombre) + '</div>'
-        html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + v.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + ' | 📱 ' + (r.telefono || 'N/A') + '</div>'
-        html += '<div style="font-size: 0.8rem; color: #e65100; margin-top: 4px;">'
-        if (v.choferAsignado) html += '🚗 Chofer: ' + v.choferAsignado + ' | '
-        if (v.horarioBusqueda) html += '⏰ ' + v.horarioBusqueda + ' | '
-        if (v.direccionRecogida) html += '📍 ' + v.direccionRecogida
-        html += '</div>'
-        html += '</div>'
-      }
-    })
-    html += '</div>'
-  }
-
-  // SECCIÓN 3: FALTANTES - EDITABLE
   if (faltantes.length > 0) {
-    html += '<div><h3 style="background: #c41e3a; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">🔴 FALTANTES (' + faltantes.length + ')</h3>'
+    html += '<div><h3 style="background: #ff9800; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">FALTANTES (' + faltantes.length + ')</h3>'
     faltantes.forEach(r => {
       const msgWA = encodeURIComponent('Buen día, ' + r.nombre + '.\nTe estamos esperando para que juntos cambiemos el destino de nuestra ciudad.\n🗳️ Votá Lista 6 – Opción 1 Samy Fidabel\n📍 Lugar: ' + (r.local || 'N/A') + '\n📋 Mesa: ' + (r.mesa || 'N/A') + '\n🔢 Orden: ' + (r.orden || 'N/A') + '\nTu voto hace la diferencia.')
       const waLink = 'https://wa.me/' + (r.telefono || '') + '?text=' + msgWA
 
-      html += '<div style="background: #ffebee; padding: 12px; border-radius: 4px; margin-bottom: 12px; border-left: 4px solid #c41e3a;">'
+      html += '<div style="background: #fff9e6; padding: 12px; border-radius: 4px; margin-bottom: 12px; border-left: 4px solid #ff9800;">'
       html += '<div style="font-weight: 600; margin-bottom: 6px;">' + (r.nombre || 'N/A') + '</div>'
       html += '<div style="font-size: 0.8rem; color: #333; margin-bottom: 8px;">CI: ' + r.cedula + ' | Local: ' + (r.local || 'N/A') + ' | Mesa: ' + (r.mesa || 'N/A') + ' | 📱 ' + (r.telefono || 'Sin teléfono') + '</div>'
       
-      // Chofer dropdown
-      html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">'
-      html += '<div><label style="font-size: 0.8rem; font-weight: 600;">Chofer:</label>'
-      html += '<select class="chofer-' + r.cedula + '" data-cedula="' + r.cedula + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;">'
-      html += '<option value="">Selecciona chofer</option>'
-      choferes.forEach(c => {
-        html += '<option value="' + c.nombre + '">' + c.nombre + ' - ' + (c.telefono || 'sin tel') + '</option>'
-      })
-      html += '<option value="NUEVO">➕ Nuevo chofer</option>'
-      html += '</select></div>'
+      html += '<div style="display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 8px; align-items: center;">'
+      html += '<label style="font-weight: 600; font-size: 0.85rem;">Asignar chofer?</label>'
+      html += '<select class="chofer-selector" data-cedula="' + r.cedula + '" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem;">'
+      html += '<option value="">No</option>'
+      html += '<option value="si">Si</option>'
+      html += '</select>'
+      html += '</div>'
       
-      // Dirección
-      html += '<div><label style="font-size: 0.8rem; font-weight: 600;">Dirección:</label>'
-      html += '<input type="text" class="dir-' + r.cedula + '" data-cedula="' + r.cedula + '" placeholder="Calle y nº" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
+      html += '<div class="chofer-select-container-' + r.cedula + '" style="display: none; margin-bottom: 8px;">'
+      html += '<select class="chofer-select" data-cedula="' + r.cedula + '" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; width: 100%; margin-bottom: 8px;">'
+      html += '<option value="">Selecciona chofer</option>'
+      choferes.filter(c => c.local === r.local).forEach(c => {
+        html += '<option value="' + c.id + '">' + c.nombre + ' (' + c.telefono + ')</option>'
+      })
+      html += '</select>'
+      html += '<button class="btn-asignar-chofer" data-cedula="' + r.cedula + '" style="background: #c41e3a; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; width: 100%;">Asignar</button>'
       html += '</div>'
 
-      // Horario
-      html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">'
-      html += '<div><label style="font-size: 0.8rem; font-weight: 600;">Horario:</label>'
-      html += '<input type="time" class="hora-' + r.cedula + '" data-cedula="' + r.cedula + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
-      
-      html += '<div style="display: flex; gap: 4px; align-items: flex-end;">'
-      html += '<button class="btn-guardar-' + r.cedula + '" data-cedula="' + r.cedula + '" style="flex: 1; background: #1976d2; color: white; border: none; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: 600;">💾 Guardar</button>'
       if (r.telefono) {
-        html += '<a href="' + waLink + '" target="_blank" style="flex: 1; background: #25d366; color: white; padding: 6px; border-radius: 4px; text-decoration: none; font-size: 0.8rem; font-weight: 600; text-align: center; display: block;">💬 WA</a>'
+        html += '<a href="' + waLink + '" target="_blank" style="background: #25d366; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-size: 0.8rem; font-weight: 600; display: inline-block;">Enviar WA</a>'
       }
-      html += '</div></div>'
       
       html += '</div>'
     })
@@ -539,70 +497,44 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
   modal.innerHTML = html
   document.body.appendChild(modal)
 
-  // EVENT LISTENERS
-  faltantes.forEach(r => {
-    const choferSelect = modal.querySelector('.chofer-' + r.cedula)
-    const dirInput = modal.querySelector('.dir-' + r.cedula)
-    const horaInput = modal.querySelector('.hora-' + r.cedula)
-    const btnGuardar = modal.querySelector('.btn-guardar-' + r.cedula)
-
-    // Agregar nuevo chofer
-    if (choferSelect) {
-      choferSelect.addEventListener('change', async (e) => {
-        if (e.target.value === 'NUEVO') {
-          const nombre = prompt('Nombre del chofer:')
-          if (nombre) {
-            const tel = prompt('Teléfono:') || ''
-            const { addDoc, collection } = await import('firebase/firestore')
-            try {
-              await addDoc(collection(db, 'choferes'), {
-                nombre: nombre,
-                telefono: tel,
-                vehiculo: 'Vehículo',
-                activo: true,
-                createdAt: new Date()
-              })
-              choferSelect.innerHTML += '<option value="' + nombre + '">' + nombre + ' - ' + tel + '</option>'
-              choferSelect.value = nombre
-              alert('✅ Chofer agregado')
-            } catch (err) {
-              alert('Error: ' + err.message)
-            }
-          }
-        }
-      })
-    }
-
-    // Guardar cambios
-    if (btnGuardar) {
-      btnGuardar.addEventListener('click', async () => {
-        const chofer = choferSelect.value
-        const dir = dirInput.value
-        const hora = horaInput.value
-
-        const votoExistente = votos.find(v => v.cedula === r.cedula)
-        if (votoExistente) {
-          try {
-            await setDoc(doc(db, 'dia_d_votos', votoExistente.id), {
-              choferAsignado: chofer || null,
-              direccionRecogida: dir || null,
-              horarioBusqueda: hora || null,
-              ultimoCambio: new Date()
-            }, { merge: true })
-            alert('✅ Guardado')
-          } catch (err) {
-            alert('Error: ' + err.message)
-          }
-        }
-      })
-    }
+  document.querySelectorAll('.chofer-selector').forEach(sel => {
+    sel.addEventListener('change', (e) => {
+      const cedula = sel.dataset.cedula
+      const container = document.querySelector('.chofer-select-container-' + cedula)
+      if (e.target.value === 'si') {
+        container.style.display = 'block'
+      } else {
+        container.style.display = 'none'
+      }
+    })
   })
 
-  // Cerrar modal si clickeás fuera
-  modal.addEventListener('click', (e) => {
+  document.querySelectorAll('.btn-asignar-chofer').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const cedula = btn.dataset.cedula
+      const choferSelect = document.querySelector('.chofer-select[data-cedula="' + cedula + '"]')
+      const choferId = choferSelect.value
+
+      if (!choferId) {
+        alert('Selecciona chofer')
+        return
+      }
+
+      try {
+        const record = registros.find(r => r.cedula === cedula)
+        await setDoc(doc(db, 'savedRecords', record.id), { chofer_asignado: choferId }, { merge: true })
+        alert('Asignado')
+      } catch (err) {
+        alert('Error: ' + err.message)
+      }
+    })
+  })
+
+  modal.onclick = (e) => {
     if (e.target === modal) modal.remove()
-  })
+  }
 }
+
 function mostrarMesa(local, mesa, allRecords, allVotos) {
   const registrosMesa = allRecords.filter(r => r.local === local && r.mesa === mesa)
   
