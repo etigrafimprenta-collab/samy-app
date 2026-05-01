@@ -29,10 +29,38 @@ export async function renderMyRecords(container, user) {
   if (records.length > 0 && searchBox) {
     searchBox.innerHTML = `
       <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;align-items:center;">
-        <input id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." style="flex:1; min-width:250px; padding:10px 12px; border-radius:6px; border: 2px solid #999; font-size: 0.95rem; box-sizing: border-box; background: white;" />
+        <input id="filter-inp" type="text" placeholder="🔍 Buscar por nombre, cédula, seccional..." value="" 
+          style="
+            flex:1 !important; 
+            min-width:250px !important; 
+            padding:10px 12px !important; 
+            border-radius:6px !important; 
+            border: 2px solid #999 !important; 
+            font-size: 0.95rem !important; 
+            box-sizing: border-box !important; 
+            background: white !important; 
+            color: #333 !important;
+            -webkit-text-fill-color: #333 !important;
+            opacity: 1 !important;
+          " />
         <button id="btn-export" style="padding: 10px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: 700; background: #d4af37; color: black;">📥 Exportar a Excel</button>
       </div>
     `
+
+    // Agregar CSS para placeholder
+    const style = document.createElement('style')
+    style.textContent = `
+      #filter-inp::placeholder {
+        color: #999 !important;
+        opacity: 1 !important;
+        -webkit-text-fill-color: #999 !important;
+      }
+      #filter-inp {
+        color: #333 !important;
+        -webkit-text-fill-color: #333 !important;
+      }
+    `
+    document.head.appendChild(style)
 
     // EVENT LISTENERS DEL INPUT
     const filterInput = container.querySelector('#filter-inp')
@@ -41,6 +69,7 @@ export async function renderMyRecords(container, user) {
     if (filterInput) {
       filterInput.addEventListener('input', (e) => {
         const term = e.target.value.toLowerCase().trim()
+        console.log('Búsqueda escribida:', term, 'Valor actual:', e.target.value)
         if (!term) {
           renderRecords(records)
         } else {
