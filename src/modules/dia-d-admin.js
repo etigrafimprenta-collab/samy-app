@@ -138,15 +138,19 @@ async function loadAndRender(container) {
     const firebaseImport = await import('firebase/firestore')
     const fbLib = await import('../lib/firebase.js')
     
+    // Validar que los imports existen
+    if (!firebaseImport || !firebaseImport.doc) {
+      throw new Error('Firebase Firestore import inválido: ' + JSON.stringify(Object.keys(firebaseImport || {})))
+    }
+    
     // Asignar a las variables declaradas en renderDiaDAdmin
-    const imports = firebaseImport
-    doc = imports.doc
-    collection = imports.collection
-    getDocs = imports.getDocs
-    onSnapshot = imports.onSnapshot
-    setDoc = imports.setDoc
-    addDoc = imports.addDoc
-    deleteDoc = imports.deleteDoc
+    doc = firebaseImport.doc
+    collection = firebaseImport.collection
+    getDocs = firebaseImport.getDocs
+    onSnapshot = firebaseImport.onSnapshot
+    setDoc = firebaseImport.setDoc
+    addDoc = firebaseImport.addDoc
+    deleteDoc = firebaseImport.deleteDoc
     
     db = fbLib.db
     const auth = fbLib.auth
