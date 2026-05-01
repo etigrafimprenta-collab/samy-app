@@ -497,12 +497,18 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
       html += '<option value="NUEVO">➕ Nuevo chofer</option>'
       html += '</select></div>'
       
+      // Precargar chofer si existe
+      const votoExistente = votos.find(v => v.cedula === r.cedula)
+      const choferGuardado = votoExistente?.choferAsignado || ''
+      const horaGuardada = votoExistente?.horarioBusqueda || ''
+      const dirGuardada = votoExistente?.direccionRecogida || ''
+      
       html += '<div><label style="font-size: 0.8rem; font-weight: 600;">⏰ Horario:</label>'
-      html += '<input type="time" class="hora-' + r.cedula + '" data-cedula="' + r.cedula + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
+      html += '<input type="time" class="hora-' + r.cedula + '" data-cedula="' + r.cedula + '" value="' + horaGuardada + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
       html += '</div>'
       
       html += '<div style="margin-bottom: 8px;"><label style="font-size: 0.8rem; font-weight: 600;">📍 Dirección de recogida:</label>'
-      html += '<input type="text" class="dir-' + r.cedula + '" data-cedula="' + r.cedula + '" placeholder="Calle y nº" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
+      html += '<input type="text" class="dir-' + r.cedula + '" data-cedula="' + r.cedula + '" placeholder="Calle y nº" value="' + dirGuardada + '" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem;"></div>'
       
       html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">'
       html += '<button class="btn-guardar-' + r.cedula + '" data-cedula="' + r.cedula + '" style="background: #1976d2; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: 600;">💾 Guardar</button>'
@@ -519,6 +525,17 @@ function mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc) {
   html += '</div></div>'
   modal.innerHTML = html
   document.body.appendChild(modal)
+
+  // Precargar valores en dropdowns después de crear el modal
+  faltantes.forEach(r => {
+    const votoExistente = votos.find(v => v.cedula === r.cedula)
+    if (votoExistente && votoExistente.choferAsignado) {
+      const choferSelect = modal.querySelector('.chofer-select-' + r.cedula)
+      if (choferSelect) {
+        choferSelect.value = votoExistente.choferAsignado
+      }
+    }
+  })
 
   // Event listeners para botones Guardar
   faltantes.forEach(r => {
