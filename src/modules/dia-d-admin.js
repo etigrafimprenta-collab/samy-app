@@ -305,11 +305,24 @@ function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDo
     el.innerHTML = html
     document.querySelectorAll('.btn-detalle').forEach(btn => {
       btn.onclick = () => {
-        const uid = btn.dataset.uid
-        const nombre = btn.dataset.nombre
-        const registros = porMil[uid].registros
-        const votos = allVotos.filter(v => v.militante_id === uid)
-        mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
+        try {
+          const uid = btn.dataset.uid
+          const nombre = btn.dataset.nombre
+          if (!uid || !nombre) {
+            alert('Error: UID o nombre no disponible')
+            return
+          }
+          if (!porMil[uid]) {
+            alert('Error: Militante no encontrado en ranking')
+            return
+          }
+          const registros = porMil[uid].registros
+          const votos = allVotos.filter(v => v.militante_id === uid)
+          mostrarDetalle(nombre, registros, votos, choferes, db, setDoc, doc)
+        } catch (err) {
+          alert('Error al abrir detalle: ' + err.message)
+          console.error(err)
+        }
       }
     })
   }
