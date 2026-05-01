@@ -204,7 +204,7 @@ async function loadAndRender(container) {
           })
 
           allVotos.forEach(v => {
-            if (porMil[v.militante_id]) porMil[v.militante_id].votos++
+            if (porMil[v.militante_id] && v.estado === 'votó') porMil[v.militante_id].votos++
           })
 
           renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc)
