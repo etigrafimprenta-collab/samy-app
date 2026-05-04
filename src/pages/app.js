@@ -5,10 +5,12 @@ import { renderMyRecords } from './myRecords.js'
 import { renderAdmin } from './admin.js'
 import { renderDiaD } from '../modules/dia-d-militantes.js'
 import { renderDiaDAdmin } from '../modules/dia-d-admin.js'
+import { renderDiaDControl } from '../modules/dia-d-control.js'
 
 export function renderApp(root, user, profile) {
   let currentPage = 'search'
   const isAdmin = profile?.role === 'admin'
+  const isControl = profile?.role === 'control'
 
   function render() {
     const installBtn = createInstallButton()
@@ -32,6 +34,7 @@ export function renderApp(root, user, profile) {
             <button class="btn-nav" data-page="records" style="padding: 8px 12px; border: 2px solid ${currentPage === 'records' ? '#ffd700' : 'rgba(255,255,255,0.5)'}; background: ${currentPage === 'records' ? '#ffd700' : 'transparent'}; color: ${currentPage === 'records' ? '#8b1428' : '#fff'}; border-radius: 6px; font-weight: 600; font-size: 0.8rem; cursor: pointer; flex: 1; min-width: 80px;">Registros</button>
             <button class="btn-nav" data-page="dia-d" style="padding: 8px 12px; border: 2px solid ${currentPage === 'dia-d' ? '#ffd700' : 'rgba(255,255,255,0.5)'}; background: ${currentPage === 'dia-d' ? '#ffd700' : 'transparent'}; color: ${currentPage === 'dia-d' ? '#8b1428' : '#fff'}; border-radius: 6px; font-weight: 600; font-size: 0.8rem; cursor: pointer; flex: 1; min-width: 80px;">Dia D</button>
             ${isAdmin ? '<button class="btn-nav" data-page="admin" style="padding: 8px 12px; border: 2px solid ' + (currentPage === 'admin' ? '#ffd700' : 'rgba(255,255,255,0.5)') + '; background: ' + (currentPage === 'admin' ? '#ffd700' : 'transparent') + '; color: ' + (currentPage === 'admin' ? '#8b1428' : '#fff') + '; border-radius: 6px; font-weight: 600; font-size: 0.8rem; cursor: pointer; flex: 1; min-width: 70px;">Admin</button>' : ''}
+            ${isControl ? '<button class="btn-nav" data-page="dia-d-control" style="padding: 8px 12px; border: 2px solid ' + (currentPage === 'dia-d-control' ? '#ffd700' : 'rgba(255,255,255,0.5)') + '; background: ' + (currentPage === 'dia-d-control' ? '#ffd700' : 'transparent') + '; color: ' + (currentPage === 'dia-d-control' ? '#8b1428' : '#fff') + '; border-radius: 6px; font-weight: 600; font-size: 0.8rem; cursor: pointer; flex: 1; min-width: 90px;">Control</button>' : ''}
             <button id="btn-logout" style="padding: 8px 12px; background: rgba(255,255,255,0.2); color: #fff; border: 2px solid rgba(255,255,255,0.3); border-radius: 6px; font-weight: 600; font-size: 0.8rem; cursor: pointer; min-width: 60px;">Salir</button>
           </div>
         </div>
@@ -62,6 +65,7 @@ export function renderApp(root, user, profile) {
       if (isAdmin) renderDiaDAdmin(content)
       else renderDiaD(content, user)
     }
+    else if (currentPage === 'dia-d-control' && isControl) renderDiaDControl(content)
     else if (currentPage === 'admin' && isAdmin) renderAdmin(content)
   }
 

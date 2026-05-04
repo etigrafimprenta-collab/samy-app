@@ -3,15 +3,21 @@
  */
 
 import { renderMyRecords } from './myRecords.js'
+import { renderDiaDAdmin } from '../modules/dia-d-admin.js'
+import { renderDiaDControl } from '../modules/dia-d-control.js'
 
 export function renderAdmin(content) {
   let currentView = 'resumen'
 
   function render() {
     if (currentView === 'resumen') {
-      renderResumen(content, switchToAuditoria)
+      renderResumen(content, switchToAuditoria, switchToDiaDAdmin, switchToDiaDControl)
     } else if (currentView === 'auditoria') {
       renderAuditoria(content, switchToResumen)
+    } else if (currentView === 'dia-d-admin') {
+      renderDiaDAdmin(content)
+    } else if (currentView === 'dia-d-control') {
+      renderDiaDControl(content)
     }
   }
 
@@ -25,16 +31,32 @@ export function renderAdmin(content) {
     render()
   }
 
+  function switchToDiaDAdmin() {
+    currentView = 'dia-d-admin'
+    render()
+  }
+
+  function switchToDiaDControl() {
+    currentView = 'dia-d-control'
+    render()
+  }
+
   render()
 }
 
-function renderResumen(container, onAuditoria) {
+function renderResumen(container, onAuditoria, onDiaDAdmin, onDiaDControl) {
   container.innerHTML = `
     <div style="display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; margin-bottom: 24px; align-items: start;">
       <div>
         <h2 style="margin: 0 0 12px 0; font-family: 'Barlow Condensed'; font-size: 1.5rem; text-transform: uppercase;">📊 Resumen</h2>
         <p style="margin: 0; color: #666; font-size: 0.9rem;">Panel de control administrativo</p>
       </div>
+      <button id="btn-dia-d-admin" style="background: #c41e3a; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700; height: fit-content; white-space: nowrap;">
+        🗳️ DÍA D ADMIN
+      </button>
+      <button id="btn-dia-d-control" style="background: #c41e3a; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700; height: fit-content; white-space: nowrap;">
+        🎮 DÍA D CONTROL
+      </button>
       <button id="btn-exportar" style="background: #1976d2; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700; height: fit-content; white-space: nowrap;">
         📥 EXPORTAR
       </button>
@@ -92,6 +114,8 @@ function renderResumen(container, onAuditoria) {
   `
 
   // Event listeners
+  document.getElementById('btn-dia-d-admin').addEventListener('click', onDiaDAdmin)
+  document.getElementById('btn-dia-d-control').addEventListener('click', onDiaDControl)
   document.getElementById('btn-exportar').addEventListener('click', () => mostrarPanelExportacion(container))
   document.getElementById('btn-usuarios').addEventListener('click', () => mostrarUsuarios(container))
   document.getElementById('btn-auditoria').addEventListener('click', onAuditoria)
