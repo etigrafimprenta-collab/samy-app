@@ -1,6 +1,6 @@
 /**
- * MÓDULO: DÍA D - PANEL ADMIN V3
- * Toggle Día D | Estadísticas | Ranking | WhatsApp | Choferes
+ * MÓDULO: DÍA D - PANEL ADMIN V3 - FIXED
+ * Toggle Día D | Estadísticas | Ranking | Local | Por Mesa | Choferes
  */
 
 export function renderDiaDAdmin(container) {
@@ -30,10 +30,11 @@ export function renderDiaDAdmin(container) {
 
       <!-- TABS -->
       <div style="background: white; border-radius: 8px; overflow: hidden; border: 2px solid #1976d2;">
-        <div style="display: flex; background: #f5f5f5; border-bottom: 2px solid #1976d2;">
-          <button id="tab-global" style="flex: 1; padding: 16px; background: #1976d2; color: white; border: none; cursor: pointer; font-weight: 700;">Global</button>
-          <button id="tab-locales" style="flex: 1; padding: 16px; background: #f5f5f5; color: #333; border: none; cursor: pointer; font-weight: 700;">Local</button>
-          <button id="tab-choferes" style="flex: 1; padding: 16px; background: #f5f5f5; color: #333; border: none; cursor: pointer; font-weight: 700;">Choferes</button>
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); background: #f5f5f5; border-bottom: 2px solid #1976d2;">
+          <button id="tab-global" style="padding: 16px; background: #1976d2; color: white; border: none; cursor: pointer; font-weight: 700;">Global</button>
+          <button id="tab-locales" style="padding: 16px; background: #f5f5f5; color: #333; border: none; cursor: pointer; font-weight: 700;">Local</button>
+          <button id="tab-mesas" style="padding: 16px; background: #f5f5f5; color: #333; border: none; cursor: pointer; font-weight: 700;">🎯 Por Mesa</button>
+          <button id="tab-choferes" style="padding: 16px; background: #f5f5f5; color: #333; border: none; cursor: pointer; font-weight: 700;">Choferes</button>
         </div>
 
         <!-- TAB GLOBAL -->
@@ -72,6 +73,51 @@ export function renderDiaDAdmin(container) {
           </div>
         </div>
 
+        <!-- TAB MESAS -->
+        <div id="content-mesas" style="padding: 24px; display: none;">
+          <h3 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; font-size: 1.3rem; color: #c41e3a; text-transform: uppercase;">🎯 Monitoreo Por Mesa</h3>
+          
+          <div style="background: #f9f9f9; border: 2px dashed #c41e3a; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+            <h4 style="margin: 0 0 12px 0;">Seleccionar Mesa</h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
+              <select id="mesa-seccional" style="padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-weight: 600;">
+                <option value="">Seccional</option>
+                <option value="357">357 - ESC.GRAD. N° 24</option>
+              </select>
+              <select id="mesa-numero" style="padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-weight: 600;">
+                <option value="">Mesa (1-43)</option>
+              </select>
+              <button id="btn-cargar-mesa" style="background: #c41e3a; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; font-weight: 700;">📊 Cargar Mesa</button>
+            </div>
+          </div>
+
+          <div id="mesa-stats" style="display: none;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px;">
+              <div style="background: #e3f2fd; border-radius: 8px; padding: 16px; text-align: center;">
+                <div id="mesa-total" style="font-size: 1.8rem; font-weight: 700; color: #1565c0;">0</div>
+                <div style="font-size: 0.8rem; color: #0d47a1; font-weight: 600;">TOTAL VOTANTES</div>
+              </div>
+              <div style="background: #fff3e0; border-radius: 8px; padding: 16px; text-align: center;">
+                <div id="mesa-nuestros" style="font-size: 1.8rem; font-weight: 700; color: #e65100;">0</div>
+                <div style="font-size: 0.8rem; color: #bf360c; font-weight: 600;">🔴 NUESTROS</div>
+              </div>
+              <div style="background: #e8f5e9; border-radius: 8px; padding: 16px; text-align: center;">
+                <div id="mesa-votaron" style="font-size: 1.8rem; font-weight: 700; color: #2e7d32;">0</div>
+                <div style="font-size: 0.8rem; color: #1b5e20; font-weight: 600;">✅ VOTARON</div>
+              </div>
+            </div>
+
+            <h4 style="margin: 0 0 12px 0; font-family: 'Barlow Condensed'; color: #c41e3a;">Votantes de la Mesa</h4>
+            <div id="mesa-votantes-list" style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 12px;">
+              <div style="text-align: center; color: #999;">Cargando...</div>
+            </div>
+          </div>
+
+          <div id="mesa-empty" style="text-align: center; padding: 40px; color: #999;">
+            Selecciona una mesa para ver estadísticas
+          </div>
+        </div>
+
         <!-- TAB CHOFERES -->
         <div id="content-choferes" style="padding: 24px; display: none;">
           <h3 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed'; font-size: 1.3rem; color: #c41e3a; text-transform: uppercase;">Choferes</h3>
@@ -103,18 +149,22 @@ export function renderDiaDAdmin(container) {
   const switchTab = (tab) => {
     document.getElementById('content-global').style.display = tab === 'global' ? 'block' : 'none'
     document.getElementById('content-locales').style.display = tab === 'locales' ? 'block' : 'none'
+    document.getElementById('content-mesas').style.display = tab === 'mesas' ? 'block' : 'none'
     document.getElementById('content-choferes').style.display = tab === 'choferes' ? 'block' : 'none'
     
     document.getElementById('tab-global').style.background = tab === 'global' ? '#1976d2' : '#f5f5f5'
     document.getElementById('tab-global').style.color = tab === 'global' ? 'white' : '#333'
     document.getElementById('tab-locales').style.background = tab === 'locales' ? '#1976d2' : '#f5f5f5'
     document.getElementById('tab-locales').style.color = tab === 'locales' ? 'white' : '#333'
+    document.getElementById('tab-mesas').style.background = tab === 'mesas' ? '#1976d2' : '#f5f5f5'
+    document.getElementById('tab-mesas').style.color = tab === 'mesas' ? 'white' : '#333'
     document.getElementById('tab-choferes').style.background = tab === 'choferes' ? '#c41e3a' : '#f5f5f5'
     document.getElementById('tab-choferes').style.color = tab === 'choferes' ? 'white' : '#333'
   }
 
   document.getElementById('tab-global').addEventListener('click', () => switchTab('global'))
   document.getElementById('tab-locales').addEventListener('click', () => switchTab('locales'))
+  document.getElementById('tab-mesas').addEventListener('click', () => switchTab('mesas'))
   document.getElementById('tab-choferes').addEventListener('click', () => switchTab('choferes'))
 
   loadAndRender(container)
@@ -162,21 +212,98 @@ async function loadAndRender(container) {
     allRecords.forEach(r => { if (r.local) locales.add(r.local) })
 
     const selectLocal = document.getElementById('chofer-local')
-    locales.forEach(local => {
-      const opt = document.createElement('option')
-      opt.value = local
-      opt.textContent = local
-      selectLocal.appendChild(opt)
-    })
+    if (selectLocal) {
+      locales.forEach(local => {
+        const opt = document.createElement('option')
+        opt.value = local
+        opt.textContent = local
+        selectLocal.appendChild(opt)
+      })
+    }
+
+    // Generar opciones de mesas 1-43
+    const mesasSelect = document.getElementById('mesa-numero')
+    if (mesasSelect) {
+      for (let i = 1; i <= 43; i++) {
+        const opt = document.createElement('option')
+        opt.value = i
+        opt.textContent = `Mesa ${i}`
+        mesasSelect.appendChild(opt)
+      }
+    }
 
     const choferesSnap = await getDocs(collection(db, 'choferes'))
     let choferes = choferesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
+    // Event listener para cargar mesa
+    const btnCargarMesa = document.getElementById('btn-cargar-mesa')
+    if (btnCargarMesa) {
+      btnCargarMesa.addEventListener('click', async () => {
+        const seccional = document.getElementById('mesa-seccional').value
+        const mesa = document.getElementById('mesa-numero').value
+
+        if (!seccional || !mesa) {
+          alert('Selecciona seccional y mesa')
+          return
+        }
+
+        try {
+          const votantesSnap = await getDocs(collection(db, 'voters'))
+          const votantes = votantesSnap.docs
+            .map(d => d.data())
+            .filter(v => v.seccional === seccional && v.mesa === String(mesa))
+
+          const nuestrosSnap = await getDocs(collection(db, 'savedRecords'))
+          const nuestros = new Set()
+          nuestrosSnap.forEach(d => {
+            const data = d.data()
+            if (data.seccional === seccional && data.mesa === String(mesa)) {
+              nuestros.add(data.cedula)
+            }
+          })
+
+          const votosSnap = await getDocs(collection(db, 'mesa_votacion2025'))
+          const votaron = new Set()
+          votosSnap.forEach(d => {
+            const data = d.data()
+            if (data.seccional === seccional && data.mesa === String(mesa)) {
+              votaron.add(data.cedula)
+            }
+          })
+
+          document.getElementById('mesa-total').textContent = votantes.length
+          document.getElementById('mesa-nuestros').textContent = nuestros.size
+          document.getElementById('mesa-votaron').textContent = votaron.size
+
+          const votantesHtml = votantes.map(v => {
+            const esNuestro = nuestros.has(v.cedula)
+            const yaVoto = votaron.has(v.cedula)
+            return `
+              <div style="padding: 8px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; ${esNuestro ? 'background: #fff9c4;' : ''} ${yaVoto ? 'opacity: 0.6;' : ''}">
+                <div style="flex: 1;">
+                  <div style="font-weight: 600; font-size: 0.9rem;">${v.nombre || 'N/A'}</div>
+                  <div style="font-size: 0.8rem; color: #666;">CI ${v.cedula} · Orden ${v.orden || 'N/A'}</div>
+                </div>
+                <div style="font-size: 0.8rem; font-weight: 600;">
+                  ${esNuestro ? '🔴' : ''} ${yaVoto ? '✅ Votó' : '⏳'}
+                </div>
+              </div>
+            `
+          }).join('')
+
+          document.getElementById('mesa-votantes-list').innerHTML = votantesHtml || '<div style="text-align: center; color: #999;">Sin votantes</div>'
+          document.getElementById('mesa-stats').style.display = 'block'
+          document.getElementById('mesa-empty').style.display = 'none'
+        } catch (err) {
+          console.error('Error:', err)
+          alert('Error: ' + err.message)
+        }
+      })
+    }
+
     // Listener en tiempo real para choferes
     onSnapshot(collection(db, 'choferes'), (choferesRealtime) => {
       choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
-      // Actualizar tab de choferes si está visible
-      renderChoferes(choferes, db, setDoc, doc, addDoc, deleteDoc, currentUser)
     })
 
     onSnapshot(
@@ -207,7 +334,7 @@ async function loadAndRender(container) {
             if (porMil[v.militante_id] && v.estado === 'votó') porMil[v.militante_id].votos++
           })
 
-          renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc)
+          renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc)
           renderLocales(allRecords, allVotos)
           renderChoferes(choferes, allRecords, allVotos, db, deleteDoc)
         })
@@ -280,7 +407,7 @@ function updateToggle(enabled, db, setDoc, doc, uid) {
   }
 }
 
-function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc, addDoc) {
+function renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc) {
   const ranking = Object.entries(porMil)
     .map(([uid, data]) => ({ uid, ...data }))
     .sort((a, b) => b.votos - a.votos)
