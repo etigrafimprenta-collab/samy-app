@@ -54,7 +54,7 @@ async function init() {
       if (window.location.pathname === '/mesario' || window.location.hash.includes('mesario')) {
         renderMesarioLogin(root, () => init())
       } else {
-       //  renderLogin(root, () => {})
+       renderLogin(root, () => {})
       }
     }
   })

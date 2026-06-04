@@ -25,12 +25,12 @@ import {
 } from 'firebase/firestore'
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
+  apiKey: "AIzaSyD3kNTmqRpTqXBjCJI0yDwhcGY543bPBbI",
+  authDomain: "samy-fidabel.firebaseapp.com",
+  projectId: "samy-fidabel",
+  storageBucket: "samy-fidabel.firebasestorage.app",
+  messagingSenderId: "184842107847",
+  appId: "1:184842107847:web:542c1fe9671e551bbff7e2"
 }
 
 const app = initializeApp(firebaseConfig)
