@@ -1,0 +1,34 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "voters",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cedula", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "voters",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "nombre_upper", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

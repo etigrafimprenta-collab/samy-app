@@ -1,0 +1,361 @@
+import { initializeApp } from 'firebase/app'
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from 'firebase/auth'
+import {
+  getFirestore,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  addDoc,
+  query,
+  where,
+  limit,
+  deleteDoc,
+  serverTimestamp,
+  writeBatch,
+  onSnapshot
+} from 'firebase/firestore'
+
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
+}
+
+const app = initializeApp(firebaseConfig)
+export const auth = getAuth(app)
+export const db = getFirestore(app)
+
+export const loginUser = (email, password) =>
+  signInWithEmailAndPassword(auth, email, password)
+
+export const registerUser = (email, password) =>
+  createUserWithEmailAndPassword(auth, email, password)
+
+export const logoutUser = () => signOut(auth)
+
+export const onAuthChange = (cb) => onAuthStateChanged(auth, cb)
+
+export const getUserProfile = async (uid) => {
+  const snap = await getDoc(doc(db, 'users', uid))
+  return snap.exists() ? snap.data() : null
+}
+
+export const createUserProfile = async (uid, data) => {
+  await setDoc(doc(db, 'users', uid), {
+    ...data,
+    role: 'user',
+    createdAt: serverTimestamp()
+  }, { merge: true })
+}
+
+export const searchByCedula = async (cedula) => {
+  const q = query(
+    collection(db, 'voters'),
+    where('cedula', '==', cedula.trim()),
+    limit(1)
+  )
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export const searchByName = async (termino) => {
+  const upper = termino.trim().toUpperCase()
+  const q = query(
+    collection(db, 'voters'),
+    where('nombre_upper', '>=', upper),
+    where('nombre_upper', '<=', upper + '\uf8ff'),
+    limit(50)
+  )
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export const saveRecord = async (uid, voter, telefono = '', nota = '', transporte = '') => {
+  await addDoc(collection(db, 'savedRecords'), {
+    uid,
+    cedula: voter.cedula,
+    nombre: voter.nombre,
+    direccion: voter.direccion,
+    seccional: voter.seccional,
+    local: voter.local || '',
+    mesa: voter.mesa || '',
+    orden: voter.orden || '',
+    telefono: telefono || '',
+    nota: nota || '',
+    transporte: transporte || 'No especificado',
+    savedAt: serverTimestamp()
+  })
+}
+
+export const getUserRecords = async (uid) => {
+  const q = query(
+    collection(db, 'savedRecords'),
+    where('uid', '==', uid)
+  )
+  const snap = await getDocs(q)
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => {
+      const dateA = a.savedAt?.toDate?.() || new Date(0)
+      const dateB = b.savedAt?.toDate?.() || new Date(0)
+      return dateB - dateA
+    })
+}
+
+export const deleteRecord = async (id) => {
+  await deleteDoc(doc(db, 'savedRecords', id))
+}
+
+export const getAllRecords = async () => {
+  const snap = await getDocs(collection(db, 'savedRecords'))
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => {
+      const dateA = a.savedAt?.toDate?.() || new Date(0)
+      const dateB = b.savedAt?.toDate?.() || new Date(0)
+      return dateB - dateA
+    })
+}
+
+export const getAllUsers = async () => {
+  const snap = await getDocs(collection(db, 'users'))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export const setUserRole = async (uid, role) => {
+  await setDoc(doc(db, 'users', uid), { role }, { merge: true })
+}
+
+export const getExistingCedulas = async () => {
+  const snap = await getDocs(collection(db, 'voters'))
+  return new Set(snap.docs.map(d => d.data().cedula))
+}
+
+export const importVotersBatch = async (rows, onProgress) => {
+  const BATCH_SIZE = 400
+  const stats = {
+    added: 0,
+    duplicates: 0,
+    errors: 0,
+    total: rows.length,
+    duplicateList: []
+  }
+
+  const existingCedulas = await getExistingCedulas()
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = writeBatch(db)
+    const chunk = rows.slice(i, i + BATCH_SIZE)
+    
+    chunk.forEach(row => {
+      const cedula = String(row['Cédula'] || '').replace('.0', '').trim()
+      
+      if (existingCedulas.has(cedula)) {
+        stats.duplicates++
+        stats.duplicateList.push(cedula)
+        return
+      }
+
+      const ref = doc(collection(db, 'voters'))
+      const nombre = String(row['Apellidos y Nombres'] || '').trim()
+      
+      batch.set(ref, {
+        cedula,
+        nombre,
+        nombre_upper: nombre.toUpperCase(),
+        direccion: String(row['Dirección'] || '').trim(),
+        nacimiento: String(row['F. Nacimiento'] || '').trim(),
+        afiliacion: String(row['F. Afiliación'] || '').trim(),
+        seccional: String(row['Seccional'] || '').replace('.0', '').trim(),
+        local: String(row['Local de Votacion'] || '').trim(),
+        mesa: String(row['Mesa'] || '').replace('.0', '').trim(),
+        orden: String(row['Orden'] || '').replace('.0', '').trim()
+      })
+      
+      stats.added++
+      existingCedulas.add(cedula)
+    })
+
+    try {
+      await batch.commit()
+    } catch (err) {
+      stats.errors++
+    }
+
+    if (onProgress) {
+      onProgress(stats.added, stats.duplicates, stats.total)
+    }
+  }
+
+  return stats
+}
+
+export async function createUserFromAdmin(email, password, userData) {
+  try {
+    const { httpsCallable, getFunctions } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js')
+    const functions = getFunctions(app)
+    const crearNuevoUsuario = httpsCallable(functions, 'crearNuevoUsuario')
+    
+    const result = await crearNuevoUsuario({
+      nombre: userData.displayName || '',
+      email: email,
+      password: password,
+      rol: userData.role || 'user'
+    })
+    
+    return result.data.uid
+  } catch (err) {
+    throw err
+  }
+}
+
+export const onElectionDayChange = (callback) => {
+  return onSnapshot(
+    doc(db, 'config', 'electionDay'),
+    docSnap => callback(docSnap.exists() ? docSnap.data().enabled : false),
+    err => console.error('❌ Error escuchando Día D:', err)
+  )
+}
+
+export const setElectionDayEnabled = async (enabled, uid) => {
+  await setDoc(doc(db, 'config', 'electionDay'), {
+    enabled,
+    lastUpdated: serverTimestamp(),
+    toggledBy: uid
+  }, { merge: true })
+}
+
+export const saveElectionVote = async (uid, cedula, nombre) => {
+  const configSnap = await getDoc(doc(db, 'config', 'electionDay'))
+  if (!configSnap.exists() || !configSnap.data().enabled) {
+    throw new Error('Día D no está habilitado')
+  }
+  await setDoc(doc(db, 'dia_d_votos', uid + '_' + cedula), {
+    militante_uid: uid,
+    cedula,
+    nombre,
+    voted: true,
+    votedAt: serverTimestamp()
+  }, { merge: true })
+}
+// ===== EDITAR REGISTRO EXISTENTE =====
+// Agregar esto al FINAL de firebase.js
+
+export const updateRecord = async (id, updates) => {
+  const { updateDoc } = await import('firebase/firestore')
+  await updateDoc(doc(db, 'savedRecords', id), {
+    ...updates,
+    updatedAt: serverTimestamp()
+  })
+}
+// ============================================================
+// FUNCIONES CHOFER
+// ============================================================
+
+export async function createChofer(data) {
+  return addDoc(collection(db, 'campaignDrivers2025'), {
+    ...data,
+    votantesAsignados: data.votantesAsignados || 0,
+    votantes: data.votantes || [],
+    createdAt: serverTimestamp()
+  })
+}
+
+export async function getChoferes() {
+  const querySnapshot = await getDocs(collection(db, 'campaignDrivers2025'))
+  const choferes = []
+
+  querySnapshot.forEach(document => {
+    choferes.push({
+      id: document.id,
+      ...document.data()
+    })
+  })
+
+  return choferes.sort((a, b) =>
+    String(a.nombre || '').localeCompare(String(b.nombre || ''))
+  )
+}
+
+export async function updateChofer(id, data) {
+  return updateDoc(doc(db, 'campaignDrivers2025', id), {
+    ...data,
+    updatedAt: serverTimestamp()
+  })
+}
+
+export async function deleteChofer(id) {
+  return deleteDoc(doc(db, 'campaignDrivers2025', id))
+}
+
+export async function getVotantesPorSeccional(seccional) {
+  const q = query(
+    collection(db, 'savedRecords'),
+    where('seccional', '==', seccional)
+  )
+
+  const querySnapshot = await getDocs(q)
+  const votantes = []
+
+  querySnapshot.forEach(document => {
+    const data = document.data()
+    votantes.push({
+      id: document.id,
+      cedula: data.cedula || '',
+      nombre: data.nombre || '',
+      celular: data.telefono || '',
+      local: data.local || '',
+      seccional: data.seccional || ''
+    })
+  })
+
+  return votantes.sort((a, b) =>
+    String(a.nombre || '').localeCompare(String(b.nombre || ''))
+  )
+}
+
+export async function assignVotantesToChofer(choferId, votantes) {
+  return updateDoc(doc(db, 'campaignDrivers2025', choferId), {
+    votantes: votantes || [],
+    votantesAsignados: votantes?.length || 0,
+    updatedAt: serverTimestamp()
+  })
+}
+
+export async function getChofersVotantes(choferId) {
+  const docSnapshot = await getDoc(doc(db, 'campaignDrivers2025', choferId))
+
+  if (docSnapshot.exists()) {
+    return docSnapshot.data().votantes || []
+  }
+
+  return []
+}
+
+export async function getChofersVotantesByUser(uid) {
+  const q = query(
+    collection(db, 'campaignDrivers2025'),
+    where('usuarioAsignado', '==', uid)
+  )
+
+  const querySnapshot = await getDocs(q)
+
+  if (querySnapshot.empty) return null
+
+  const document = querySnapshot.docs[0]
+  return {
+    id: document.id,
+    ...document.data()
+  }
+}
