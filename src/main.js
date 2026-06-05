@@ -3,7 +3,8 @@ import { onAuthChange, getUserProfile } from './lib/firebase.js'
 import { initPWA } from './lib/pwa.js'
 import { renderLogin } from './pages/login.js'
 import { renderApp } from './pages/app.js'
-// import { renderMesarioLogin } from './pages/mesario-login.js'
+import { renderMesarioLogin } from './pages/mesario-login.js'
+import { renderMesarioControl } from './pages/mesario-control.js'
 
 // Inicializar PWA cuando el DOM esté listo
 if (document.readyState === 'loading') {
@@ -34,18 +35,11 @@ async function init() {
 
       console.log('🔍 Email del usuario:', user.email)
       console.log('🔍 ¿Incluye mesario-?', user.email.includes('mesario-'))
+      
       // DETECCIÓN DE MESARIO (por EMAIL)
       if (user.email.includes('mesario-')) {
-        root.innerHTML = `
-          <div style="padding: 40px; text-align: center; background: #667eea; color: white; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
-            <h1 style="margin-bottom: 20px; font-size: 32px;">📊 Dashboard Mesario</h1>
-            <p style="font-size: 18px; margin-bottom: 10px;">${user.email}</p>
-            <p style="color: #ddd; margin-top: 40px; font-size: 16px;">
-              Módulo en construcción...
-            </p>
-          </div>
-        `
-        return  // ← AGREGAR ESTA LÍNEA
+        renderMesarioControl(root, currentUser, currentProfile)
+        return
       } else {
         renderApp(root, currentUser, currentProfile)
       }
@@ -54,7 +48,7 @@ async function init() {
       if (window.location.pathname === '/mesario' || window.location.hash.includes('mesario')) {
         renderMesarioLogin(root, () => init())
       } else {
-       renderLogin(root, () => {})
+        renderLogin(root, () => {})
       }
     }
   })

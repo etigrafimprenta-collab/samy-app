@@ -52,12 +52,13 @@ export const getUserProfile = async (uid) => {
   return snap.exists() ? snap.data() : null
 }
 
-export const createUserProfile = async (uid, data) => {
-  await setDoc(doc(db, 'users', uid), {
+export async function createUserProfile(uid, data) {
+  const userRef = doc(db, 'users', uid)
+  await setDoc(userRef, {
     ...data,
-    role: 'user',
-    createdAt: serverTimestamp()
-  }, { merge: true })
+    role: data.role || 'militante',
+    createdAt: new Date()
+  })
 }
 
 export const searchByCedula = async (cedula) => {
@@ -82,8 +83,21 @@ export const searchByName = async (termino) => {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
-// ✅ ACTUALIZADA: Ahora guarda militanteName (displayName del militante)
 export const saveRecord = async (uid, voter, telefono = '', nota = '', transporte = '', allowDuplicate = false, militanteName = '') => {
+  // ✅ VALIDAR DUPLICADOS: Evitar guardar el mismo votante 2 veces
+  if (!allowDuplicate) {
+    const q = query(
+      collection(db, 'savedRecords'),
+      where('uid', '==', uid),
+      where('cedula', '==', voter.cedula)
+    )
+    const snap = await getDocs(q)
+    if (snap.docs.length > 0) {
+      throw new Error(`⚠️ Este votante (CI ${voter.cedula}) ya fue guardado por ti. No se puede duplicar.`)
+    }
+  }
+
+  // Guardar registro
   await addDoc(collection(db, 'savedRecords'), {
     uid,
     cedula: voter.cedula,
@@ -96,7 +110,7 @@ export const saveRecord = async (uid, voter, telefono = '', nota = '', transport
     telefono: telefono || '',
     nota: nota || '',
     transporte: transporte || 'No especificado',
-    militanteName: militanteName || '',  // ✅ NUEVO: Guardar displayName del militante
+    militanteName: militanteName || '',
     savedAt: serverTimestamp()
   })
 }
@@ -253,7 +267,6 @@ export const saveElectionVote = async (uid, cedula, nombre) => {
   }, { merge: true })
 }
 
-// ===== EDITAR REGISTRO EXISTENTE =====
 export const updateRecord = async (id, updates) => {
   const { updateDoc } = await import('firebase/firestore')
   await updateDoc(doc(db, 'savedRecords', id), {
@@ -261,10 +274,6 @@ export const updateRecord = async (id, updates) => {
     updatedAt: serverTimestamp()
   })
 }
-
-// ============================================================
-// FUNCIONES CHOFER
-// ============================================================
 
 export async function createChofer(data) {
   return addDoc(collection(db, 'campaignDrivers2025'), {
@@ -362,3 +371,107 @@ export async function getChofersVotantesByUser(uid) {
     ...document.data()
   }
 }
+
+export async function getVotantesDelMesario(seccional, mesa) {
+  const q = query(
+    collection(db, 'voters'),
+    where('seccional', '==', seccional),
+    where('mesa', '==', mesa)
+  )
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export async function getNuestrosVotosDeMesa(seccional, mesa) {
+  const q = query(
+    collection(db, 'savedRecords'),
+    where('seccional', '==', seccional),
+    where('mesa', '==', mesa)
+  )
+  const snap = await getDocs(q)
+  return new Set(snap.docs.map(d => d.data().cedula))
+}
+
+export async function marcarVoto(seccional, mesa, cedula) {
+  const docId = `${seccional}_${mesa}_${cedula}`
+  await setDoc(doc(db, 'mesa_votacion2025', docId), {
+    seccional,
+    mesa,
+    cedula,
+    votedAt: serverTimestamp()
+  }, { merge: true })
+}
+
+export async function getVotosDelMesario(seccional, mesa) {
+  const q = query(
+    collection(db, 'mesa_votacion2025'),
+    where('seccional', '==', seccional),
+    where('mesa', '==', mesa)
+  )
+  const snap = await getDocs(q)
+  return new Set(snap.docs.map(d => d.data().cedula))
+}
+
+export async function updateUserRole(uid, newRole) {
+  try {
+    const userRef = doc(db, 'users', uid)
+    await updateDoc(userRef, {
+      role: newRole
+    })
+    return { success: true }
+  } catch (err) {
+    throw new Error(`Error actualizando rol: ${err.message}`)
+  }
+}
+
+export async function updateUserPassword(uid, newPassword) {
+  try {
+    const userRef = doc(db, 'users', uid)
+    await updateDoc(userRef, {
+      password: newPassword
+    })
+    return { success: true }
+  } catch (err) {
+    throw new Error(`Error actualizando contraseña: ${err.message}`)
+  }
+}
+
+export async function updateUserMesaLocal(uid, data) {
+  try {
+    const userRef = doc(db, 'users', uid)
+    await updateDoc(userRef, {
+      seccional: data.seccional || null,
+      mesa: data.mesa || null,
+      local: data.local || null,
+      mesasAsignadas: data.mesasAsignadas || null
+    })
+    return { success: true }
+  } catch (err) {
+    throw new Error(`Error actualizando mesa/local: ${err.message}`)
+  }
+}
+
+export async function deleteUserAccount(uid) {
+  try {
+    const userRef = doc(db, 'users', uid)
+    await deleteDoc(userRef)
+    return { success: true }
+  } catch (err) {
+    throw new Error(`Error borrando usuario: ${err.message}`)
+  }
+}
+
+export async function getUserById(uid) {
+  try {
+    const userRef = doc(db, 'users', uid)
+    const userSnap = await getDoc(userRef)
+    if (userSnap.exists()) {
+      return userSnap.data()
+    }
+    throw new Error('Usuario no encontrado')
+  } catch (err) {
+    throw new Error(`Error obteniendo usuario: ${err.message}`)
+  }
+}
+
+export { deleteDoc, doc, updateDoc, getDoc }

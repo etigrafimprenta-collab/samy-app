@@ -1,11 +1,12 @@
 /**
- * MÓDULO: ADMIN - AUDITORÍA, EXPORTACIÓN Y GESTIÓN DE USUARIOS
+ * MÓDULO: ADMIN - AUDITORÍA, EXPORTACIÓN Y GESTIÓN DE USUARIOS (MEJORADO)
  */
 
 import { renderMyRecords } from './myRecords.js'
 import { renderDiaDAdmin } from '../modules/dia-d-admin.js'
 import { renderDiaDControl } from '../modules/dia-d-control.js'
 import { renderChofer } from './chofer.js'
+import { updateUserRole, updateUserPassword, updateUserMesaLocal, deleteUserAccount, getUserById } from '../lib/firebase.js'
 
 export function renderAdmin(content) {
   let currentView = 'resumen'
@@ -150,7 +151,6 @@ function renderResumen(container, onAuditoria, onDiaDAdmin, onDiaDControl, onCho
 }
 
 async function mostrarPanelExportacion(container) {
-  // Cargar usuarios y locales para dropdowns
   const firebaseImport = await import('firebase/firestore')
   const { collection, getDocs } = firebaseImport
   const { db } = await import('../lib/firebase.js')
@@ -164,7 +164,6 @@ async function mostrarPanelExportacion(container) {
     })
   })
 
-  // Cargar locales únicos desde savedRecords
   const recordsSnap = await getDocs(collection(db, 'savedRecords'))
   const localesSet = new Set()
   recordsSnap.forEach(d => {
@@ -236,12 +235,10 @@ async function descargarExcel(container) {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    // Obtener filtros
     const militante = document.getElementById('filtro-militante')?.value || ''
     const local = document.getElementById('filtro-local')?.value || ''
     const mesa = document.getElementById('filtro-mesa')?.value || ''
 
-    // Cargar registros
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
     let registros = []
     recordsSnap.forEach(d => {
@@ -258,14 +255,12 @@ async function descargarExcel(container) {
       })
     })
 
-    // Cargar usuarios
     const usersSnap = await getDocs(collection(db, 'users'))
     const usuarios = {}
     usersSnap.forEach(d => {
       usuarios[d.id] = d.data().displayName || d.data().email || 'N/A'
     })
 
-    // Aplicar filtros
     if (militante) {
       registros = registros.filter(r => r.uid === militante)
     }
@@ -276,7 +271,6 @@ async function descargarExcel(container) {
       registros = registros.filter(r => r.mesa.toString() === mesa)
     }
 
-    // Crear CSV
     const headers = ['Cédula', 'Nombre', 'Apellidos', 'Local', 'Mesa', 'Orden', 'Teléfono', 'Militante']
     const rows = registros.map(r => [
       r.cedula,
@@ -294,7 +288,6 @@ async function descargarExcel(container) {
       ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
     ].join('\n')
 
-    // Descargar
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
@@ -314,12 +307,10 @@ async function imprimirRegistros(container) {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    // Obtener filtros
     const militante = document.getElementById('filtro-militante')?.value || ''
     const local = document.getElementById('filtro-local')?.value || ''
     const mesa = document.getElementById('filtro-mesa')?.value || ''
 
-    // Cargar registros
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
     let registros = []
     recordsSnap.forEach(d => {
@@ -335,7 +326,6 @@ async function imprimirRegistros(container) {
       })
     })
 
-    // Aplicar filtros
     if (local) {
       registros = registros.filter(r => r.local === local)
     }
@@ -343,59 +333,50 @@ async function imprimirRegistros(container) {
       registros = registros.filter(r => r.mesa.toString() === mesa)
     }
 
-    // Abrir ventana de impresión
     const printWindow = window.open('', '_blank')
     printWindow.document.write(`
       <!DOCTYPE html>
       <html>
-        <head>
-          <title>Registros para Imprimir</title>
-          <style>
-            * { margin: 0; padding: 0; }
-            body { font-family: Arial, sans-serif; padding: 20px; }
-            h1 { color: #2196f3; border-bottom: 3px solid #2196f3; padding-bottom: 10px; margin-bottom: 20px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th { background: #f5f5f5; border: 1px solid #ddd; padding: 8px; text-align: left; font-weight: 700; }
-            td { border: 1px solid #ddd; padding: 8px; font-size: 0.9rem; }
-            tr:nth-child(even) { background: #f9f9f9; }
-            .timestamp { color: #999; font-size: 0.85rem; margin-top: 20px; }
-            @media print {
-              body { background: white; }
-              h1 { page-break-after: avoid; }
-            }
-          </style>
-        </head>
-        <body>
-          <h1>📋 Listado de Registros</h1>
-          <p style="margin-bottom: 20px;">Total de registros: <strong>${registros.length}</strong></p>
-          <table>
-            <thead>
+      <head>
+        <title>Registros - Samy Fidabel</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; }
+          table { width: 100%; border-collapse: collapse; }
+          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+          th { background-color: #2196f3; color: white; }
+          tr:nth-child(even) { background-color: #f9f9f9; }
+        </style>
+      </head>
+      <body>
+        <h1>📋 Registros - Samy Fidabel 2026</h1>
+        <p>Total: ${registros.length} registros</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Cédula</th>
+              <th>Nombre</th>
+              <th>Apellidos</th>
+              <th>Local</th>
+              <th>Mesa</th>
+              <th>Orden</th>
+              <th>Teléfono</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${registros.map(r => `
               <tr>
-                <th>Cédula</th>
-                <th>Nombre</th>
-                <th>Apellidos</th>
-                <th>Local</th>
-                <th>Mesa</th>
-                <th>Orden</th>
-                <th>Teléfono</th>
+                <td>${r.cedula}</td>
+                <td>${r.nombre}</td>
+                <td>${r.apellidos}</td>
+                <td>${r.local}</td>
+                <td>${r.mesa}</td>
+                <td>${r.orden || '—'}</td>
+                <td>${r.telefono}</td>
               </tr>
-            </thead>
-            <tbody>
-              ${registros.map(r => `
-                <tr>
-                  <td style="font-family: monospace; font-size: 0.85rem;">${r.cedula}</td>
-                  <td><strong>${r.nombre}</strong></td>
-                  <td>${r.apellidos}</td>
-                  <td>${r.local}</td>
-                  <td>${r.mesa}</td>
-                  <td>${r.orden || '—'}</td>
-                  <td>${r.telefono}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-          <div class="timestamp">Impreso: ${new Date().toLocaleString('es-PY')}</div>
-        </body>
+            `).join('')}
+          </tbody>
+        </table>
+      </body>
       </html>
     `)
     printWindow.document.close()
@@ -414,7 +395,6 @@ function loadAndRenderRecords() {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    // Cargar TODOS los registros
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
     const allRecords = []
     recordsSnap.forEach(d => {
@@ -432,14 +412,12 @@ function loadAndRenderRecords() {
       })
     })
 
-    // Cargar usuarios
     const usersSnap = await getDocs(collection(db, 'users'))
     const allUsers = {}
     usersSnap.forEach(d => {
       allUsers[d.id] = { ...d.data(), uid: d.id }
     })
 
-    // Filtrar por búsqueda
     const termino = document.getElementById('input-buscar')?.value?.toLowerCase() || ''
     let registrosFiltrados = allRecords
     
@@ -453,7 +431,6 @@ function loadAndRenderRecords() {
       )
     }
 
-    // Actualizar estadísticas
     const porUsuario = {}
     allRecords.forEach(r => {
       if (!porUsuario[r.uid]) porUsuario[r.uid] = 0
@@ -467,7 +444,6 @@ function loadAndRenderRecords() {
     document.getElementById('usuarios-activos').textContent = usuariosActivos
     document.getElementById('promedio-usuario').textContent = promedio
 
-    // Renderizar tabla ÚNICA y CORRECTA
     let html = `
       ${termino ? `
         <div style="background: #e3f2fd; border-left: 4px solid #1976d2; padding: 12px; border-radius: 4px; margin-bottom: 16px;">
@@ -544,7 +520,6 @@ async function mostrarUsuarios(container) {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    // Cargar usuarios
     const usersSnap = await getDocs(collection(db, 'users'))
     const allUsers = []
     usersSnap.forEach(d => {
@@ -552,11 +527,11 @@ async function mostrarUsuarios(container) {
         uid: d.id,
         displayName: d.data().displayName || d.data().email || 'Sin nombre',
         email: d.data().email || 'N/A',
-        password: d.data().password || 'N/A'
+        password: d.data().password || 'N/A',
+        role: d.data().role || 'militante'
       })
     })
 
-    // Cargar registros para contar
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
     const porUsuario = {}
     recordsSnap.forEach(d => {
@@ -564,11 +539,9 @@ async function mostrarUsuarios(container) {
       porUsuario[uid] = (porUsuario[uid] || 0) + 1
     })
 
-    // Crear ranking
     const ranking = allUsers.map(u => ({
       ...u,
-      cantidad: porUsuario[u.uid] || 0,
-      role: u.role || 'user'
+      cantidad: porUsuario[u.uid] || 0
     })).sort((a, b) => b.cantidad - a.cantidad)
 
     renderUsuariosPanel(container, ranking)
@@ -622,8 +595,22 @@ function renderUsuariosPanel(container, ranking) {
             <div style="background: #f5f5f5; padding: 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; font-family: monospace;">
               <div><strong>Nombre:</strong> ${user.displayName}</div>
               <div><strong>Email:</strong> ${user.email}</div>
-              <div><strong>Contraseña:</strong> ${user.password}</div>
-              <div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid #ddd;"><strong>Rol:</strong> <span style="background: ${user.role === 'admin' ? '#ff9800' : '#2196f3'}; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700;">${user.role === 'admin' ? '👑 ADMIN' : '👤 USER'}</span></div>
+              <div><strong>Rol:</strong> <span style="background: ${getRoleColor(user.role)}; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700;">${getRoleEmoji(user.role)} ${user.role.toUpperCase()}</span></div>
+            </div>
+
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              <button class="btn-editar-rol" data-uid="${user.uid}" style="flex: 1; min-width: 90px; background: #2196f3; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">
+                ✏️ Editar Rol
+              </button>
+              <button class="btn-cambiar-pass" data-uid="${user.uid}" style="flex: 1; min-width: 90px; background: #ff9800; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">
+                🔐 Cambiar Pass
+              </button>
+              <button class="btn-asignar-mesa" data-uid="${user.uid}" data-role="${user.role}" style="flex: 1; min-width: 90px; background: #4caf50; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">
+                📍 Mesa/Local
+              </button>
+              <button class="btn-borrar-usuario" data-uid="${user.uid}" data-nombre="${user.displayName}" style="flex: 1; min-width: 90px; background: #d32f2f; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.8rem;">
+                🗑️ Borrar
+              </button>
             </div>
           </div>
         `).join('')}
@@ -635,6 +622,282 @@ function renderUsuariosPanel(container, ranking) {
 
   document.getElementById('btn-volver-usuarios').addEventListener('click', () => location.reload())
   document.getElementById('btn-crear-usuario').addEventListener('click', () => mostrarPanelCrearUsuario(container))
+
+  // Botones de editar rol
+  document.querySelectorAll('.btn-editar-rol').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid
+      const user = ranking.find(u => u.uid === uid)
+      mostrarModalEditarRol(container, user)
+    })
+  })
+
+  // Botones de cambiar contraseña
+  document.querySelectorAll('.btn-cambiar-pass').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid
+      const user = ranking.find(u => u.uid === uid)
+      mostrarModalCambiarPassword(container, user)
+    })
+  })
+
+  // Botones de asignar mesa/local
+  document.querySelectorAll('.btn-asignar-mesa').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid
+      const role = btn.dataset.role
+      const user = ranking.find(u => u.uid === uid)
+      if (role === 'mesario' || role === 'veedor') {
+        mostrarModalAsignarMesa(container, user)
+      } else {
+        alert('Solo mesarios y veedores pueden tener mesa/local asignados')
+      }
+    })
+  })
+
+  // Botones de borrar usuario
+  document.querySelectorAll('.btn-borrar-usuario').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid
+      const nombre = btn.dataset.nombre
+      mostrarModalBorrarUsuario(container, uid, nombre)
+    })
+  })
+}
+
+function getRoleColor(role) {
+  const colors = {
+    admin: '#ff9800',
+    mesario: '#2196f3',
+    veedor: '#4caf50',
+    militante: '#9c27b0'
+  }
+  return colors[role] || '#999'
+}
+
+function getRoleEmoji(role) {
+  const emojis = {
+    admin: '👑',
+    mesario: '📊',
+    veedor: '👀',
+    militante: '👤'
+  }
+  return emojis[role] || '👤'
+}
+
+async function mostrarModalEditarRol(container, user) {
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+
+  const html = `
+    <div style="background: white; border-radius: 8px; padding: 24px; max-width: 400px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+      <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; color: #2196f3; text-transform: uppercase;">✏️ Editar Rol</h2>
+      <div style="margin-bottom: 16px;">
+        <div style="font-weight: 700; margin-bottom: 8px;">Usuario:</div>
+        <div style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-size: 0.9rem;">${user.displayName}</div>
+      </div>
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nuevo Rol:</label>
+        <select id="new-role" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
+          <option value="militante">👤 Militante</option>
+          <option value="mesario">📊 Mesario</option>
+          <option value="veedor">👀 Veedor</option>
+          <option value="admin">👑 Admin</option>
+        </select>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-confirmar-rol" style="flex: 1; background: #2196f3; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ✅ Guardar
+        </button>
+        <button id="btn-cancelar-modal" style="flex: 1; background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ❌ Cancelar
+        </button>
+      </div>
+    </div>
+  `
+
+  modal.innerHTML = html
+  document.body.appendChild(modal)
+
+  document.getElementById('btn-confirmar-rol').addEventListener('click', async () => {
+    const newRole = document.getElementById('new-role').value
+    try {
+      await updateUserRole(user.uid, newRole)
+      alert(`✅ Rol actualizado a "${newRole}"`)
+      modal.remove()
+      location.reload()
+    } catch (err) {
+      alert(`❌ Error: ${err.message}`)
+    }
+  })
+
+  document.getElementById('btn-cancelar-modal').addEventListener('click', () => modal.remove())
+}
+
+async function mostrarModalCambiarPassword(container, user) {
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+
+  const html = `
+    <div style="background: white; border-radius: 8px; padding: 24px; max-width: 400px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+      <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; color: #ff9800; text-transform: uppercase;">🔐 Cambiar Contraseña</h2>
+      <div style="margin-bottom: 16px;">
+        <div style="font-weight: 700; margin-bottom: 8px;">Usuario:</div>
+        <div style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-size: 0.9rem;">${user.displayName}</div>
+      </div>
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nueva Contraseña:</label>
+        <input id="new-password" type="text" placeholder="Ingrese la nueva contraseña" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-confirmar-pass" style="flex: 1; background: #ff9800; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ✅ Guardar
+        </button>
+        <button id="btn-cancelar-modal" style="flex: 1; background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ❌ Cancelar
+        </button>
+      </div>
+    </div>
+  `
+
+  modal.innerHTML = html
+  document.body.appendChild(modal)
+
+  document.getElementById('btn-confirmar-pass').addEventListener('click', async () => {
+    const newPass = document.getElementById('new-password').value.trim()
+    if (!newPass) {
+      alert('Ingrese una contraseña')
+      return
+    }
+    try {
+      await updateUserPassword(user.uid, newPass)
+      alert(`✅ Contraseña actualizada`)
+      modal.remove()
+      location.reload()
+    } catch (err) {
+      alert(`❌ Error: ${err.message}`)
+    }
+  })
+
+  document.getElementById('btn-cancelar-modal').addEventListener('click', () => modal.remove())
+}
+
+async function mostrarModalAsignarMesa(container, user) {
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+
+  const html = `
+    <div style="background: white; border-radius: 8px; padding: 24px; max-width: 500px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); max-height: 80vh; overflow-y: auto;">
+      <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; color: #4caf50; text-transform: uppercase;">📍 Asignar Mesa/Local</h2>
+      <div style="margin-bottom: 16px;">
+        <div style="font-weight: 700; margin-bottom: 8px;">Usuario:</div>
+        <div style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-size: 0.9rem;">${user.displayName} (${user.role.toUpperCase()})</div>
+      </div>
+
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-weight: 700; margin-bottom: 8px;">Seccional:</label>
+        <input id="seccional" type="text" placeholder="Ej: 357" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+      </div>
+
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-weight: 700; margin-bottom: 8px;">Mesa:</label>
+        <input id="mesa" type="text" placeholder="Ej: 5" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+      </div>
+
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-weight: 700; margin-bottom: 8px;">Local:</label>
+        <input id="local" type="text" placeholder="Ej: Escuela Primaria..." style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+      </div>
+
+      ${user.role === 'veedor' ? `
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Mesas Asignadas (separadas por coma):</label>
+          <input id="mesasAsignadas" type="text" placeholder="Ej: 1,2,3,4,5" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        </div>
+      ` : ''}
+
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-confirmar-mesa" style="flex: 1; background: #4caf50; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ✅ Guardar
+        </button>
+        <button id="btn-cancelar-modal" style="flex: 1; background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ❌ Cancelar
+        </button>
+      </div>
+    </div>
+  `
+
+  modal.innerHTML = html
+  document.body.appendChild(modal)
+
+  document.getElementById('btn-confirmar-mesa').addEventListener('click', async () => {
+    const seccional = document.getElementById('seccional').value.trim()
+    const mesa = document.getElementById('mesa').value.trim()
+    const local = document.getElementById('local').value.trim()
+    const mesasAsignadas = document.getElementById('mesasAsignadas')?.value.trim() || ''
+
+    if (!seccional || !mesa || !local) {
+      alert('Complete todos los campos requeridos')
+      return
+    }
+
+    try {
+      const data = { seccional, mesa, local }
+      if (mesasAsignadas) {
+        data.mesasAsignadas = mesasAsignadas.split(',').map(m => m.trim())
+      }
+      await updateUserMesaLocal(user.uid, data)
+      alert(`✅ Mesa/Local asignado`)
+      modal.remove()
+      location.reload()
+    } catch (err) {
+      alert(`❌ Error: ${err.message}`)
+    }
+  })
+
+  document.getElementById('btn-cancelar-modal').addEventListener('click', () => modal.remove())
+}
+
+async function mostrarModalBorrarUsuario(container, uid, nombre) {
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+
+  const html = `
+    <div style="background: white; border-radius: 8px; padding: 24px; max-width: 400px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+      <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; color: #d32f2f; text-transform: uppercase;">⚠️ Borrar Usuario</h2>
+      <div style="background: #ffebee; border-left: 4px solid #d32f2f; padding: 12px; border-radius: 4px; margin-bottom: 16px; color: #d32f2f;">
+        <strong>⚠️ Advertencia:</strong> Esta acción no se puede deshacer.
+      </div>
+      <div style="margin-bottom: 16px;">
+        <div style="font-weight: 700; margin-bottom: 8px;">Usuario a borrar:</div>
+        <div style="background: #f5f5f5; padding: 12px; border-radius: 4px; font-size: 0.9rem;">${nombre}</div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-confirmar-borrar" style="flex: 1; background: #d32f2f; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          🗑️ Borrar
+        </button>
+        <button id="btn-cancelar-modal" style="flex: 1; background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
+          ❌ Cancelar
+        </button>
+      </div>
+    </div>
+  `
+
+  modal.innerHTML = html
+  document.body.appendChild(modal)
+
+  document.getElementById('btn-confirmar-borrar').addEventListener('click', async () => {
+    try {
+      await deleteUserAccount(uid)
+      alert(`✅ Usuario borrado`)
+      modal.remove()
+      location.reload()
+    } catch (err) {
+      alert(`❌ Error: ${err.message}`)
+    }
+  })
+
+  document.getElementById('btn-cancelar-modal').addEventListener('click', () => modal.remove())
 }
 
 async function mostrarPanelCrearUsuario(container) {
@@ -656,17 +919,27 @@ async function mostrarPanelCrearUsuario(container) {
       <div style="display: grid; gap: 16px;">
         <div>
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nombre Completo:</label>
-          <input id="input-crear-nombre" type="text" placeholder="Ej: Juan Pérez" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
+          <input id="input-crear-nombre" type="text" placeholder="Ej: Juan Pérez" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
         </div>
 
         <div>
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Email:</label>
-          <input id="input-crear-email" type="email" placeholder="Ej: juan@example.com" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
+          <input id="input-crear-email" type="email" placeholder="Ej: juan@example.com" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
         </div>
 
         <div>
           <label style="display: block; font-weight: 700; margin-bottom: 8px;">Contraseña:</label>
-          <input id="input-crear-password" type="text" placeholder="Ingrese contraseña" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
+          <input id="input-crear-password" type="text" placeholder="Ingrese contraseña" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        </div>
+
+        <div>
+          <label style="display: block; font-weight: 700; margin-bottom: 8px;">Rol:</label>
+          <select id="input-crear-rol" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
+            <option value="militante">👤 Militante</option>
+            <option value="mesario">📊 Mesario</option>
+            <option value="veedor">👀 Veedor</option>
+            <option value="admin">👑 Admin</option>
+          </select>
         </div>
 
         <button id="btn-crear-usuario-submit" style="background: #4caf50; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-weight: 700; width: 100%; margin-top: 12px;">
@@ -683,23 +956,23 @@ async function mostrarPanelCrearUsuario(container) {
     const nombre = document.getElementById('input-crear-nombre').value
     const email = document.getElementById('input-crear-email').value
     const password = document.getElementById('input-crear-password').value
+    const rol = document.getElementById('input-crear-rol').value
 
     if (!nombre.trim() || !email.trim() || !password.trim()) {
       alert('Por favor complete todos los campos')
       return
     }
 
-    crearNuevoUsuario(nombre, email, password)
+    crearNuevoUsuario(nombre, email, password, rol)
   })
 }
 
-async function crearNuevoUsuario(nombre, email, password) {
+async function crearNuevoUsuario(nombre, email, password, rol) {
   try {
     const firebaseImport = await import('firebase/firestore')
     const { collection, addDoc } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    // Generar UID simple
     const nuevoUID = `user-${Date.now()}`
 
     await addDoc(collection(db, 'users'), {
@@ -707,18 +980,17 @@ async function crearNuevoUsuario(nombre, email, password) {
       displayName: nombre,
       email: email,
       password: password,
-      role: 'user',
+      role: rol,
       createdAt: new Date()
     })
 
-    alert(`✅ Usuario "${nombre}" creado correctamente\n\nEmail: ${email}\nContraseña: ${password}`)
+    alert(`✅ Usuario "${nombre}" creado correctamente\n\nEmail: ${email}\nContraseña: ${password}\nRol: ${rol}`)
     location.reload()
   } catch (err) {
     alert('Error al crear usuario: ' + err.message)
   }
 }
 
-// ✅ AUDITORÍA REAL CON DEBUG: DETECTAR DUPLICADOS POR CÉDULA
 async function renderAuditoria(container, onVolver) {
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #ff9800 0%, #f57c00 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
@@ -734,175 +1006,91 @@ async function renderAuditoria(container, onVolver) {
 
   document.getElementById('btn-volver-auditoria').addEventListener('click', onVolver)
 
-  // Cargar y analizar duplicados
   const firebaseImport = await import('firebase/firestore')
   const { collection, getDocs } = firebaseImport
   const { db } = await import('../lib/firebase.js')
 
   try {
-    // Cargar registros
     const recordsSnap = await getDocs(collection(db, 'savedRecords'))
     const records = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
-    // Cargar usuarios para resolver nombres
     const usersSnap = await getDocs(collection(db, 'users'))
     const usuariosMap = {}
     usersSnap.forEach(d => {
-      usuariosMap[d.id] = d.data().displayName || d.data().email || 'Desconocido'
+      usuariosMap[d.id] = d.data().displayName || d.data().email || 'N/A'
     })
 
-    console.log('🔍 Total registros cargados:', records.length)
-    console.log('📋 Primeros 5 registros:', records.slice(0, 5))
+    const cedulasCount = {}
+    const duplicados = []
 
-    // Agrupar por cédula - NORMALIZAR (trim + UPPERCASE)
-    const cedulaMap = {}
     records.forEach(r => {
-      // NORMALIZAR: trim espacios, UPPERCASE
-      const cedula = String(r.cedula || '').trim().toUpperCase()
-      
-      if (!cedula || cedula === '') {
-        console.warn('⚠️ Registro sin cédula:', r.nombre)
-        return
+      const cedula = r.cedula
+      if (!cedulasCount[cedula]) {
+        cedulasCount[cedula] = []
       }
-
-      if (!cedulaMap[cedula]) {
-        cedulaMap[cedula] = []
-      }
-      cedulaMap[cedula].push(r)
+      cedulasCount[cedula].push(r)
     })
 
-    console.log('📊 Cédulas únicas encontradas:', Object.keys(cedulaMap).length)
-
-    // Encontrar duplicados (misma cédula, múltiples registros)
-    const duplicados = Object.entries(cedulaMap)
-      .filter(([_, items]) => items.length > 1)
-      .map(([cedula, items]) => ({
-        cedula,
-        cantidad: items.length,
-        nombre: items[0].nombre,
-        registros: items.sort((a, b) => {
-          const dateA = a.savedAt?.toDate?.() || new Date(0)
-          const dateB = b.savedAt?.toDate?.() || new Date(0)
-          return dateA - dateB // Original primero
-        })
-      }))
-      .sort((a, b) => b.cantidad - a.cantidad)
-
-    console.log('⚠️ Cédulas con duplicados:', duplicados.length)
-    console.log('📋 Detalles duplicados:', duplicados)
-
-    mostrarResultadoAuditoria(container, duplicados, records.length, cedulaMap, usuariosMap)
-  } catch (err) {
-    console.error('❌ Error en auditoría:', err)
-    document.getElementById('auditoria-content').innerHTML = `
-      <div style="background: #ffebee; border: 2px solid #c62828; color: #c62828; padding: 16px; border-radius: 6px;">
-        <strong>❌ Error:</strong> ${err.message}
-      </div>
-    `
-  }
-}
-
-// ✅ MOSTRAR RESULTADOS DE AUDITORÍA
-function mostrarResultadoAuditoria(container, duplicados, totalRegistros, cedulaMap, usuariosMap = {}) {
-  const content = container.querySelector('#auditoria-content')
-  const sinDuplicados = Object.values(cedulaMap).filter(arr => arr.length === 1).length
-  const conDuplicados = duplicados.length
-  const totalDuplicados = duplicados.reduce((sum, d) => sum + (d.cantidad - 1), 0)
-
-  let html = `
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px;">
-      <div style="background: white; border: 2px solid #2196f3; border-radius: 8px; padding: 16px; text-align: center;">
-        <div style="font-size: 2rem; font-weight: 700; color: #2196f3;">${totalRegistros}</div>
-        <div style="font-size: 0.85rem; color: #666; margin-top: 6px;">REGISTROS TOTALES</div>
-      </div>
-      <div style="background: white; border: 2px solid #4caf50; border-radius: 8px; padding: 16px; text-align: center;">
-        <div style="font-size: 2rem; font-weight: 700; color: #4caf50;">${sinDuplicados}</div>
-        <div style="font-size: 0.85rem; color: #666; margin-top: 6px;">CÉDULAS ÚNICAS</div>
-      </div>
-      <div style="background: white; border: 2px solid ${conDuplicados > 0 ? '#ff9800' : '#4caf50'}; border-radius: 8px; padding: 16px; text-align: center;">
-        <div style="font-size: 2rem; font-weight: 700; color: ${conDuplicados > 0 ? '#ff9800' : '#4caf50'};">${conDuplicados}</div>
-        <div style="font-size: 0.85rem; color: #666; margin-top: 6px;">CÉDULAS CON DUPLICADO</div>
-      </div>
-      <div style="background: white; border: 2px solid ${totalDuplicados > 0 ? '#d32f2f' : '#4caf50'}; border-radius: 8px; padding: 16px; text-align: center;">
-        <div style="font-size: 2rem; font-weight: 700; color: ${totalDuplicados > 0 ? '#d32f2f' : '#4caf50'};">${totalDuplicados}</div>
-        <div style="font-size: 0.85rem; color: #666; margin-top: 6px;">REGISTROS DUPLICADOS</div>
-      </div>
-    </div>
-  `
-
-  if (conDuplicados === 0) {
-    html += `
-      <div style="background: #e8f5e9; border: 2px solid #2e7d32; border-radius: 8px; padding: 20px; text-align: center; color: #2e7d32;">
-        <h3 style="margin: 0 0 10px 0;">✅ Sistema Limpio</h3>
-        <p style="margin: 0; font-size: 0.95rem;">No se encontraron duplicados en la base de datos.</p>
-      </div>
-    `
-  } else {
-    html += `
-      <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-        <strong style="color: #856404;">⚠️ Se encontraron ${conDuplicados} cédulas con múltiples registros (${totalDuplicados} copias)</strong>
-      </div>
-      
-      <div style="background: white; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
-        <div style="background: #f5f5f5; padding: 14px; font-weight: 700; display: grid; grid-template-columns: 100px 1fr 80px 120px; gap: 12px; border-bottom: 2px solid #ddd; font-size: 0.9rem;">
-          <div>CÉDULA</div>
-          <div>NOMBRE</div>
-          <div style="text-align: center;">COPIAS</div>
-          <div style="text-align: center;">ACCIONES</div>
-        </div>
-    `
-
-    duplicados.forEach((dup, idx) => {
-      html += `
-        <div style="padding: 12px; display: grid; grid-template-columns: 100px 1fr 80px 120px; gap: 12px; border-bottom: 1px solid #eee; align-items: center; font-size: 0.9rem;">
-          <div style="font-weight: 600; font-family: monospace;">${dup.cedula}</div>
-          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${dup.nombre}</div>
-          <div style="background: #fff3cd; color: #856404; padding: 4px 8px; border-radius: 4px; text-align: center; font-weight: 600; border-radius: 20px;">${dup.cantidad}</div>
-          <div style="text-align: center;">
-            <button class="btn-expand-dup" data-idx="${idx}" style="background: #2196f3; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: 600;">
-              👁️ Ver
-            </button>
-          </div>
-        </div>
-        <div id="dup-details-${idx}" style="display: none; background: #fafafa; padding: 16px; border-left: 4px solid #ff9800;">
-          <!-- Detalles de duplicado aquí -->
-        </div>
-      `
+    Object.entries(cedulasCount).forEach(([cedula, records]) => {
+      if (records.length > 1) {
+        duplicados.push({ cedula, registros: records })
+      }
     })
 
-    html += `
+    let html = `
+      <div style="background: white; border: 1px solid #ddd; border-radius: 8px; padding: 20px;">
+        <h3 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed'; font-size: 1.3rem; text-transform: uppercase;">
+          🔍 ANÁLISIS DE DUPLICADOS
+        </h3>
+
+        <div style="background: ${duplicados.length > 0 ? '#fff3cd' : '#d4edda'}; border: 1px solid ${duplicados.length > 0 ? '#ffc107' : '#28a745'}; color: ${duplicados.length > 0 ? '#856404' : '#155724'}; padding: 12px; border-radius: 4px; margin-bottom: 20px;">
+          <strong>${duplicados.length > 0 ? '⚠️' : '✅'}</strong> ${duplicados.length === 0 ? 'No hay duplicados detectados' : `Se encontraron ${duplicados.length} cédulas duplicadas`}
+        </div>
+
+        ${duplicados.length > 0 ? `
+          <div style="display: grid; gap: 12px;">
+            ${duplicados.map(dup => `
+              <div style="border: 1px solid #ddd; border-radius: 4px; padding: 12px; background: #f9f9f9;">
+                <div style="font-weight: 700; margin-bottom: 8px;">Cédula: ${dup.cedula}</div>
+                <div style="font-size: 0.9rem; color: #666; margin-bottom: 12px;">${dup.registros.length} registros encontrados</div>
+                ${dup.registros.map((r, idx) => {
+                  const nombreMilitante = usuariosMap[r.uid] || 'N/A'
+                  return `
+                    <div style="background: white; padding: 8px; border-radius: 3px; margin-bottom: 6px; font-size: 0.85rem;">
+                      <span style="font-weight: 600;">Registro ${idx + 1}:</span> ${r.nombre} | 
+                      <span style="color: #666;">Militante: ${nombreMilitante}</span> | 
+                      <span style="color: #666;">Guardado: ${r.savedAt?.toDate?.().toLocaleString('es-PY') || '—'}</span>
+                    </div>
+                  `
+                }).join('')}
+                <button class="btn-ver-detalles" data-cedula="${dup.cedula}" style="background: #2196f3; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-size: 0.8rem; font-weight: 600; margin-top: 8px;">
+                  👁️ Ver Detalles
+                </button>
+                <div class="detalles-duplicados" data-cedula="${dup.cedula}" style="display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid #ddd;"></div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
       </div>
     `
-  }
 
-  content.innerHTML = html
+    document.getElementById('auditoria-content').innerHTML = html
 
-  // Event listeners para expandir duplicados
-  document.querySelectorAll('.btn-expand-dup').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const idx = parseInt(btn.dataset.idx)
-      const detailsEl = document.getElementById(`dup-details-${idx}`)
-      const dup = duplicados[idx]
-      
-      if (detailsEl.style.display === 'none') {
-        let detailsHtml = `
-          <div style="font-weight: 700; margin-bottom: 12px; color: #333; font-size: 0.95rem;">
-            📋 ${dup.cantidad} Registros encontrados:
-          </div>
-        `
-
-        dup.registros.forEach((r, i) => {
-          const isOriginal = i === 0
-          const nombreMilitante = usuariosMap[r.uid] || r.uid || 'Desconocido'
-          detailsHtml += `
-            <div style="background: white; padding: 12px; margin-bottom: 8px; border-radius: 4px; border-left: 4px solid ${isOriginal ? '#4caf50' : '#ff9800'}; border: 1px solid ${isOriginal ? '#c8e6c9' : '#ffe0b2'};">
-              <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
-                <div>
-                  <span style="background: ${isOriginal ? '#4caf50' : '#ff9800'}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">
-                    ${isOriginal ? '✅ ORIGINAL' : '⚠️ COPIA ' + i}
-                  </span>
-                </div>
-                <button class="btn-delete-dup" data-rec-id="${r.id}" data-dup-cedula="${dup.cedula}" style="background: #d32f2f; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">
+    document.querySelectorAll('.btn-ver-detalles').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cedula = btn.dataset.cedula
+        const dup = duplicados.find(d => d.cedula === cedula)
+        const detailsEl = document.querySelector(`.detalles-duplicados[data-cedula="${cedula}"]`)
+        
+        if (detailsEl.style.display === 'none') {
+          detailsEl.innerHTML = dup.registros.map(r => {
+            const nombreMilitante = usuariosMap[r.uid] || 'N/A'
+            return `
+              <div style="background: #f5f5f5; padding: 8px; border-radius: 3px; margin-bottom: 6px; font-size: 0.8rem;">
+                <span style="font-weight: 600;">
+                  ${r.nombre}
+                </span>
+                <button class="btn-delete-dup" data-rec-id="${r.id}" data-dup-cedula="${dup.cedula}" style="background: #d32f2f; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-weight: 600; float: right;">
                   🗑️ Borrar
                 </button>
               </div>
@@ -912,42 +1100,42 @@ function mostrarResultadoAuditoria(container, duplicados, totalRegistros, cedula
                 <strong>Teléfono:</strong> ${r.telefono || '—'} <br>
                 <strong>Nota:</strong> ${r.nota || '—'}
               </div>
-            </div>
-          `
-        })
+            `
+          }).join('')
 
-        detailsEl.innerHTML = detailsHtml
-        detailsEl.style.display = 'block'
-        btn.textContent = '👁️ Ocultar'
+          detailsEl.style.display = 'block'
+          btn.textContent = '👁️ Ocultar'
 
-        // Event listeners para borrar
-        detailsEl.querySelectorAll('.btn-delete-dup').forEach(delBtn => {
-          delBtn.addEventListener('click', async () => {
-            if (!confirm('⚠️ ¿Borrar este registro duplicado? Esta acción no se puede deshacer.')) return
-            
-            const recId = delBtn.dataset.recId
-
-            try {
-              const firebaseImport = await import('firebase/firestore')
-              const { deleteDoc, doc } = firebaseImport
-              const { db } = await import('../lib/firebase.js')
-
-              await deleteDoc(doc(db, 'savedRecords', recId))
-              alert('✅ Registro duplicado eliminado')
+          detailsEl.querySelectorAll('.btn-delete-dup').forEach(delBtn => {
+            delBtn.addEventListener('click', async () => {
+              if (!confirm('⚠️ ¿Borrar este registro duplicado? Esta acción no se puede deshacer.')) return
               
-              // Recargar auditoría
-              renderAuditoria(container, onVolver)
-            } catch (err) {
-              alert('❌ Error al eliminar: ' + err.message)
-            }
+              const recId = delBtn.dataset.recId
+
+              try {
+                const firebaseImport = await import('firebase/firestore')
+                const { deleteDoc, doc } = firebaseImport
+                const { db } = await import('../lib/firebase.js')
+
+                await deleteDoc(doc(db, 'savedRecords', recId))
+                alert('✅ Registro duplicado eliminado')
+                
+                renderAuditoria(container, onVolver)
+              } catch (err) {
+                alert('❌ Error al eliminar: ' + err.message)
+              }
+            })
           })
-        })
-      } else {
-        detailsEl.style.display = 'none'
-        btn.textContent = '👁️ Ver'
-      }
+        } else {
+          detailsEl.style.display = 'none'
+          btn.textContent = '👁️ Ver Detalles'
+        }
+      })
     })
-  })
+
+  } catch (err) {
+    document.getElementById('auditoria-content').innerHTML = `<div style="color: red;"><strong>Error:</strong> ${err.message}</div>`
+  }
 }
 
 function mostrarPanelImportacion(container) {
