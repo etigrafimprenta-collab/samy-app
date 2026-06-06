@@ -3,8 +3,8 @@ import { onAuthChange, getUserProfile } from './lib/firebase.js'
 import { initPWA } from './lib/pwa.js'
 import { renderLogin } from './pages/login.js'
 import { renderApp } from './pages/app.js'
-import { renderMesarioLogin } from './pages/mesario-login.js'
-import { renderMesarioControl } from './pages/mesario-control.js'
+import { renderDiaD } from './modules/dia-d-militantes.js'
+import { renderDiaDAdmin } from './modules/dia-d-admin.js'
 
 // Inicializar PWA cuando el DOM esté listo
 if (document.readyState === 'loading') {
@@ -20,7 +20,6 @@ let currentProfile = null
 async function init() {
   root.innerHTML = '<div class="loader"><div class="spinner"></div> Cargando...</div>'
   onAuthChange(async (user) => {
-    console.log('🚀 onAuthChange ejecutándose, user:', user?.email)
     if (user) {
       currentUser = user
       currentProfile = await getUserProfile(user.uid)
@@ -32,26 +31,36 @@ async function init() {
         })
         currentProfile = await getUserProfile(user.uid)
       }
-
-      console.log('🔍 Email del usuario:', user.email)
-      console.log('🔍 ¿Incluye mesario-?', user.email.includes('mesario-'))
-      
-      // DETECCIÓN DE MESARIO (por EMAIL)
-      if (user.email.includes('mesario-')) {
-        renderMesarioControl(root, currentUser, currentProfile)
-        return
-      } else {
-        renderApp(root, currentUser, currentProfile)
-      }
+      renderApp(root, currentUser, currentProfile)
     } else {
-      // DETECTAR SI VIENE DE URL /mesario
-      if (window.location.pathname === '/mesario' || window.location.hash.includes('mesario')) {
-        renderMesarioLogin(root, () => init())
-      } else {
-        renderLogin(root, () => {})
-      }
+      renderLogin(root, () => {})
     }
   })
 }
 
 init()
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btnDiaD = document.getElementById('nav-dia-d')
+  if (btnDiaD) {
+    btnDiaD.addEventListener('click', async () => {
+      const container = document.getElementById('main-content')
+      if (!container) {
+        console.error('⚠️ No se encontró #main-content')
+        return
+      }
+      try {
+        const userDoc = await firebase.firestore().collection('users').doc(currentUser.uid).get()
+        const rol = userDoc.data()?.role
+        if (rol === 'admin') {
+          renderDiaDAdmin(container)
+        } else {
+          renderDiaD(container, currentUser)
+        }
+      } catch (error) {
+        console.error('Error en DÍA D:', error)
+        alert('Error al abrir DÍA D')
+      }
+    })
+  }
+})
