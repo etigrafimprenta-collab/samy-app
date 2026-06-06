@@ -5,6 +5,7 @@ import { renderLogin } from './pages/login.js'
 import { renderApp } from './pages/app.js'
 import { renderDiaD } from './modules/dia-d-militantes.js'
 import { renderDiaDAdmin } from './modules/dia-d-admin.js'
+import { renderMesarioControl } from './pages/mesario-control.js'
 
 // Inicializar PWA cuando el DOM esté listo
 if (document.readyState === 'loading') {
@@ -20,9 +21,12 @@ let currentProfile = null
 async function init() {
   root.innerHTML = '<div class="loader"><div class="spinner"></div> Cargando...</div>'
   onAuthChange(async (user) => {
+    console.log('🚀 onAuthChange - user:', user?.email)
+    
     if (user) {
       currentUser = user
       currentProfile = await getUserProfile(user.uid)
+      
       if (!currentProfile) {
         const { createUserProfile } = await import('./lib/firebase.js')
         await createUserProfile(user.uid, {
@@ -31,6 +35,18 @@ async function init() {
         })
         currentProfile = await getUserProfile(user.uid)
       }
+
+      console.log('🔍 Email del usuario:', user.email)
+      console.log('🔍 Role del usuario:', currentProfile?.role)
+      
+      // ✅ DETECCIÓN DE MESARIO POR ROLE
+      if (currentProfile?.role === 'mesario') {
+        console.log('✅ Mesario detectado - entrando a Control de Votación')
+        renderMesarioControl(root, currentUser, currentProfile)
+        return
+      }
+      
+      // Usuario normal
       renderApp(root, currentUser, currentProfile)
     } else {
       renderLogin(root, () => {})
