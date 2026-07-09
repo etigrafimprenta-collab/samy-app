@@ -17,9 +17,26 @@ service cloud.firestore {
     }
 
     // ── Users collection ──────────────────────────────────
+    // SECURITY FIX (audit finding V.1): a user could previously write their
+    // own `role` field and self-promote to admin. Role changes must now go
+    // through the `cambiarRolUsuario` Cloud Function (server-side validated).
     match /users/{uid} {
       allow read: if isAuth() && (isOwner(uid) || isAdmin());
-      allow write: if isAdmin() || isOwner(uid);
+
+      // Self-signup: a user may create their own profile, but never as admin
+      // and never with a plaintext password field.
+      allow create: if isAuth() && isOwner(uid) &&
+        request.resource.data.role in ['militante', 'user'] &&
+        !('password' in request.resource.data.keys());
+
+      // Owner may update their own doc, but never the `role` field, and
+      // never write a `password` field (passwords live only in Firebase Auth).
+      allow update: if isAdmin() ||
+        (isOwner(uid) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) &&
+          !('password' in request.resource.data.keys()));
+
+      allow delete: if isAdmin();
     }
 
     // ── Voters (padrón) ───────────────────────────────────
@@ -38,6 +55,50 @@ service cloud.firestore {
         resource.data.uid == request.auth.uid || isAdmin()
       );
       allow update: if isAdmin();
+    }
+
+    // ── Día D / operativo (previamente sin cobertura — auditoría V.5) ─────
+    // Estas colecciones ya se leían/escribían desde el código sin ninguna
+    // regla explícita. Se cubren aquí con el mismo criterio que el resto del
+    // esquema legacy mientras dure la migración a /candidates/{candidateId}.
+    match /config/{docId} {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+
+    match /campaignDrivers2025/{id} {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+
+    match /choferes/{id} {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+
+    match /dia_d_choferes/{id} {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+
+    match /mesa_votacion2025/{id} {
+      allow read: if isAuth();
+      allow write: if isAuth();
+    }
+
+    match /dia_d_votos/{id} {
+      allow read: if isAuth();
+      allow write: if isAuth();
+    }
+
+    match /dia_d_transporte/{id} {
+      allow read: if isAuth();
+      allow write: if isAuth();
+    }
+
+    match /dia_d_estado/{id} {
+      allow read: if isAuth();
+      allow write: if isAuth();
     }
   }
 }

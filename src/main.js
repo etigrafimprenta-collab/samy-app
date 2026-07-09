@@ -66,8 +66,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return
       }
       try {
-        const userDoc = await firebase.firestore().collection('users').doc(currentUser.uid).get()
-        const rol = userDoc.data()?.role
+        const perfil = await getUserProfile(currentUser.uid)
+        const rol = perfil?.role
         if (rol === 'admin') {
           renderDiaDAdmin(container)
         } else {

@@ -23,6 +23,7 @@ import {
   writeBatch,
   onSnapshot
 } from 'firebase/firestore'
+import { getFunctions, httpsCallable } from 'firebase/functions'
 
 const firebaseConfig = {
   apiKey: "AIzaSyD3kNTmqRpTqXBjCJI0yDwhcGY543bPBbI",
@@ -36,6 +37,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig)
 export const auth = getAuth(app)
 export const db = getFirestore(app)
+const functionsInstance = getFunctions(app)
 
 export const loginUser = (email, password) =>
   signInWithEmailAndPassword(auth, email, password)
@@ -150,10 +152,6 @@ export const getAllUsers = async () => {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
-export const setUserRole = async (uid, role) => {
-  await setDoc(doc(db, 'users', uid), { role }, { merge: true })
-}
-
 export const getExistingCedulas = async () => {
   const snap = await getDocs(collection(db, 'voters'))
   return new Set(snap.docs.map(d => d.data().cedula))
@@ -219,22 +217,14 @@ export const importVotersBatch = async (rows, onProgress) => {
 }
 
 export async function createUserFromAdmin(email, password, userData) {
-  try {
-    const { httpsCallable, getFunctions } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-functions.js')
-    const functions = getFunctions(app)
-    const crearNuevoUsuario = httpsCallable(functions, 'crearNuevoUsuario')
-    
-    const result = await crearNuevoUsuario({
-      nombre: userData.displayName || '',
-      email: email,
-      password: password,
-      rol: userData.role || 'user'
-    })
-    
-    return result.data.uid
-  } catch (err) {
-    throw err
-  }
+  const crearNuevoUsuario = httpsCallable(functionsInstance, 'crearNuevoUsuario')
+  const result = await crearNuevoUsuario({
+    nombre: userData.displayName || '',
+    email: email,
+    password: password,
+    rol: userData.role || 'user'
+  })
+  return result.data.uid
 }
 
 export const onElectionDayChange = (callback) => {
@@ -412,25 +402,27 @@ export async function getVotosDelMesario(seccional, mesa) {
   return new Set(snap.docs.map(d => d.data().cedula))
 }
 
+// El rol se cambia exclusivamente vía Cloud Function (validación server-side,
+// deja registro en auditLogs). firestore.rules ya rechaza que un cliente
+// escriba `role` directamente, salvo el propio admin sobre otros usuarios.
 export async function updateUserRole(uid, newRole) {
   try {
-    const userRef = doc(db, 'users', uid)
-    await updateDoc(userRef, {
-      role: newRole
-    })
-    return { success: true }
+    const cambiarRolUsuario = httpsCallable(functionsInstance, 'cambiarRolUsuario')
+    const result = await cambiarRolUsuario({ uid, newRole })
+    return result.data
   } catch (err) {
     throw new Error(`Error actualizando rol: ${err.message}`)
   }
 }
 
+// Las contraseñas viven únicamente en Firebase Auth — nunca en Firestore.
+// Si no se pasa newPassword, el servidor genera una segura y la devuelve
+// una única vez en el resultado (generatedPassword) para mostrarla al admin.
 export async function updateUserPassword(uid, newPassword) {
   try {
-    const userRef = doc(db, 'users', uid)
-    await updateDoc(userRef, {
-      password: newPassword
-    })
-    return { success: true }
+    const resetearPasswordUsuario = httpsCallable(functionsInstance, 'resetearPasswordUsuario')
+    const result = await resetearPasswordUsuario({ uid, newPassword })
+    return result.data
   } catch (err) {
     throw new Error(`Error actualizando contraseña: ${err.message}`)
   }

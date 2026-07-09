@@ -747,7 +747,8 @@ async function mostrarModalCambiarPassword(container, user) {
       </div>
       <div style="margin-bottom: 16px;">
         <label style="display: block; font-weight: 700; margin-bottom: 8px;">Nueva Contraseña:</label>
-        <input id="new-password" type="text" placeholder="Ingrese la nueva contraseña" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        <input id="new-password" type="text" placeholder="Dejar vacío para generar una segura automáticamente" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;">
+        <div style="font-size: 0.78rem; color: #777; margin-top: 6px;">Mínimo 6 caracteres. Si la dejás vacía, se genera una contraseña aleatoria segura.</div>
       </div>
       <div style="display: flex; gap: 8px;">
         <button id="btn-confirmar-pass" style="flex: 1; background: #ff9800; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">
@@ -765,13 +766,13 @@ async function mostrarModalCambiarPassword(container, user) {
 
   document.getElementById('btn-confirmar-pass').addEventListener('click', async () => {
     const newPass = document.getElementById('new-password').value.trim()
-    if (!newPass) {
-      alert('Ingrese una contraseña')
-      return
-    }
     try {
-      await updateUserPassword(user.uid, newPass)
-      alert(`✅ Contraseña actualizada`)
+      const result = await updateUserPassword(user.uid, newPass || undefined)
+      if (result?.generatedPassword) {
+        alert(`✅ Contraseña generada para ${user.displayName || user.email}:\n\n${result.generatedPassword}\n\nCopiala ahora, no se va a volver a mostrar.`)
+      } else {
+        alert('✅ Contraseña actualizada')
+      }
       modal.remove()
       location.reload()
     } catch (err) {
