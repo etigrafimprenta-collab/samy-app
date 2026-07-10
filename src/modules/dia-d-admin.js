@@ -144,7 +144,11 @@ export function renderDiaDAdmin(container) {
   `
 
   actualizarHora()
-  setInterval(actualizarHora, 1000)
+  // Si se vuelve a entrar a este panel sin recargar la página, el
+  // intervalo anterior nunca se limpiaba y se iban acumulando (auditoría
+  // IV) — se guarda en el propio objeto window para poder limpiarlo acá.
+  if (window.__diaDAdminInterval) clearInterval(window.__diaDAdminInterval)
+  window.__diaDAdminInterval = setInterval(actualizarHora, 1000)
 
   const switchTab = (tab) => {
     document.getElementById('content-global').style.display = tab === 'global' ? 'block' : 'none'
@@ -248,28 +252,13 @@ async function loadAndRender(container) {
         }
 
         try {
-          const votantesSnap = await getDocs(collection(db, 'voters'))
-          const votantes = votantesSnap.docs
-            .map(d => d.data())
-            .filter(v => v.seccional === seccional && v.mesa === String(mesa))
-
-          const nuestrosSnap = await getDocs(collection(db, 'savedRecords'))
-          const nuestros = new Set()
-          nuestrosSnap.forEach(d => {
-            const data = d.data()
-            if (data.seccional === seccional && data.mesa === String(mesa)) {
-              nuestros.add(data.cedula)
-            }
-          })
-
-          const votosSnap = await getDocs(collection(db, 'mesa_votacion2025'))
-          const votaron = new Set()
-          votosSnap.forEach(d => {
-            const data = d.data()
-            if (data.seccional === seccional && data.mesa === String(mesa)) {
-              votaron.add(data.cedula)
-            }
-          })
+          // Antes: 3 getDocs(collection(...)) SIN where, descargando el
+          // padrón/savedRecords/votos COMPLETOS para filtrar una sola mesa
+          // en el cliente (auditoría IV.1). fbLib ya tenía las consultas
+          // acotadas por seccional+mesa listas — solo no se usaban acá.
+          const votantes = await fbLib.getVotantesDelMesario(seccional, String(mesa))
+          const nuestros = await fbLib.getNuestrosVotosDeMesa(seccional, String(mesa))
+          const votaron = await fbLib.getVotosDelMesario(seccional, String(mesa))
 
           document.getElementById('mesa-total').textContent = votantes.length
           document.getElementById('mesa-nuestros').textContent = nuestros.size
@@ -306,38 +295,42 @@ async function loadAndRender(container) {
       choferes = choferesRealtime.docs.map(d => ({ id: d.id, ...d.data() }))
     })
 
+    // Antes: cada cambio en dia_d_votos disparaba un getDocs(savedRecords)
+    // completo de nuevo (auditoría IV.2) — con varios mesarios marcando
+    // votos a la vez, cada voto individual re-descargaba toda la colección
+    // de registros solo para contar cuántos hay. allRecords ya está en
+    // memoria desde la carga inicial del panel; totalV es simplemente su
+    // longitud, no hace falta volver a pedirlo a Firestore.
     onSnapshot(
       collection(db, 'dia_d_votos'),
       votosSnap => {
         const allVotos = votosSnap.docs.map(d => d.data())
 
-        getDocs(collection(db, 'savedRecords')).then(votantesSnap => {
-          const totalV = votantesSnap.size
-          const totalVotos = votosSnap.size
-          const pct = totalV > 0 ? ((totalVotos / totalV) * 100).toFixed(2) : 0
+        const totalV = allRecords.length
+        const totalVotos = votosSnap.size
+        const pct = totalV > 0 ? ((totalVotos / totalV) * 100).toFixed(2) : 0
 
-          document.getElementById('total-militantes').textContent = militantes.length
-          document.getElementById('total-votantes').textContent = totalV
-          document.getElementById('total-votos').textContent = totalVotos
-          document.getElementById('total-pct').textContent = pct
+        document.getElementById('total-militantes').textContent = militantes.length
+        document.getElementById('total-votantes').textContent = totalV
+        document.getElementById('total-votos').textContent = totalVotos
+        document.getElementById('total-pct').textContent = pct
 
-          const porMil = {}
-          militantes.forEach(m => {
-            porMil[m.uid] = { nombre: m.nombre, email: m.email, votos: 0, registros: [] }
-          })
-
-          allRecords.forEach(r => {
-            if (porMil[r.uid]) porMil[r.uid].registros.push(r)
-          })
-
-          allVotos.forEach(v => {
-            if (porMil[v.militante_id] && v.estado === 'votó') porMil[v.militante_id].votos++
-          })
-
-          renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc)
-          renderLocales(allRecords, allVotos)
-          renderChoferes(choferes, allRecords, allVotos, db, deleteDoc)
+        const porMil = {}
+        militantes.forEach(m => {
+          porMil[m.uid] = { nombre: m.nombre, email: m.email, votos: 0, registros: [] }
         })
+
+        allRecords.forEach(r => {
+          if (porMil[r.uid]) porMil[r.uid].registros.push(r)
+        })
+
+        allVotos.forEach(v => {
+          if (porMil[v.militante_id] && v.estado === 'votó') porMil[v.militante_id].votos++
+        })
+
+        renderRanking(porMil, allVotos, allRecords, choferes, db, setDoc)
+        renderLocales(allRecords, allVotos)
+        renderChoferes(choferes, allRecords, allVotos, db, deleteDoc)
       }
     )
 

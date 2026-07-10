@@ -2,10 +2,10 @@ import { logoutUser } from '../lib/firebase.js'
 import { createInstallButton } from '../lib/pwa.js'
 import { renderSearch } from './search.js'
 import { renderMyRecords } from './myRecords.js'
-import { renderAdmin } from './admin.js'
-import { renderDiaD } from '../modules/dia-d-militantes.js'
-import { renderDiaDAdmin } from '../modules/dia-d-admin.js'
-import { renderDiaDControl } from '../modules/dia-d-control.js'
+// admin.js y los módulos de Día D se cargan dinámicamente más abajo, solo
+// para el rol que realmente los necesita — un militante nunca debería
+// descargar el panel de admin, y un admin no necesita el panel de
+// militante (auditoría IV.5 / mandato Fase 4: lazy import por rol).
 
 export function renderApp(root, user, profile) {
   let currentPage = 'search'
@@ -59,14 +59,21 @@ export function renderApp(root, user, profile) {
     btnContainer.appendChild(installBtn)
     content.insertBefore(btnContainer, content.firstChild)
 
-    if (currentPage === 'search') renderSearch(content, user, profile)
-    else if (currentPage === 'records') renderMyRecords(content, user)
-    else if (currentPage === 'dia-d') {
-      if (isAdmin) renderDiaDAdmin(content)
-      else renderDiaD(content, user)
+    if (currentPage === 'search') {
+      renderSearch(content, user, profile)
+    } else if (currentPage === 'records') {
+      renderMyRecords(content, user)
+    } else if (currentPage === 'dia-d') {
+      if (isAdmin) {
+        import('../modules/dia-d-admin.js').then(({ renderDiaDAdmin }) => renderDiaDAdmin(content))
+      } else {
+        import('../modules/dia-d-militantes.js').then(({ renderDiaD }) => renderDiaD(content, user))
+      }
+    } else if (currentPage === 'dia-d-control' && isControl) {
+      import('../modules/dia-d-control.js').then(({ renderDiaDControl }) => renderDiaDControl(content))
+    } else if (currentPage === 'admin' && isAdmin) {
+      import('./admin.js').then(({ renderAdmin }) => renderAdmin(content))
     }
-    else if (currentPage === 'dia-d-control' && isControl) renderDiaDControl(content)
-    else if (currentPage === 'admin' && isAdmin) renderAdmin(content)
   }
 
   render()

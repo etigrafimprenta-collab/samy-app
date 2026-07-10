@@ -8,6 +8,29 @@ import { renderDiaDControl } from '../modules/dia-d-control.js'
 import { renderChofer } from './chofer.js'
 import { updateUserRole, updateUserPassword, updateUserMesaLocal, deleteUserAccount, getUserById } from '../lib/firebase.js'
 
+// Antes, cada acción del panel (exportar, imprimir, buscar, auditoría,
+// listar usuarios...) volvía a pedir savedRecords/users COMPLETOS a
+// Firestore por separado — hasta 6 descargas del mismo dato en una sola
+// sesión de admin (auditoría IV.3). Ahora se cachea en memoria por 30s y
+// se invalida explícitamente después de cualquier escritura conocida.
+const _snapCache = new Map()
+const CACHE_TTL_MS = 30000
+
+async function getCachedSnap(name) {
+  const cached = _snapCache.get(name)
+  if (cached && (Date.now() - cached.at) < CACHE_TTL_MS) return cached.snap
+  const { collection, getDocs } = await import('firebase/firestore')
+  const { db } = await import('../lib/firebase.js')
+  const snap = await getDocs(collection(db, name))
+  _snapCache.set(name, { snap, at: Date.now() })
+  return snap
+}
+
+function invalidateAdminCache(name) {
+  if (name) _snapCache.delete(name)
+  else _snapCache.clear()
+}
+
 export function renderAdmin(content) {
   let currentView = 'resumen'
 
@@ -155,7 +178,7 @@ async function mostrarPanelExportacion(container) {
   const { collection, getDocs } = firebaseImport
   const { db } = await import('../lib/firebase.js')
 
-  const usersSnap = await getDocs(collection(db, 'users'))
+  const usersSnap = await getCachedSnap('users')
   const usuarios = []
   usersSnap.forEach(d => {
     usuarios.push({
@@ -164,7 +187,7 @@ async function mostrarPanelExportacion(container) {
     })
   })
 
-  const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+  const recordsSnap = await getCachedSnap('savedRecords')
   const localesSet = new Set()
   recordsSnap.forEach(d => {
     const local = d.data().local
@@ -239,7 +262,7 @@ async function descargarExcel(container) {
     const local = document.getElementById('filtro-local')?.value || ''
     const mesa = document.getElementById('filtro-mesa')?.value || ''
 
-    const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+    const recordsSnap = await getCachedSnap('savedRecords')
     let registros = []
     recordsSnap.forEach(d => {
       const data = d.data()
@@ -255,7 +278,7 @@ async function descargarExcel(container) {
       })
     })
 
-    const usersSnap = await getDocs(collection(db, 'users'))
+    const usersSnap = await getCachedSnap('users')
     const usuarios = {}
     usersSnap.forEach(d => {
       usuarios[d.id] = d.data().displayName || d.data().email || 'N/A'
@@ -311,7 +334,7 @@ async function imprimirRegistros(container) {
     const local = document.getElementById('filtro-local')?.value || ''
     const mesa = document.getElementById('filtro-mesa')?.value || ''
 
-    const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+    const recordsSnap = await getCachedSnap('savedRecords')
     let registros = []
     recordsSnap.forEach(d => {
       const data = d.data()
@@ -395,7 +418,7 @@ function loadAndRenderRecords() {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+    const recordsSnap = await getCachedSnap('savedRecords')
     const allRecords = []
     recordsSnap.forEach(d => {
       const data = d.data()
@@ -412,7 +435,7 @@ function loadAndRenderRecords() {
       })
     })
 
-    const usersSnap = await getDocs(collection(db, 'users'))
+    const usersSnap = await getCachedSnap('users')
     const allUsers = {}
     usersSnap.forEach(d => {
       allUsers[d.id] = { ...d.data(), uid: d.id }
@@ -520,7 +543,7 @@ async function mostrarUsuarios(container) {
     const { collection, getDocs } = firebaseImport
     const { db } = await import('../lib/firebase.js')
 
-    const usersSnap = await getDocs(collection(db, 'users'))
+    const usersSnap = await getCachedSnap('users')
     const allUsers = []
     usersSnap.forEach(d => {
       allUsers.push({
@@ -532,7 +555,7 @@ async function mostrarUsuarios(container) {
       })
     })
 
-    const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+    const recordsSnap = await getCachedSnap('savedRecords')
     const porUsuario = {}
     recordsSnap.forEach(d => {
       const uid = d.data().uid
@@ -723,6 +746,7 @@ async function mostrarModalEditarRol(container, user) {
     const newRole = document.getElementById('new-role').value
     try {
       await updateUserRole(user.uid, newRole)
+      invalidateAdminCache('users')
       alert(`✅ Rol actualizado a "${newRole}"`)
       modal.remove()
       location.reload()
@@ -848,6 +872,7 @@ async function mostrarModalAsignarMesa(container, user) {
         data.mesasAsignadas = mesasAsignadas.split(',').map(m => m.trim())
       }
       await updateUserMesaLocal(user.uid, data)
+      invalidateAdminCache('users')
       alert(`✅ Mesa/Local asignado`)
       modal.remove()
       location.reload()
@@ -890,6 +915,7 @@ async function mostrarModalBorrarUsuario(container, uid, nombre) {
   document.getElementById('btn-confirmar-borrar').addEventListener('click', async () => {
     try {
       await deleteUserAccount(uid)
+      invalidateAdminCache('users')
       alert(`✅ Usuario borrado`)
       modal.remove()
       location.reload()
@@ -1012,10 +1038,10 @@ async function renderAuditoria(container, onVolver) {
   const { db } = await import('../lib/firebase.js')
 
   try {
-    const recordsSnap = await getDocs(collection(db, 'savedRecords'))
+    const recordsSnap = await getCachedSnap('savedRecords')
     const records = recordsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
 
-    const usersSnap = await getDocs(collection(db, 'users'))
+    const usersSnap = await getCachedSnap('users')
     const usuariosMap = {}
     usersSnap.forEach(d => {
       usuariosMap[d.id] = d.data().displayName || d.data().email || 'N/A'
@@ -1119,6 +1145,7 @@ async function renderAuditoria(container, onVolver) {
                 const { db } = await import('../lib/firebase.js')
 
                 await deleteDoc(doc(db, 'savedRecords', recId))
+                invalidateAdminCache('savedRecords')
                 alert('✅ Registro duplicado eliminado')
                 
                 renderAuditoria(container, onVolver)

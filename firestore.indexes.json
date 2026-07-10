@@ -4,14 +4,8 @@
       "collectionGroup": "voters",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "cedula", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "voters",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "nombre_upper", "order": "ASCENDING" }
+        { "fieldPath": "seccional", "order": "ASCENDING" },
+        { "fieldPath": "mesa", "order": "ASCENDING" }
       ]
     },
     {
@@ -26,9 +20,111 @@
       "collectionGroup": "savedRecords",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "savedAt", "order": "DESCENDING" }
+        { "fieldPath": "uid", "order": "ASCENDING" },
+        { "fieldPath": "cedula", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "seccional", "order": "ASCENDING" },
+        { "fieldPath": "mesa", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "votes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "seccional", "order": "ASCENDING" },
+        { "fieldPath": "mesa", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "users",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "role", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "calls",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "voterId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "calls",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "voterId", "order": "ASCENDING" },
+        { "fieldPath": "assignedUserId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "calls",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assignedUserId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "followUps",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "dueAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "followUps",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assignedUserId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "dueAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "electionDayMovements",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "voterId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "electionDayMovements",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "voterId", "order": "ASCENDING" },
+        { "fieldPath": "updatedBy", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "electionDayAlerts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "savedRecords",
+      "fieldPath": "cedula",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    }
+  ]
 }

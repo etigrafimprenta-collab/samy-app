@@ -1,11 +1,11 @@
 import './styles/main.css'
 import { onAuthChange, getUserProfile } from './lib/firebase.js'
 import { initPWA } from './lib/pwa.js'
-import { renderLogin } from './pages/login.js'
-import { renderApp } from './pages/app.js'
-import { renderDiaD } from './modules/dia-d-militantes.js'
-import { renderDiaDAdmin } from './modules/dia-d-admin.js'
-import { renderMesarioControl } from './pages/mesario-control.js'
+import { resolveCandidateAccess } from './lib/candidateContext.js'
+// login / app / mesario-control son mutuamente excluyentes en una misma
+// sesión (según haya o no usuario, y su rol) — se importan dinámicamente
+// más abajo para que cada quien descargue solo el módulo que le
+// corresponde (auditoría IV.5 / mandato Fase 4).
 
 // Inicializar PWA cuando el DOM esté listo
 if (document.readyState === 'loading') {
@@ -25,8 +25,27 @@ async function init() {
     
     if (user) {
       currentUser = user
+
+      // Plataforma multicandidato: si este uid es superadmin o pertenece a
+      // algún /candidates/{id}/users, entra por ahí — nunca mezclado con
+      // el esquema legacy de un solo candidato. Si no pertenece a ningún
+      // candidato nuevo, sigue el flujo legacy de Samy Fidabel de siempre
+      // (esto es lo que mantiene la app funcionando para los usuarios que
+      // todavía no fueron migrados).
+      const access = await resolveCandidateAccess(user.uid)
+      if (access.superadmin) {
+        const { renderSuperAdmin } = await import('./pages/superadmin.js')
+        renderSuperAdmin(root, currentUser)
+        return
+      }
+      if (access.activeCandidateId) {
+        const { renderCampaignPanel } = await import('./pages/campaign.js')
+        renderCampaignPanel(root, currentUser, access.activeCandidateId)
+        return
+      }
+
       currentProfile = await getUserProfile(user.uid)
-      
+
       if (!currentProfile) {
         const { createUserProfile } = await import('./lib/firebase.js')
         await createUserProfile(user.uid, {
@@ -42,13 +61,16 @@ async function init() {
       // ✅ DETECCIÓN DE MESARIO POR ROLE
       if (currentProfile?.role === 'mesario') {
         console.log('✅ Mesario detectado - entrando a Control de Votación')
+        const { renderMesarioControl } = await import('./pages/mesario-control.js')
         renderMesarioControl(root, currentUser, currentProfile)
         return
       }
-      
+
       // Usuario normal
+      const { renderApp } = await import('./pages/app.js')
       renderApp(root, currentUser, currentProfile)
     } else {
+      const { renderLogin } = await import('./pages/login.js')
       renderLogin(root, () => {})
     }
   })
@@ -69,8 +91,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const perfil = await getUserProfile(currentUser.uid)
         const rol = perfil?.role
         if (rol === 'admin') {
+          const { renderDiaDAdmin } = await import('./modules/dia-d-admin.js')
           renderDiaDAdmin(container)
         } else {
+          const { renderDiaD } = await import('./modules/dia-d-militantes.js')
           renderDiaD(container, currentUser)
         }
       } catch (error) {

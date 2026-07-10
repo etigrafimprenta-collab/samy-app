@@ -9,6 +9,9 @@
  * - Integración con WhatsApp
  */
 
+import { debounce } from '../lib/debounce.js'
+import { escapeHtml } from '../lib/escapeHtml.js'
+
 export function renderDiaDControl(container) {
   container.innerHTML = `
     <div style="background: linear-gradient(135deg, #c41e3a 0%, #8b1428 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
@@ -72,7 +75,8 @@ export function renderDiaDControl(container) {
   `
 
   actualizarHora()
-  setInterval(actualizarHora, 1000)
+  if (window.__diaDControlInterval) clearInterval(window.__diaDControlInterval)
+  window.__diaDControlInterval = setInterval(actualizarHora, 1000)
   loadAndRender(container)
 }
 
@@ -191,7 +195,7 @@ async function loadAndRender(container) {
                onclick="document.getElementById('search-militante').value='${mil.nombre.replace(/'/g, "\\'")}'; document.getElementById('search-militante').dispatchEvent(new Event('input'))">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
               <div>
-                <span style="font-weight: 700; font-size: 1.1rem; color: #333;">#${idx + 1} ${mil.nombre}</span>
+                <span style="font-weight: 700; font-size: 1.1rem; color: #333;">#${idx + 1} ${escapeHtml(mil.nombre)}</span>
                 <span style="background: #2e7d32; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-weight: 600;">${mil.votos}/${mil.total}</span>
               </div>
               <div style="text-align: right; font-size: 0.9rem;">
@@ -274,8 +278,8 @@ async function loadAndRender(container) {
                   ${votos.map(v => `
                     <div style="background: #e8f5e9; padding: 8px; border-radius: 4px; font-size: 0.85rem; border-left: 4px solid #2e7d32; display: flex; justify-content: space-between;">
                       <div>
-                        <div style="font-weight: 600;">${v.nombre}</div>
-                        <div style="color: #666;">CI: ${v.cedula} | ${v.local}-${v.mesa}</div>
+                        <div style="font-weight: 600;">${escapeHtml(v.nombre)}</div>
+                        <div style="color: #666;">CI: ${escapeHtml(v.cedula)} | ${escapeHtml(v.local)}-${escapeHtml(v.mesa)}</div>
                       </div>
                       <button onclick="if(confirm('¿Corregir a EN CAMINO?')) {
                         const btn = this;
@@ -303,13 +307,13 @@ async function loadAndRender(container) {
                 <div style="display: grid; gap: 8px;">
                   ${enCamino.map(v => `
                     <div style="background: #fff3e0; padding: 8px; border-radius: 4px; font-size: 0.85rem; border-left: 4px solid #ff9800;">
-                      <div style="font-weight: 600;">${v.nombre}</div>
-                      <div style="color: #666;">CI: ${v.cedula} | ${v.local}-${v.mesa}</div>
+                      <div style="font-weight: 600;">${escapeHtml(v.nombre)}</div>
+                      <div style="color: #666;">CI: ${escapeHtml(v.cedula)} | ${escapeHtml(v.local)}-${escapeHtml(v.mesa)}</div>
                       ${v.chofer_asignado ? `
                         <div style="margin-top: 4px; padding: 4px; background: rgba(0,0,0,0.05); border-radius: 2px; font-size: 0.75rem;">
                           ${(() => {
                             const chofer = choferes.find(c => c.id === v.chofer_asignado)
-                            return chofer ? `🚗 ${chofer.nombre}` : 'Chofer no encontrado'
+                            return chofer ? `🚗 ${escapeHtml(chofer.nombre)}` : 'Chofer no encontrado'
                           })()}
                         </div>
                       ` : '<div style="margin-top: 4px; font-size: 0.75rem; color: #ff9800;">⚠️ Sin chofer asignado</div>'}
@@ -341,8 +345,8 @@ async function loadAndRender(container) {
                 <div style="display: grid; gap: 8px;">
                   ${noVoto.map(v => `
                     <div style="background: #ffebee; padding: 8px; border-radius: 4px; font-size: 0.85rem; border-left: 4px solid #f44336;">
-                      <div style="font-weight: 600;">${v.nombre}</div>
-                      <div style="color: #666;">CI: ${v.cedula} | ${v.local}-${v.mesa} | 📱 ${v.telefono || 'Sin tel'}</div>
+                      <div style="font-weight: 600;">${escapeHtml(v.nombre)}</div>
+                      <div style="color: #666;">CI: ${escapeHtml(v.cedula)} | ${escapeHtml(v.local)}-${escapeHtml(v.mesa)} | 📱 ${escapeHtml(v.telefono) || 'Sin tel'}</div>
                       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px;">
                         <button onclick="mostrarSelectChoferes('${v.cedula}', '${v.local}', '${v.nombre}')" style="background: #c41e3a; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem;">🚗 Asignar Chofer</button>
                         ${v.telefono ? `<a href="https://wa.me/${normalizarTelefono(v.telefono)}?text=${encodeURIComponent('Buen día ' + v.nombre + ', te estamos esperando para votar. Lista 6 - Opción 1 Samy Fidabel')}" target="_blank" style="background: #25d366; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; text-align: center; text-decoration: none;">💬 WhatsApp</a>` : ''}
@@ -371,9 +375,9 @@ async function loadAndRender(container) {
     const filterEstado = document.getElementById('filter-estado')
 
     if (searchInput) {
-      searchInput.addEventListener('input', (e) => {
+      searchInput.addEventListener('input', debounce((e) => {
         renderDetalleMilitante(e.target.value, filterEstado?.value || '')
-      })
+      }, 250))
     }
 
     if (filterEstado) {
@@ -388,14 +392,32 @@ async function loadAndRender(container) {
     renderDetalleMilitante()
 
     // LISTENER EN TIEMPO REAL
-    const recordsUnsubscribe = onSnapshot(collection(db, 'savedRecords'), (snapshot) => {
-      records = []
-      snapshot.forEach(d => {
-        records.push({ id: d.id, ...d.data() })
-      })
+    // Antes: en cada cambio se descartaba el array completo y se
+    // reconstruía desde snapshot.forEach, y se re-renderizaba todo de
+    // inmediato — con varios mesarios marcando votos a la vez, cada voto
+    // individual rehacía el ranking y el detalle completos (auditoría
+    // IV.2). Ahora: docChanges() aplica solo el delta al array en memoria,
+    // y el re-render se debounce para agrupar ráfagas de cambios en un
+    // solo repintado.
+    const rerender = debounce(() => {
       renderEstadisticas()
       renderRanking()
       renderDetalleMilitante(searchInput?.value || '', filterEstado?.value || '')
+    }, 400)
+
+    const recordsUnsubscribe = onSnapshot(collection(db, 'savedRecords'), (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        const data = { id: change.doc.id, ...change.doc.data() }
+        const idx = records.findIndex(r => r.id === data.id)
+        if (change.type === 'removed') {
+          if (idx !== -1) records.splice(idx, 1)
+        } else if (idx !== -1) {
+          records[idx] = data
+        } else {
+          records.push(data)
+        }
+      })
+      rerender()
     })
 
     // EXPONER FUNCIÓN GLOBAL
@@ -407,10 +429,10 @@ async function loadAndRender(container) {
       const choferesLocal = choferes.filter(c => c.local === local)
       let html = `
         <div style="background: white; border-radius: 8px; padding: 24px; max-width: 500px; width: 90%;">
-          <h3 style="margin: 0 0 16px 0; color: #c41e3a;">${nombre}</h3>
+          <h3 style="margin: 0 0 16px 0; color: #c41e3a;">${escapeHtml(nombre)}</h3>
           <select id="select-chofer" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 16px;">
             <option value="">-- Selecciona chofer --</option>
-            ${choferesLocal.map(c => `<option value="${c.id}">${c.nombre} (${c.telefono})</option>`).join('')}
+            ${choferesLocal.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.nombre)} (${escapeHtml(c.telefono)})</option>`).join('')}
           </select>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
             <button onclick="this.parentElement.parentElement.parentElement.remove()" style="background: #ddd; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancelar</button>

@@ -16,6 +16,20 @@ service cloud.firestore {
       return isAuth() && request.auth.uid == uid;
     }
 
+    // SECURITY FIX (encontrado probando en vivo con un candidato nuevo):
+    // las colecciones legacy de abajo usaban isAuth() a secas, es decir
+    // "cualquier usuario autenticado del proyecto" — con la plataforma
+    // multicandidato ya desplegada, eso significa que un usuario de un
+    // candidato NUEVO (que no tiene nada que ver con Samy Fidabel) podía
+    // leer todo el padrón legacy, y hasta escribir en dia_d_votos /
+    // mesa_votacion2025 legacy. isLegacyUser() exige que además tenga un
+    // documento en /users (el esquema de un solo candidato), que un
+    // usuario de un candidato nuevo nunca tiene.
+    function isLegacyUser() {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
     // ── Users collection ──────────────────────────────────
     // SECURITY FIX (audit finding V.1): a user could previously write their
     // own `role` field and self-promote to admin. Role changes must now go
@@ -40,18 +54,25 @@ service cloud.firestore {
     }
 
     // ── Voters (padrón) ───────────────────────────────────
+    // El padrón es la ÚNICA colección compartida entre todos los
+    // candidatos a propósito: es el mismo registro electoral para
+    // cualquiera que se presente, no un dato de campaña. Lectura abierta
+    // a cualquier usuario autenticado (legacy o de un candidato nuevo);
+    // escritura reservada al admin legacy de Samy (isAdmin(), para no
+    // romperle su flujo actual) y a superadmin — ningún campaign_admin de
+    // un candidato nuevo puede escribir acá.
     match /voters/{voterId} {
       allow read: if isAuth();
-      allow write: if isAdmin();
+      allow write: if isAdmin() || isSuperAdmin();
     }
 
     // ── Saved Records ─────────────────────────────────────
     match /savedRecords/{recordId} {
-      allow read: if isAuth() && (
+      allow read: if isLegacyUser() && (
         resource.data.uid == request.auth.uid || isAdmin()
       );
-      allow create: if isAuth() && request.resource.data.uid == request.auth.uid;
-      allow delete: if isAuth() && (
+      allow create: if isLegacyUser() && request.resource.data.uid == request.auth.uid;
+      allow delete: if isLegacyUser() && (
         resource.data.uid == request.auth.uid || isAdmin()
       );
       allow update: if isAdmin();
@@ -62,43 +83,424 @@ service cloud.firestore {
     // regla explícita. Se cubren aquí con el mismo criterio que el resto del
     // esquema legacy mientras dure la migración a /candidates/{candidateId}.
     match /config/{docId} {
-      allow read: if isAuth();
+      allow read: if isLegacyUser();
       allow write: if isAdmin();
     }
 
     match /campaignDrivers2025/{id} {
-      allow read: if isAuth();
+      allow read: if isLegacyUser();
       allow write: if isAdmin();
     }
 
     match /choferes/{id} {
-      allow read: if isAuth();
+      allow read: if isLegacyUser();
       allow write: if isAdmin();
     }
 
     match /dia_d_choferes/{id} {
-      allow read: if isAuth();
+      allow read: if isLegacyUser();
       allow write: if isAdmin();
     }
 
     match /mesa_votacion2025/{id} {
-      allow read: if isAuth();
-      allow write: if isAuth();
+      allow read: if isLegacyUser();
+      allow write: if isLegacyUser();
     }
 
     match /dia_d_votos/{id} {
-      allow read: if isAuth();
-      allow write: if isAuth();
+      allow read: if isLegacyUser();
+      allow write: if isLegacyUser();
     }
 
     match /dia_d_transporte/{id} {
-      allow read: if isAuth();
-      allow write: if isAuth();
+      allow read: if isLegacyUser();
+      allow write: if isLegacyUser();
     }
 
     match /dia_d_estado/{id} {
-      allow read: if isAuth();
-      allow write: if isAuth();
+      allow read: if isLegacyUser();
+      allow write: if isLegacyUser();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Plataforma multicandidato — /platformUsers y /candidates/{candidateId}/**
+    //
+    // Los bloques de arriba (users, voters, savedRecords, dia_d_*, etc.)
+    // son el esquema legacy de un solo candidato (Samy Fidabel) y se
+    // mantienen intactos mientras dura la migración (ver scripts/migrate-
+    // to-candidate.js). Una vez migrado y validado, Samy Fidabel opera
+    // 100% bajo /candidates/samy-fidabel/** igual que cualquier otro
+    // candidato nuevo.
+    // ═══════════════════════════════════════════════════════════════════
+
+    function isSuperAdmin() {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/platformUsers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/platformUsers/$(request.auth.uid)).data.globalRole == 'superadmin';
+    }
+
+    function candidateUserDoc(candidateId) {
+      return get(/databases/$(database)/documents/candidates/$(candidateId)/users/$(request.auth.uid)).data;
+    }
+
+    function belongsToCandidate(candidateId) {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/candidates/$(candidateId)/users/$(request.auth.uid));
+    }
+
+    function hasCandidateRole(candidateId, roles) {
+      return belongsToCandidate(candidateId) && candidateUserDoc(candidateId).role in roles;
+    }
+
+    // Un mesario solo puede tocar votos de la mesa que tiene asignada,
+    // ya sea vía (seccional+mesa) fija o vía la lista mesasAsignadas.
+    function isMesarioOfMesa(candidateId, seccional, mesa) {
+      return belongsToCandidate(candidateId) &&
+        candidateUserDoc(candidateId).role == 'mesario' &&
+        (
+          (candidateUserDoc(candidateId).seccional == seccional && candidateUserDoc(candidateId).mesa == mesa) ||
+          (candidateUserDoc(candidateId).mesasAsignadas is list && mesa in candidateUserDoc(candidateId).mesasAsignadas)
+        );
+    }
+
+    // Un chofer solo puede tocar lo que corresponde al doc de drivers que
+    // tiene vinculado (drivers/{driverId}.usuarioAsignado == su uid) — el
+    // mismo vínculo que ya usa el panel de Choferes para "Asignar a Usuario".
+    function isDriverOwner(candidateId, driverId) {
+      return driverId != null &&
+        get(/databases/$(database)/documents/candidates/$(candidateId)/drivers/$(driverId)).data.usuarioAsignado == request.auth.uid;
+    }
+
+    // ── /platformUsers/{uid} — únicamente estado de superadmin ────────
+    match /platformUsers/{uid} {
+      allow read: if isAuth() && (isOwner(uid) || isSuperAdmin());
+      // El primer superadmin se crea con scripts/create-superadmin.js
+      // (Admin SDK, bypassa las reglas). A partir de ahí, solo un
+      // superadmin existente puede otorgar el rol a otro uid.
+      allow write: if isSuperAdmin();
+    }
+
+    // ── /userCandidateIndex/{uid} — a qué candidato(s) pertenece un uid ──
+    // Mantenido únicamente por las Cloud Functions (Admin SDK) cuando se
+    // crea/borra una membresía. Reemplaza a una query collectionGroup
+    // sobre "users" filtrada por uid, que Firestore no puede validar como
+    // segura (probado en vivo — ver historial). Un solo get() por el
+    // propio uid, sin queries cruzando candidatos.
+    match /userCandidateIndex/{uid} {
+      allow read: if isOwner(uid) || isSuperAdmin();
+      allow write: if false;
+    }
+
+    // ── /candidates/{candidateId} — metadata del candidato ─────────────
+    match /candidates/{candidateId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin']) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['name', 'logoUrl', 'primaryColor', 'electionName', 'electionDate', 'lista', 'opcion', 'updatedAt']));
+      allow delete: if isSuperAdmin();
+    }
+
+    // ── /candidates/{candidateId}/users/{uid} — roster + roles ─────────
+    match /candidates/{candidateId}/users/{uid} {
+      // get() y list() dentro de UN candidato (roster completo) funcionan
+      // con la lógica normal de roles — probado en vivo que Firestore sí
+      // puede evaluar condiciones con get() a otro documento para list().
+      // Lo que NO funciona nunca (probado en vivo, ver /userCandidateIndex
+      // más abajo) es una query collectionGroup sobre "users" cruzando
+      // candidateId — por eso esa búsqueda ya no se hace acá.
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        isOwner(uid);
+
+      allow create: if (isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin'])) &&
+        request.resource.data.role in ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'operador', 'chofer', 'viewer', 'auditor'] &&
+        !('password' in request.resource.data.keys());
+
+      // REGLA OBLIGATORIA 1: nadie puede modificar su propio role, ni
+      // siquiera un campaign_admin. Los cambios de rol van únicamente por
+      // la Cloud Function cambiarRolUsuarioCandidato.
+      allow update: if !('password' in request.resource.data.keys()) && (
+        isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid)) ||
+        (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
+      );
+
+      allow delete: if isSuperAdmin() || (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid));
+    }
+
+    // NOTA: no existe /candidates/{candidateId}/voters — el padrón es
+    // compartido, vive únicamente en /voters (ver arriba). Ningún
+    // candidato tiene su propia copia del padrón.
+
+    // ── /candidates/{candidateId}/savedRecords/{recordId} ──────────────
+    match /candidates/{candidateId}/savedRecords/{recordId} {
+      // El Centro de Contacto usa el id de este doc como voterId en
+      // callAssignments — así que un operador puede leer un registro
+      // puntual (get(), nunca list()) si tiene la asignación de ESE
+      // voterId a su propio uid. recordId acá == voterId ahí a propósito.
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor', 'viewer']) ||
+        (belongsToCandidate(candidateId) && resource.data.uid == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(recordId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(recordId)).data.assignedUserId == request.auth.uid) ||
+        // Día D Control: chofer/mesario leen un registro puntual (get(),
+        // nunca list()) si el electionDayControl de ESE mismo voterId
+        // (recordId acá == voterId ahí) los tiene asignados.
+        (hasCandidateRole(candidateId, ['chofer']) &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
+          isDriverOwner(candidateId, get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedDriverId)) ||
+        (hasCandidateRole(candidateId, ['mesario']) &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedTableUserId == request.auth.uid) ||
+        // Un dirigente puede ser REASIGNADO a un voterId que no capturó
+        // él mismo (assignedLeaderId != uid del que creó el savedRecords)
+        // — sin esto solo vería sus propios registros originales, nunca
+        // los que un admin le reasigna desde Día D Control.
+        (hasCandidateRole(candidateId, ['dirigente']) &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedLeaderId == request.auth.uid);
+
+      // REGLA OBLIGATORIA 4: dirigente (y roles operativos) solo puede
+      // crear/editar/borrar SUS PROPIOS registros.
+      allow create: if hasCandidateRole(candidateId, ['dirigente', 'mesario', 'coordinator', 'campaign_admin']) &&
+        request.resource.data.uid == request.auth.uid;
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin']) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid);
+
+      allow delete: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin']) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid);
+    }
+
+    // ── /candidates/{candidateId}/diaD/{diaDDocId} — config/estado global ─
+    match /candidates/{candidateId}/diaD/{diaDDocId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/diaD/{diaDDocId}/votes/{voteId} ──────
+    // REGLA OBLIGATORIA 5: mesario solo puede marcar votos de su(s)
+    // mesa(s) asignada(s).
+    match /candidates/{candidateId}/diaD/{diaDDocId}/votes/{voteId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor', 'viewer']) ||
+        isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) ||
+        (belongsToCandidate(candidateId) && resource.data.markedBy == request.auth.uid);
+
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin']) ||
+        (isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) &&
+          request.resource.data.markedBy == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin']) ||
+        (isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) &&
+          isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) &&
+          request.resource.data.markedBy == resource.data.markedBy);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/drivers/{driverId} — choferes ────────
+    match /candidates/{candidateId}/drivers/{driverId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+    }
+
+    // ── /candidates/{candidateId}/config/{configId} — p.ej. electionDay ─
+    match /candidates/{candidateId}/config/{configId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/auditLogs/{logId} ────────────────────
+    // REGLA OBLIGATORIA 7: auditor (y campaign_admin) solo lectura de
+    // auditLogs. Nunca se escribe desde el cliente — solo las Cloud
+    // Functions (Admin SDK) escriben acá.
+    match /candidates/{candidateId}/auditLogs/{logId} {
+      allow read: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'auditor']);
+      allow write: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Centro de Contacto Electoral — llamadas, seguimiento e incidencias.
+    // voterId acá siempre es el id de un doc de savedRecords (donde ya
+    // viven teléfono/dirección/flags), NO del padrón compartido /voters.
+    // Regla común a las 5 colecciones: campaign_admin/coordinator ven y
+    // escriben todo dentro de SU candidato; operador solo lee/escribe lo
+    // que tiene asignado a SU propio uid (resource.data.assignedUserId).
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /candidates/{candidateId}/callAssignments/{voterId} ────────────
+    match /candidates/{candidateId}/callAssignments/{voterId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow create, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+
+      // Un operador puede actualizar el status de SU propia asignación
+      // (ej: pending -> in_progress al llamar) pero nunca reasignarse a
+      // sí mismo ni a otro operador — assignedUserId no puede cambiar.
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          resource.data.assignedUserId == request.auth.uid &&
+          request.resource.data.assignedUserId == resource.data.assignedUserId);
+    }
+
+    // ── /candidates/{candidateId}/electionStatus/{voterId} ─────────────
+    match /candidates/{candidateId}/electionStatus/{voterId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          resource.data.assignedUserId == request.auth.uid &&
+          request.resource.data.assignedUserId == resource.data.assignedUserId);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/calls/{callId} — historial, inmutable ─
+    match /candidates/{candidateId}/calls/{callId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          request.resource.data.assignedUserId == request.auth.uid &&
+          request.resource.data.operatorUserId == request.auth.uid);
+
+      // El historial de llamadas no se edita ni se borra desde el
+      // cliente, ni siquiera el operador que la registró.
+      allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/followUps/{followUpId} ────────────────
+    match /candidates/{candidateId}/followUps/{followUpId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+    }
+
+    // ── /candidates/{candidateId}/incidents/{incidentId} ────────────────
+    match /candidates/{candidateId}/incidents/{incidentId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.reportedBy == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Día D Control — operación electoral en vivo (distinto del Centro de
+    // Contacto, que es llamadas PREVIAS). assignedLeaderId/assignedTableUserId
+    // guardan el uid del dirigente/mesario directamente; assignedDriverId
+    // guarda el id del doc en drivers (isDriverOwner resuelve el uid real).
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /candidates/{candidateId}/electionDayControl/{voterId} ─────────
+    match /candidates/{candidateId}/electionDayControl/{voterId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId));
+
+      // Creación lazy: la primera vez que cualquier rol operativo toca un
+      // voterId se crea el doc, siempre y cuando se cree apuntándose a sí
+      // mismo (nadie crea un doc "asignado a otro" salvo admin/coordinator).
+      allow create: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && request.resource.data.assignedLeaderId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['mesario']) && request.resource.data.assignedTableUserId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.assignedDriverId));
+
+      // Los 3 roles operativos pueden actualizar el estado de SU propio
+      // voterId, pero nunca reasignar chofer/dirigente/mesario — eso es
+      // exclusivo de campaign_admin/coordinator (REGLA: solo admin reasigna).
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid &&
+          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
+          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
+          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId) ||
+        (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid &&
+          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId &&
+          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
+          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId) &&
+          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
+          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
+          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/electionDayMovements/{movementId} ────
+    // Historial inmutable. Lectura completa solo admin/coordinator — los
+    // roles operativos solo pueden listar SUS PROPIOS movimientos
+    // (updatedBy == uid), nunca los de otro, ni siquiera del mismo votante.
+    match /candidates/{candidateId}/electionDayMovements/{movementId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer']) && resource.data.updatedBy == request.auth.uid);
+
+      allow create: if (isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer'])) &&
+        request.resource.data.updatedBy == request.auth.uid;
+
+      allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/electionDayAlerts/{alertId} ──────────
+    // Generadas por el panel de admin (client-computed) — nunca por el
+    // cliente de un rol operativo. Un operativo solo ve las suyas.
+    match /candidates/{candidateId}/electionDayAlerts/{alertId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer']) && resource.data.assignedUserId == request.auth.uid);
+      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/electionDayReports/{reportId} ────────
+    match /candidates/{candidateId}/electionDayReports/{reportId} {
+      allow read: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }
   }
 }

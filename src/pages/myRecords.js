@@ -1,6 +1,8 @@
 import { getUserRecords, deleteRecord, updateRecord } from '../lib/firebase.js'
-import { exportToExcel } from '../lib/excel.js'
 import { shareWhatsAppDirect } from '../lib/whatsapp.js'
+import { debounce } from '../lib/debounce.js'
+
+const MIN_SEARCH_CHARS = 3
 
 export async function renderMyRecords(container, user) {
   container.innerHTML = '<div class="loader"><div class="spinner"></div> Cargando registros...</div>'
@@ -67,11 +69,14 @@ export async function renderMyRecords(container, user) {
     const btnExport = container.querySelector('#btn-export')
 
     if (filterInput) {
-      filterInput.addEventListener('input', (e) => {
+      filterInput.addEventListener('input', debounce((e) => {
         const term = e.target.value.toLowerCase().trim()
-        console.log('Búsqueda escribida:', term, 'Valor actual:', e.target.value)
         if (!term) {
           renderRecords(records)
+        } else if (term.length < MIN_SEARCH_CHARS) {
+          // Esperar a que haya al menos 3 caracteres evita reconstruir la
+          // lista completa en cada tecla para búsquedas casi vacías.
+          return
         } else {
           const filtered = records.filter(r =>
             r.nombre.toLowerCase().includes(term) ||
@@ -80,11 +85,14 @@ export async function renderMyRecords(container, user) {
           )
           renderRecords(filtered)
         }
-      })
+      }, 250))
     }
 
     if (btnExport) {
-      btnExport.addEventListener('click', () => {
+      btnExport.addEventListener('click', async () => {
+        // xlsx pesa ~1MB — se carga solo cuando de verdad se exporta, no
+        // en el bundle inicial de todo usuario logueado (auditoría IV.5).
+        const { exportToExcel } = await import('../lib/excel.js')
         exportToExcel(records, `mis_registros_samy_${Date.now()}.xlsx`)
       })
     }

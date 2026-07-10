@@ -43,7 +43,8 @@ export function renderDiaD(container, user) {
   `
 
   actualizarHora()
-  setInterval(actualizarHora, 1000)
+  if (window.__diaDMilitantesInterval) clearInterval(window.__diaDMilitantesInterval)
+  window.__diaDMilitantesInterval = setInterval(actualizarHora, 1000)
 
   if (user.role === 'admin') {
     const btnCerrar = document.getElementById('btn-cerrar-votos')
