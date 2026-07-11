@@ -22,9 +22,11 @@
 import { debounce } from '../lib/debounce.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import {
+  getCandidate,
   getAllRecords,
   getUserRecords,
   getRecordsByIds,
+  getRecordsByDriver,
   getAllCandidateUsers,
   getDrivers,
   listenAllRecords,
@@ -42,6 +44,7 @@ import {
   assignTableUserToVoter,
   sincronizarElectionDayControlDesdeRegistros,
   getDiaDMovements,
+  getAllElectionStatuses,
   createDiaDAlert,
   getOpenDiaDAlerts,
   resolveDiaDAlert,
@@ -110,9 +113,12 @@ export async function renderDiaDControlCandidate(container, candidateId, user, m
 // Helper compartido: tarjeta de votante con botones grandes de acción
 // rápida — usado por las 3 vistas operativas (chofer/dirigente/mesario).
 // ══════════════════════════════════════════════════════════════════════
-function tarjetaAccionRapida({ record, control, botones, color, incidentTypes, candidateId, user, role, onUpdated }) {
+function tarjetaAccionRapida({ record, control, botones, color, incidentTypes, candidateId, user, role, onUpdated, waMessage }) {
   const telLimpio = normalizarTelefono(record.telefono)
   const statusLabel = STATUS_LABELS[control?.status] || STATUS_LABELS.pending
+  const waHref = telLimpio
+    ? `https://wa.me/${telLimpio}${waMessage ? '?text=' + encodeURIComponent(waMessage(record)) : ''}`
+    : null
   return `
     <div class="dd-card" data-id="${record.id}" style="border: 1px solid #ddd; border-radius: 10px; padding: 14px; background: ${control?.status === 'voted' ? '#e8f5e9' : 'white'};">
       <div style="font-weight: 700; font-size: 1rem;">${escapeHtml(record.nombre)}</div>
@@ -124,7 +130,7 @@ function tarjetaAccionRapida({ record, control, botones, color, incidentTypes, c
         ${botones.map(b => `<button class="dd-btn-accion" data-id="${record.id}" data-status="${b.status || ''}" data-flag="${b.flag || ''}" style="background: ${color}; color: white; border: none; padding: 10px 6px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: .76rem;">${b.label}</button>`).join('')}
         <button class="dd-btn-incidencia" data-id="${record.id}" style="background: #e65100; color: white; border: none; padding: 10px 6px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: .76rem;">⚠️ Incidencia</button>
       </div>
-      ${telLimpio ? `<a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="display:block; text-align:center; margin-top:6px; text-decoration:none; background:#25d366; color:white; padding:6px; border-radius:6px; font-size:.75rem; font-weight:600;">💬 WhatsApp</a>` : ''}
+      ${waHref ? `<a href="${waHref}" target="_blank" rel="noopener" style="display:block; text-align:center; margin-top:6px; text-decoration:none; background:#25d366; color:white; padding:6px; border-radius:6px; font-size:.75rem; font-weight:600;">💬 WhatsApp</a>` : ''}
       ${record.googleMapsUrl ? `<a href="${escapeHtml(record.googleMapsUrl)}" target="_blank" rel="noopener" style="display:block; text-align:center; margin-top:4px; text-decoration:none; background:#1976d2; color:white; padding:6px; border-radius:6px; font-size:.75rem; font-weight:600;">📍 Google Maps</a>` : ''}
     </div>
   `
@@ -172,16 +178,37 @@ async function renderChoferView(container, candidateId, user) {
   container.innerHTML = headerHtml('Vista chofer') + '<div id="dd-body" style="color:#999;">Cargando...</div>'
   iniciarReloj('__diaDControlChoferInterval')
 
-  const driver = await getDriverByUsuario(candidateId, user.uid)
+  const [driver, candidate] = await Promise.all([
+    getDriverByUsuario(candidateId, user.uid),
+    getCandidate(candidateId)
+  ])
   const body = document.getElementById('dd-body')
   if (!driver) {
     body.innerHTML = '<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:30px; text-align:center; color:#999;">Todavía no tenés un perfil de chofer vinculado a tu usuario. Pedile al administrador que te asigne desde la pestaña Choferes.</div>'
     return
   }
 
+  // Mensaje de WhatsApp pre-cargado — mismo criterio que el resto de la
+  // app (campaign.js) para citar lista/opción, así el votante recibe
+  // siempre el mismo formato venga de quien venga el mensaje.
+  function armarMensajeWhatsapp(record) {
+    const listaOpcion = candidate?.lista && candidate?.opcion
+      ? ` (Lista "${candidate.lista}", Opción "${candidate.opcion}")`
+      : ''
+    return `¡Hola ${record.nombre}! Soy ${driver.nombre}, del equipo de ${candidate?.name || 'la campaña'}${listaOpcion}. ` +
+      `Ya estoy yendo a buscarte para llevarte a votar${record.local ? ' a ' + record.local : ''}${record.mesa ? ' (mesa ' + record.mesa + ')' : ''}. ¡Te espero!`
+  }
+
+  // Lee directo de savedRecords.chofer_asignado (no de electionDayControl):
+  // así aparece acá apenas un admin lo asigna desde la pestaña Choferes,
+  // sin depender del backfill manual "crear control Día D" de Día D
+  // Admin — antes, un votante asignado por ese camino no se veía nunca en
+  // esta vista.
   async function cargarYPintar() {
-    const controls = await getElectionDayControlByDriver(candidateId, driver.id)
-    const records = await getRecordsByIds(candidateId, controls.map(c => c.voterId))
+    const [records, controls] = await Promise.all([
+      getRecordsByDriver(candidateId, driver.id),
+      getElectionDayControlByDriver(candidateId, driver.id)
+    ])
     const controlByVoterId = {}
     controls.forEach(c => { controlByVoterId[c.voterId] = c })
 
@@ -205,7 +232,8 @@ async function renderChoferView(container, candidateId, user) {
         { label: '❓ No encontrado', status: 'not_found' },
         { label: '🦽 Requiere ayuda', flag: 'needsAssistance' }
       ],
-      color: '#1976d2'
+      color: '#1976d2',
+      waMessage: armarMensajeWhatsapp
     })).join('')
 
     wireAccionRapida(grid, {
@@ -335,20 +363,25 @@ async function renderAdminView(container, candidateId, user) {
   let drivers = []
   let controls = []
   let incidents = []
+  let estados = []
   let controlByVoterId = {}
+  let estadoByVoterId = {}
   let filtroCard = null
 
   async function cargarDatos() {
-    const [regs, eq, chof, ctrl, incs] = await Promise.all([
+    const [regs, eq, chof, ctrl, incs, ests] = await Promise.all([
       getAllRecords(candidateId),
       getAllCandidateUsers(candidateId),
       getDrivers(candidateId),
       getAllElectionDayControl(candidateId),
-      getAllIncidents(candidateId)
+      getAllIncidents(candidateId),
+      getAllElectionStatuses(candidateId)
     ])
-    records = regs; users = eq; drivers = chof; controls = ctrl; incidents = incs
+    records = regs; users = eq; drivers = chof; controls = ctrl; incidents = incs; estados = ests
     controlByVoterId = {}
     controls.forEach(c => { controlByVoterId[c.voterId] = c })
+    estadoByVoterId = {}
+    estados.forEach(e => { estadoByVoterId[e.id] = e })
   }
 
   function render() {
@@ -369,6 +402,7 @@ async function renderAdminView(container, candidateId, user) {
 
       <div style="background: white; border: 2px solid #c41e3a; border-radius: 8px; padding: 24px; margin-top: 20px;">
         <h3 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed', sans-serif; font-size: 1.3rem; color: #c41e3a; text-transform: uppercase;">🔍 Lista operativa</h3>
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div id="dd-filtros" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap: 8px; margin-bottom: 16px;"></div>
         <div id="dd-lista-operativa"></div>
       </div>
@@ -477,6 +511,42 @@ async function renderAdminView(container, candidateId, user) {
     ;['dd-f-local', 'dd-f-mesa', 'dd-f-dirigente', 'dd-f-chofer', 'dd-f-estado'].forEach(id => document.getElementById(id).addEventListener('change', renderListaOperativa))
   }
 
+  // Checklist de contexto junto al botón "✅ Votó": junta lo que ya marcaron
+  // llamado (electionStatus, desde Centro de Contacto), chofer y mesario
+  // (electionDayControl) para que quien confirma el estado definitivo de
+  // voto en Día D Control no lo haga a ciegas. Solo se muestra si alguno de
+  // los 3 ya marcó algo — si todo sigue pendiente, no agrega ruido visual.
+  // El mesario es la única de las 3 señales que da certeza total (está
+  // físicamente en la mesa), así que se destaca distinto a las demás.
+  function chipContexto(texto, color) {
+    return `<span style="display:inline-block; background:${color}22; color:${color}; border:1px solid ${color}66; padding:2px 6px; border-radius:6px; font-size:.66rem; font-weight:700; margin:0 3px 3px 0;">${texto}</span>`
+  }
+
+  function renderChecklistContexto(control, estado, choferNombre) {
+    const chips = []
+
+    if (estado?.confirmedToVote) chips.push(chipContexto('☎️ Confirmó voto por llamada', '#2e7d32'))
+    else if (estado?.willNotVote) chips.push(chipContexto('☎️ Dijo que NO irá', '#c62828'))
+    else if (estado?.undecided) chips.push(chipContexto('☎️ Indeciso en la llamada', '#e65100'))
+    else if (estado?.contacted) chips.push(chipContexto('☎️ Contactado', '#1565c0'))
+
+    if (control?.assignedDriverId) {
+      const CHOFER_LABELS = { driver_assigned: 'asignado', on_the_way: 'en camino', picked_up: 'trasladando', arrived_polling_place: 'llegó al local' }
+      chips.push(chipContexto(`🚗 Chofer ${CHOFER_LABELS[control.status] || 'asignado'} (${choferNombre})`, '#1976d2'))
+    }
+
+    if (control?.assignedTableUserId) {
+      if (control.status === 'voted' || control.status === 'arrived_table') {
+        chips.push(chipContexto('🪑 Mesario confirma presencia en mesa — certeza total', '#2e7d32'))
+      } else {
+        chips.push(chipContexto('🪑 Mesario asignado, todavía sin confirmar', '#e65100'))
+      }
+    }
+
+    if (chips.length === 0) return ''
+    return `<div style="max-width:230px; margin-bottom:5px;">${chips.join('')}</div>`
+  }
+
   function renderListaOperativa() {
     const texto = (document.getElementById('dd-f-texto')?.value || '').trim().toLowerCase()
     const local = document.getElementById('dd-f-local')?.value || ''
@@ -518,6 +588,7 @@ async function renderAdminView(container, candidateId, user) {
                 <td>${escapeHtml(choferNombre)}</td>
                 <td><span style="background:#ede7f6; color:#4527a0; padding:2px 6px; border-radius:6px; font-size:.7rem; font-weight:700;">${STATUS_LABELS[c?.status] || STATUS_LABELS.pending}</span>${c?.incidentOpen ? ' ⚠️' : ''}</td>
                 <td>
+                  ${renderChecklistContexto(c, estadoByVoterId[r.id], choferNombre)}
                   <div style="display:flex; gap:4px; flex-wrap:wrap;">
                     <button class="dd-op-votar" data-id="${r.id}" style="background:#2e7d32; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">✅ Votó</button>
                     <button class="dd-op-noira" data-id="${r.id}" style="background:#999; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">🚫 No irá</button>
@@ -636,7 +707,7 @@ async function renderAdminView(container, candidateId, user) {
       const leaderUid = modal.querySelector('#sel-dirigente').value
       if (!leaderUid) { alert('Elegí un dirigente.'); return }
       try {
-        await assignLeaderToVoter(candidateId, record.id, leaderUid, user.uid)
+        await assignLeaderToVoter(candidateId, record, leaderUid, user.uid)
         modal.remove()
         await cargarDatos(); render()
       } catch (err) { alert('Error: ' + err.message) }
@@ -660,7 +731,7 @@ async function renderAdminView(container, candidateId, user) {
       const tableUserUid = modal.querySelector('#sel-mesario').value
       if (!tableUserUid) { alert('Elegí un mesario.'); return }
       try {
-        await assignTableUserToVoter(candidateId, record.id, tableUserUid, record.local, record.mesa, user.uid)
+        await assignTableUserToVoter(candidateId, record, tableUserUid, user.uid)
         modal.remove()
         await cargarDatos(); render()
       } catch (err) { alert('Error: ' + err.message) }

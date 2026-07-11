@@ -70,6 +70,12 @@ async function init() {
       const { renderApp } = await import('./pages/app.js')
       renderApp(root, currentUser, currentProfile)
     } else {
+      const inviteId = new URLSearchParams(window.location.search).get('invite')
+      if (inviteId) {
+        const { renderAcceptInvite } = await import('./pages/acceptInvite.js')
+        renderAcceptInvite(root, inviteId)
+        return
+      }
       const { renderLogin } = await import('./pages/login.js')
       renderLogin(root, () => {})
     }

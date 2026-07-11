@@ -1,25 +1,21 @@
-import { loginUser, registerUser, createUserProfile } from '../lib/firebase.js'
+import { loginUser } from '../lib/firebase.js'
 
+// No hay self-registro: toda cuenta nueva la crea un campaign_admin (desde
+// "Usuarios" en su panel) o llega por un link de invitación puntual (ver
+// acceptInvite.js) — nunca eligiendo el propio usuario a qué candidato se
+// suma.
 export function renderLogin(root) {
-  let isRegister = false
-
   function render() {
     root.innerHTML = `
       <div class="login-page">
-        <img src="/logo.png" alt="Samy Fidabel" class="login-logo" />
-        <div class="login-title">SAMY FIDABEL</div>
-        <div class="login-sub">Lista 6 · Opción 1 · Concejal 2026</div>
+        <div class="login-wordmark">SIGEV</div>
+        <div class="login-title">SIGEV</div>
+        <div class="login-sub">Sistema Integral de Gestión Electoral y Votaciones</div>
+        <div class="login-desc">Plataforma profesional para la administración integral de campañas electorales.</div>
 
         <div class="login-card">
-          <h2>${isRegister ? 'Registrarse' : 'Iniciar Sesión'}</h2>
+          <h2>Iniciar Sesión</h2>
           <div id="login-alert"></div>
-
-          ${isRegister ? `
-            <div class="form-group">
-              <label class="form-label">Nombre completo</label>
-              <input class="form-input" id="inp-name" type="text" placeholder="Tu nombre" />
-            </div>
-          ` : ''}
 
           <div class="form-group">
             <label class="form-label">Correo electrónico</label>
@@ -31,24 +27,10 @@ export function renderLogin(root) {
             <input class="form-input" id="inp-pass" type="password" placeholder="••••••••" />
           </div>
 
-          <button class="btn btn-primary btn-full" id="btn-submit">
-            ${isRegister ? 'Crear cuenta' : 'Ingresar'}
-          </button>
-
-          <div class="login-toggle">
-            ${isRegister
-              ? 'Ya tenés cuenta? <button id="btn-toggle">Iniciar sesión</button>'
-              : 'No tenés cuenta? <button id="btn-toggle">Registrarse</button>'
-            }
-          </div>
+          <button class="btn btn-primary btn-full" id="btn-submit">Ingresar</button>
         </div>
       </div>
     `
-
-    document.getElementById('btn-toggle').addEventListener('click', () => {
-      isRegister = !isRegister
-      render()
-    })
 
     document.getElementById('btn-submit').addEventListener('click', handleSubmit)
     document.getElementById('inp-pass').addEventListener('keydown', (e) => {
@@ -72,28 +54,17 @@ export function renderLogin(root) {
     alertEl.innerHTML = ''
 
     try {
-      if (isRegister) {
-        const name = document.getElementById('inp-name').value.trim()
-        const cred = await registerUser(email, pass)
-        await createUserProfile(cred.user.uid, {
-          email,
-          displayName: name || email.split('@')[0]
-        })
-      } else {
-        await loginUser(email, pass)
-      }
+      await loginUser(email, pass)
     } catch (err) {
       const msgs = {
         'auth/user-not-found': 'Usuario no encontrado.',
         'auth/wrong-password': 'Contraseña incorrecta.',
-        'auth/email-already-in-use': 'Ese correo ya está registrado.',
-        'auth/weak-password': 'La contraseña debe tener al menos 6 caracteres.',
         'auth/invalid-email': 'Correo inválido.',
         'auth/invalid-credential': 'Correo o contraseña incorrectos.'
       }
       alertEl.innerHTML = `<div class="alert alert-error">${msgs[err.code] || err.message}</div>`
       btn.disabled = false
-      btn.textContent = isRegister ? 'Crear cuenta' : 'Ingresar'
+      btn.textContent = 'Ingresar'
     }
   }
 

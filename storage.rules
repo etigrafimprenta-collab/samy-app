@@ -1,0 +1,65 @@
+rules_version = '2';
+
+// Reglas de Firebase Storage — hoy solo se usa para comprobantes de pago
+// del módulo Finanzas (Etapa 2). No había Storage configurado en este
+// proyecto antes de esto (ver auditoría Etapa 1). Reutiliza el mismo
+// modelo de roles candidato-scoped que firestore.rules, vía las
+// funciones cross-service firestore.get()/firestore.exists() — así un
+// comprobante de un candidato nunca queda expuesto a otro.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function candidateUserDoc(candidateId) {
+      return firestore.get(/databases/(default)/documents/candidates/$(candidateId)/users/$(request.auth.uid)).data;
+    }
+
+    function isSuperAdmin() {
+      return isAuth() &&
+        firestore.exists(/databases/(default)/documents/platformUsers/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/platformUsers/$(request.auth.uid)).data.globalRole == 'superadmin';
+    }
+
+    function belongsToCandidate(candidateId) {
+      return isAuth() &&
+        firestore.exists(/databases/(default)/documents/candidates/$(candidateId)/users/$(request.auth.uid));
+    }
+
+    function hasFinanceReadRole(candidateId) {
+      return belongsToCandidate(candidateId) &&
+        candidateUserDoc(candidateId).role in ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor'];
+    }
+
+    function canUploadReceipt(candidateId) {
+      return belongsToCandidate(candidateId) &&
+        candidateUserDoc(candidateId).role in ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier'];
+    }
+
+    // /candidates/{candidateId}/financeReceipts/{paymentOrObligationId}/{fileName}
+    match /candidates/{candidateId}/financeReceipts/{allPaths=**} {
+      allow read: if isSuperAdmin() || hasFinanceReadRole(candidateId);
+
+      allow write: if (isSuperAdmin() || canUploadReceipt(candidateId)) &&
+        request.resource.size < 10 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/.*|application/pdf');
+
+      allow delete: if isSuperAdmin() ||
+        (belongsToCandidate(candidateId) && candidateUserDoc(candidateId).role in ['campaign_admin', 'finance_admin']);
+    }
+
+    // /candidates/{candidateId}/logo/{fileName} — logo de campaña, editable
+    // desde Configuración. Lectura restringida a miembros del candidato,
+    // igual criterio que financeReceipts (no queda público sin auth).
+    match /candidates/{candidateId}/logo/{allPaths=**} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+
+      allow write: if (isSuperAdmin() || (belongsToCandidate(candidateId) && candidateUserDoc(candidateId).role == 'campaign_admin')) &&
+        request.resource.size < 2 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/jpeg|image/png');
+
+      allow delete: if isSuperAdmin() || (belongsToCandidate(candidateId) && candidateUserDoc(candidateId).role == 'campaign_admin');
+    }
+  }
+}

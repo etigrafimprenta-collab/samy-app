@@ -14,6 +14,9 @@ const CANDIDATE_ROLES = [
   "chofer",
   "viewer",
   "auditor",
+  "finance_admin",
+  "finance_operator",
+  "cashier",
 ];
 const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
@@ -675,5 +678,315 @@ export const auditarCoincidenciasEntreCandidatos = functions.https.onCall(
       totalPropio: ownCedulas.length,
       coincidencias,
     };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Administración de plataforma — backup y borrado de candidatos, ambas
+// exclusivas de superadmin. No hay backend "de prueba": operan sobre el
+// mismo Firestore real, por eso backupCandidato existe como respaldo
+// manual antes de un borrado (o para uso periódico), y eliminarCandidato
+// exige escribir el nombre exacto del candidato como confirmación server-
+// side (no alcanza con el confirm() del navegador).
+// ═══════════════════════════════════════════════════════════════════
+
+const CANDIDATE_SUBCOLLECTIONS = [
+  "users", "savedRecords", "drivers", "mesarios", "roles", "roleAuditLogs",
+  "financeObligations", "financePayments", "paymentBatches", "cashAccounts",
+  "cashMovements", "financeReceipts", "financeAuditLogs", "callAssignments",
+  "electionStatus", "calls", "followUps", "incidents", "electionDayControl",
+  "electionDayMovements", "electionDayAlerts", "electionDayReports",
+  "config", "auditLogs",
+];
+
+export const backupCandidato = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    await requireSuperAdmin(request.auth);
+    const { candidateId } = request.data ?? {};
+    if (!candidateId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
+    }
+
+    const candidateRef = admin.firestore().collection("candidates").doc(candidateId);
+    const candidateSnap = await candidateRef.get();
+    if (!candidateSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Candidato no encontrado");
+    }
+
+    const backup: Record<string, any> = {
+      _meta: { candidateId, exportedAt: new Date().toISOString() },
+      candidate: candidateSnap.data(),
+    };
+
+    for (const sub of CANDIDATE_SUBCOLLECTIONS) {
+      const snap = await candidateRef.collection(sub).get();
+      backup[sub] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    }
+
+    return backup;
+  }
+);
+
+export const eliminarCandidato = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    await requireSuperAdmin(request.auth);
+    const { candidateId, confirmName } = request.data ?? {};
+    if (!candidateId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
+    }
+
+    const candidateRef = admin.firestore().collection("candidates").doc(candidateId);
+    const candidateSnap = await candidateRef.get();
+    if (!candidateSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Candidato no encontrado");
+    }
+    const candidateData = candidateSnap.data();
+    if (!confirmName || confirmName.trim() !== (candidateData?.name || "")) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "El nombre de confirmación no coincide con el nombre del candidato — no se borró nada."
+      );
+    }
+
+    // Recolectar uids ANTES de borrar, para poder limpiar Auth +
+    // userCandidateIndex después de que la data ya no exista.
+    const usersSnap = await candidateRef.collection("users").get();
+    const uids = usersSnap.docs.map((d) => d.id);
+
+    // Borra el documento del candidato y TODAS sus subcolecciones,
+    // recursivamente (incluye cualquier subcolección aunque no esté en
+    // CANDIDATE_SUBCOLLECTIONS — recursiveDelete no depende de esa lista,
+    // esa lista es solo para el backup).
+    await admin.firestore().recursiveDelete(candidateRef);
+
+    // Por cada usuario: si además pertenece a otro candidato, se le quita
+    // solo esta membresía del índice; si este era el único, se borra la
+    // cuenta de Auth completa.
+    let usersDeleted = 0;
+    for (const uid of uids) {
+      const idxRef = admin.firestore().collection("userCandidateIndex").doc(uid);
+      const idxSnap = await idxRef.get();
+      const data = idxSnap.data() || {};
+      delete data[candidateId];
+      if (Object.keys(data).length > 0) {
+        await idxRef.set(data);
+      } else {
+        await idxRef.delete();
+        try {
+          await admin.auth().deleteUser(uid);
+          usersDeleted++;
+        } catch (err: any) {
+          console.warn(`No se pudo borrar la cuenta de Auth ${uid}:`, err.message);
+        }
+      }
+    }
+
+    return { success: true, candidateId, usersDeleted };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// El padrón (/voters) es compartido entre todos los candidatos y solo
+// el superadmin puede escribirlo directamente (ver firestore.rules).
+// Pero los teléfonos del padrón vienen de una carga vieja y suelen estar
+// desactualizados — cuando un dirigente/operador captura un votante en
+// "Buscar votante" y carga un teléfono más reciente, esta función lo
+// refleja de vuelta en /voters para que el resto de los candidatos
+// también se beneficien del dato actualizado. Requiere que el caller
+// tenga un rol real en ALGÚN candidato (no expone /voters a cualquier
+// cuenta autenticada) y solo toca el campo telefono — nunca mesa, local,
+// dirección ni ningún otro dato del padrón oficial.
+export const actualizarTelefonoVotante = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cedula, telefono } = request.data ?? {};
+    if (!candidateId || !cedula || !telefono) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "Faltan candidateId, cedula o telefono"
+      );
+    }
+    const callerUid = await requireCandidateRole(
+      request.auth,
+      candidateId,
+      CANDIDATE_ROLES
+    );
+
+    const votersRef = admin.firestore().collection("voters");
+    const snap = await votersRef.where("cedula", "==", String(cedula)).limit(1).get();
+    if (snap.empty) {
+      // La CI no está en el padrón (puede pasar: el militante guardó un
+      // contacto que no figura en la base oficial) — no es un error, no
+      // hay nada que actualizar.
+      return { success: true, updated: false };
+    }
+
+    const voterDoc = snap.docs[0];
+    const telefonoAnterior = voterDoc.data()?.telefono || "";
+    if (telefonoAnterior === String(telefono)) {
+      return { success: true, updated: false };
+    }
+
+    await voterDoc.ref.update({
+      telefono: String(telefono),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastPhoneUpdateBy: callerUid,
+      lastPhoneUpdateCandidateId: candidateId,
+    });
+
+    await writeCandidateAuditLog(candidateId, {
+      actorUid: callerUid,
+      actorEmail: request.auth?.token.email || null,
+      action: "voter_phone_update",
+      entityType: "voter",
+      entityId: String(cedula),
+      before: { telefono: telefonoAnterior },
+      after: { telefono: String(telefono) },
+    });
+
+    return { success: true, updated: true };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Invitaciones — reemplaza al viejo self-registro sin candidato del
+// login. Solo campaign_admin genera el link (mismo criterio que
+// crearUsuarioCandidato); quien lo recibe crea su cuenta contra una
+// invitación puntual con rol y candidato ya fijados de antemano, nunca
+// eligiéndolos él mismo. /invites no tiene reglas de Firestore propias
+// a propósito: nadie lee ni escribe esa colección directo desde el
+// cliente, todo pasa por estas 3 funciones (Admin SDK).
+// ═══════════════════════════════════════════════════════════════════
+
+const INVITE_TTL_DAYS = 7;
+
+export const crearInvitacion = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, rol } = request.data ?? {};
+    if (!candidateId || !rol) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId o rol");
+    }
+    if (!CANDIDATE_ROLES.includes(rol)) {
+      throw new functions.https.HttpsError("invalid-argument", `Rol inválido: ${rol}`);
+    }
+    const callerUid = await requireCandidateRole(request.auth, candidateId, ["campaign_admin"]);
+
+    const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000);
+    const inviteRef = admin.firestore().collection("invites").doc();
+    await inviteRef.set({
+      candidateId,
+      role: rol,
+      createdBy: callerUid,
+      createdByEmail: request.auth?.token.email || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      used: false,
+      usedBy: null,
+      usedAt: null,
+    });
+
+    await writeCandidateAuditLog(candidateId, {
+      actorUid: callerUid,
+      actorEmail: request.auth?.token.email || null,
+      action: "crear_invitacion",
+      entityType: "invites",
+      entityId: inviteRef.id,
+      before: null,
+      after: { role: rol, expiresAt: expiresAt.toISOString() },
+    });
+
+    return { inviteId: inviteRef.id };
+  }
+);
+
+// Sin requireAuth a propósito: quien la llama todavía no tiene cuenta.
+// Solo lee (Admin SDK, no expone /invites al cliente) y no muta nada.
+export const validarInvitacion = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { inviteId } = request.data ?? {};
+    if (!inviteId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta inviteId");
+    }
+    const snap = await admin.firestore().collection("invites").doc(inviteId).get();
+    if (!snap.exists) return { valid: false, reason: "no_existe" };
+    const invite = snap.data()!;
+    if (invite.used) return { valid: false, reason: "ya_usada" };
+    if (invite.expiresAt.toDate() < new Date()) return { valid: false, reason: "expirada" };
+
+    const candidateSnap = await admin.firestore().collection("candidates").doc(invite.candidateId).get();
+    return {
+      valid: true,
+      candidateName: candidateSnap.data()?.name || invite.candidateId,
+      role: invite.role,
+    };
+  }
+);
+
+export const aceptarInvitacion = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { inviteId, nombre, email, password } = request.data ?? {};
+    if (!inviteId || !nombre || !email || !password) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan campos requeridos");
+    }
+
+    const inviteRef = admin.firestore().collection("invites").doc(inviteId);
+    const inviteSnap = await inviteRef.get();
+    if (!inviteSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Invitación no encontrada");
+    }
+    const invite = inviteSnap.data()!;
+    if (invite.used) {
+      throw new functions.https.HttpsError("failed-precondition", "Esta invitación ya fue usada");
+    }
+    if (invite.expiresAt.toDate() < new Date()) {
+      throw new functions.https.HttpsError("failed-precondition", "Esta invitación expiró");
+    }
+
+    let userRecord;
+    try {
+      userRecord = await admin.auth().createUser({ email, password, displayName: nombre });
+    } catch (error: any) {
+      if (error.code === "auth/email-already-exists") {
+        throw new functions.https.HttpsError("already-exists", `El email ${email} ya está registrado`);
+      }
+      throw new functions.https.HttpsError("internal", error.message);
+    }
+
+    await admin
+      .firestore()
+      .collection("candidates")
+      .doc(invite.candidateId)
+      .collection("users")
+      .doc(userRecord.uid)
+      .set({
+        uid: userRecord.uid,
+        email,
+        nombre,
+        role: invite.role,
+        cedula: null,
+        telefono: null,
+        status: "activo",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: invite.createdBy,
+        createdViaInvite: inviteId,
+      });
+    await upsertUserCandidateIndex(userRecord.uid, invite.candidateId, invite.role);
+
+    await inviteRef.update({
+      used: true,
+      usedBy: userRecord.uid,
+      usedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    await writeCandidateAuditLog(invite.candidateId, {
+      actorUid: userRecord.uid,
+      actorEmail: email,
+      action: "aceptar_invitacion",
+      entityType: "users",
+      entityId: userRecord.uid,
+      before: null,
+      after: { email, nombre, role: invite.role },
+    });
+
+    return { uid: userRecord.uid, email: userRecord.email, candidateId: invite.candidateId };
   }
 );

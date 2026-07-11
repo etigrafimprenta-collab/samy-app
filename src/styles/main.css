@@ -602,48 +602,65 @@ html, body {
   font-weight: 500;
 }
 
-/* ── Login ──────────────────────────────────────── */
+/* ── Login (institucional, multicandidato — NO depende de ningún
+   candidato: usa su propia paleta, separada de --rojo/--dorado que
+   todavía usan las pantallas legacy de un solo candidato) ──────────── */
 .login-page {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, var(--rojo-oscuro) 0%, var(--rojo-vivo) 50%, #b00020 100%);
+  background: linear-gradient(160deg, #1c1c1e 0%, #2e2e32 55%, #3a3a40 100%);
   padding: 24px;
 }
 
-.login-logo {
-  width: 110px;
-  height: 110px;
-  border-radius: 50%;
-  object-fit: cover;
-  object-position: top center;
-  border: 4px solid var(--dorado);
-  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
-  margin-bottom: 16px;
+.login-wordmark {
+  width: 92px;
+  height: 92px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #2e2e32 0%, #1c1c1e 100%);
+  border: 2px solid rgba(168, 41, 63, 0.55);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+  margin-bottom: 18px;
+  font-family: 'Barlow Condensed', sans-serif;
+  font-weight: 800;
+  font-size: 1.6rem;
+  letter-spacing: 1px;
+  color: #c94a5e;
 }
 
 .login-title {
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: 2rem;
+  font-size: 2.2rem;
   font-weight: 800;
   color: white;
   text-align: center;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 3px;
   line-height: 1;
 }
 
 .login-sub {
-  color: var(--dorado-claro);
-  font-size: 0.9rem;
+  color: #c94a5e;
+  font-size: 0.85rem;
   text-align: center;
-  margin-top: 6px;
-  margin-bottom: 30px;
+  margin-top: 8px;
   font-weight: 600;
-  letter-spacing: 2px;
-  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+
+.login-desc {
+  color: rgba(255,255,255,0.75);
+  font-size: 0.82rem;
+  text-align: center;
+  margin-top: 8px;
+  margin-bottom: 28px;
+  max-width: 340px;
+  line-height: 1.4;
 }
 
 .login-card {
@@ -659,7 +676,7 @@ html, body {
   font-family: 'Barlow Condensed', sans-serif;
   font-size: 1.3rem;
   font-weight: 700;
-  color: var(--rojo);
+  color: #3a3a40;
   margin-bottom: 20px;
   text-transform: uppercase;
 }
@@ -674,11 +691,22 @@ html, body {
 .login-toggle button {
   background: none;
   border: none;
-  color: var(--rojo);
+  color: #a8293f;
   font-weight: 700;
   cursor: pointer;
   font-family: 'Barlow', sans-serif;
   font-size: 0.87rem;
+}
+
+/* Override institucional del botón — .btn-primary global (--rojo) sigue
+   siendo del candidato legacy y se usa en muchas otras pantallas, así
+   que no se toca esa regla; acá se pisa solo dentro de la tarjeta de login. */
+.login-card .btn-primary {
+  background: #a8293f;
+  box-shadow: 0 3px 12px rgba(168, 41, 63, 0.3);
+}
+.login-card .btn-primary:hover:not(:disabled) {
+  background: #841f31;
 }
 
 /* ── Alert ──────────────────────────────────────── */

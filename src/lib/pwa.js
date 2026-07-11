@@ -3,7 +3,12 @@ let deferredPrompt = null
 let isIOSStandalone = false
 
 export function initPWA() {
-  if ('serviceWorker' in navigator) {
+  // Nunca registrar el Service Worker en `npm run dev`: es un anti-patrón
+  // conocido de Vite/PWA — un SW registrado en localhost puede quedar
+  // sirviendo un build viejo (o interferir con el HMR) incluso después de
+  // cambiar el código fuente, dando la falsa impresión de que "no se
+  // aplicó" un cambio. Solo se registra en el build de producción.
+  if ('serviceWorker' in navigator && !import.meta.env.DEV) {
     navigator.serviceWorker.register('/sw.js')
       .then(reg => console.log('✅ Service Worker registrado'))
       .catch(err => console.error('❌ Error SW:', err))

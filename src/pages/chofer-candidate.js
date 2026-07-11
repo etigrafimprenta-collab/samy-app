@@ -11,7 +11,9 @@ import {
   getRecordsBySeccional,
   getAllCandidateUsers,
   getAllRecords,
-  updateRecord
+  updateRecord,
+  getRecordByCedula,
+  searchVoterByCedula
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
@@ -22,11 +24,47 @@ export function renderChoferCandidate(container, candidateId) {
   let activeTab = 'choferes'
   let choferSeleccionadoId = ''
   let todosLosRegistros = []
+  let filasChoferes = []
+
+  // Igual criterio que mesario-candidate.js: un savedRecord con
+  // canBeDriver=true (tildado en "Buscar votante") aparece acá sin que
+  // nadie lo cargue a mano, hasta que se "edita" (crea el doc real de
+  // drivers linkeado por savedRecordId) o se elimina (desmarca el flag).
+  function construirFilasChoferes() {
+    const linkedIds = new Set(choferes.map(c => c.savedRecordId).filter(Boolean))
+    const filasManual = choferes.map(c => ({ ...c, origen: c.savedRecordId ? 'auto+manual' : 'manual' }))
+    const filasAuto = todosLosRegistros
+      .filter(r => r.canBeDriver && !linkedIds.has(r.id))
+      .map(r => ({
+        id: null,
+        savedRecordId: r.id,
+        nombre: r.nombre,
+        ci: r.cedula,
+        celular: r.telefono,
+        telefono: r.telefono,
+        vehiculo: '',
+        tipoVehiculo: '',
+        seccional: r.local,
+        local: r.local,
+        montoEntregado: 0,
+        usuarioAsignado: null,
+        votantesAsignados: 0,
+        origen: 'auto'
+      }))
+    filasChoferes = [...filasManual, ...filasAuto].sort((a, b) => String(a.nombre || '').localeCompare(String(b.nombre || '')))
+  }
 
   async function cargarChoferes() {
     try {
-      choferes = await getDrivers(candidateId)
-      usuarios = await getAllCandidateUsers(candidateId)
+      const [driversData, usuariosData, records] = await Promise.all([
+        getDrivers(candidateId),
+        getAllCandidateUsers(candidateId),
+        getAllRecords(candidateId)
+      ])
+      choferes = driversData
+      usuarios = usuariosData
+      todosLosRegistros = records
+      construirFilasChoferes()
       render()
     } catch (err) {
       alert('Error al cargar choferes: ' + err.message)
@@ -72,7 +110,7 @@ export function renderChoferCandidate(container, candidateId) {
 
   function renderTabChoferes() {
     const body = document.getElementById('chofer-tab-body')
-    const totalEntregado = choferes.reduce((sum, c) => sum + (Number(c.montoEntregado) || 0), 0)
+    const totalEntregado = filasChoferes.reduce((sum, c) => sum + (Number(c.montoEntregado) || 0), 0)
 
     body.innerHTML = `
       <div style="background: white; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; padding: 20px;">
@@ -90,26 +128,34 @@ export function renderChoferCandidate(container, candidateId) {
             <thead style="background: #000; color: white;">
               <tr>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Nombre</th>
+                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">CI</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Celular</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Vehículo</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Local electoral</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Usuario</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Votantes</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Monto entregado</th>
+                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Origen</th>
                 <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Acciones</th>
               </tr>
             </thead>
             <tbody>
-              ${choferes.length === 0 ? `
-                <tr><td colspan="8" style="padding: 40px; text-align: center; color: #999;">No hay choferes creados. ➕ Crear uno nuevo.</td></tr>
-              ` : choferes.map(c => {
+              ${filasChoferes.length === 0 ? `
+                <tr><td colspan="10" style="padding: 40px; text-align: center; color: #999;">No hay choferes creados. ➕ Crear uno nuevo.</td></tr>
+              ` : filasChoferes.map((c, i) => {
                 const usuarioAsignado = usuarios.find(u => u.id === c.usuarioAsignado)
+                const origenBadge = c.origen === 'manual'
+                  ? '<span style="background:#eee; color:#555; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Manual</span>'
+                  : c.origen === 'auto'
+                    ? '<span style="background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto (Buscar votante)</span>'
+                    : '<span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto + editado</span>'
                 return `
-                <tr style="border-bottom: 1px solid #eee;">
+                <tr style="border-bottom: 1px solid #eee;" data-idx="${i}">
                   <td style="padding: 10px;"><strong>${escapeHtml(c.nombre)}</strong></td>
+                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(c.ci) || '—'}</td>
                   <td style="padding: 10px;">${escapeHtml(c.celular || c.telefono)}</td>
-                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(c.vehiculo)}${c.tipoVehiculo ? ' (' + escapeHtml(c.tipoVehiculo) + ')' : ''}</td>
-                  <td style="padding: 10px;"><strong>${escapeHtml(c.seccional)}</strong></td>
+                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(c.vehiculo) || '—'}${c.tipoVehiculo ? ' (' + escapeHtml(c.tipoVehiculo) + ')' : ''}</td>
+                  <td style="padding: 10px;"><strong>${escapeHtml(c.seccional) || '—'}</strong></td>
                   <td style="padding: 10px; font-size: 0.8rem;">
                     ${usuarioAsignado ? `<span style="background: #e3f2fd; color: #1976d2; padding: 2px 6px; border-radius: 3px;">👤 ${escapeHtml(usuarioAsignado.nombre || usuarioAsignado.email)}</span>` : '<span style="color: #999;">Sin asignar</span>'}
                   </td>
@@ -123,11 +169,12 @@ export function renderChoferCandidate(container, candidateId) {
                       Gs. ${(Number(c.montoEntregado) || 0).toLocaleString('es-PY')}
                     </span>
                   </td>
+                  <td style="padding: 10px;">${origenBadge}</td>
                   <td style="padding: 10px; display: flex; gap: 4px;">
-                    <button class="btn-wa" data-id="${c.id}" style="background: #25d366; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📲</button>
-                    <button class="btn-asignar" data-id="${c.id}" style="background: #2196f3; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📋</button>
-                    <button class="btn-editar" data-id="${c.id}" style="background: #ff9800; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">✏️</button>
-                    <button class="btn-eliminar" data-id="${c.id}" style="background: #d32f2f; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">🗑️</button>
+                    <button class="btn-wa" data-idx="${i}" style="background: #25d366; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📲</button>
+                    ${c.id ? `<button class="btn-asignar" data-idx="${i}" style="background: #2196f3; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📋</button>` : ''}
+                    <button class="btn-editar" data-idx="${i}" style="background: #ff9800; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">✏️</button>
+                    <button class="btn-eliminar" data-idx="${i}" style="background: #d32f2f; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">🗑️</button>
                   </td>
                 </tr>
               `
@@ -140,7 +187,7 @@ export function renderChoferCandidate(container, candidateId) {
 
     body.querySelectorAll('.btn-wa').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const chofer = choferes.find(c => c.id === btn.dataset.id)
+        const chofer = filasChoferes[Number(btn.dataset.idx)]
         const tel = (chofer.celular || chofer.telefono || '').replace(/\D/g, '')
         if (!tel) { alert('Este chofer no tiene celular cargado'); return }
         const msg = encodeURIComponent(`Hola ${chofer.nombre}, te escribimos desde el equipo de campaña.`)
@@ -150,24 +197,29 @@ export function renderChoferCandidate(container, candidateId) {
 
     body.querySelectorAll('.btn-asignar').forEach(btn => {
       btn.addEventListener('click', () => {
-        const chofer = choferes.find(c => c.id === btn.dataset.id)
+        const chofer = filasChoferes[Number(btn.dataset.idx)]
         mostrarModalAsignar(chofer)
       })
     })
 
     body.querySelectorAll('.btn-editar').forEach(btn => {
       btn.addEventListener('click', () => {
-        const chofer = choferes.find(c => c.id === btn.dataset.id)
+        const chofer = filasChoferes[Number(btn.dataset.idx)]
         mostrarModalEditar(chofer)
       })
     })
 
     body.querySelectorAll('.btn-eliminar').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const chofer = choferes.find(c => c.id === btn.dataset.id)
-        if (confirm(`¿Borrar a ${chofer.nombre}?`)) {
-          await deleteDriver(candidateId, chofer.id)
+        const chofer = filasChoferes[Number(btn.dataset.idx)]
+        const avisoCheck = chofer.savedRecordId ? '\nEsto también desmarca la opción "Puede ser chofer" en su registro de Buscar votante.' : ''
+        if (!confirm(`¿Quitar a ${chofer.nombre} del listado de choferes?${avisoCheck}`)) return
+        try {
+          if (chofer.id) await deleteDriver(candidateId, chofer.id)
+          if (chofer.savedRecordId) await updateRecord(candidateId, chofer.savedRecordId, { canBeDriver: false })
           cargarChoferes()
+        } catch (err) {
+          alert('Error: ' + err.message)
         }
       })
     })
@@ -317,6 +369,7 @@ export function renderChoferCandidate(container, candidateId) {
     const mesas = [...new Set(todosLosRegistros.map(r => r.mesa).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
 
     panel.innerHTML = `
+      <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
         <input id="inp-buscar-asignar" placeholder="Buscar por CI o nombre..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
         <select id="sel-local-asignar" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
@@ -397,6 +450,10 @@ export function renderChoferCandidate(container, candidateId) {
       <div style="background: white; border-radius: 8px; max-width: 600px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 24px;">
         <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; font-size: 1.5rem; text-transform: uppercase; color: #1976d2;">➕ NUEVO CHOFER</h2>
         <div style="display: grid; gap: 12px;">
+          <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">CI:</label>
+            <input id="inp-ci" type="text" placeholder="1234567" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+            <div id="autocompletar-chofer-msg" style="font-size:.78rem; color:#666; margin-top:4px;"></div>
+          </div>
           <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Nombre:</label>
             <input id="inp-nombre" type="text" placeholder="Ej: Juan Pérez" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
           <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Celular:</label>
@@ -428,7 +485,44 @@ export function renderChoferCandidate(container, candidateId) {
     `
     document.body.appendChild(modal)
 
+    // Autocompletar por CI: prioridad Registros (savedRecords, trae
+    // también teléfono), y si no está ahí cae al padrón compartido (solo
+    // nombre/local, sin teléfono). Nunca pisa lo ya escrito a mano.
+    document.getElementById('inp-ci').addEventListener('blur', async () => {
+      const ci = document.getElementById('inp-ci').value.trim()
+      const msgEl = document.getElementById('autocompletar-chofer-msg')
+      if (!ci) { msgEl.textContent = ''; return }
+
+      const nombreInput = document.getElementById('inp-nombre')
+      const celularInput = document.getElementById('inp-celular')
+      const seccionalInput = document.getElementById('inp-seccional')
+      msgEl.textContent = '🔎 Buscando datos de esta CI...'
+      try {
+        const registro = await getRecordByCedula(candidateId, ci)
+        if (registro) {
+          if (!nombreInput.value.trim()) nombreInput.value = registro.nombre || ''
+          if (!celularInput.value.trim()) celularInput.value = registro.telefono || ''
+          if (!seccionalInput.value.trim()) seccionalInput.value = registro.local || ''
+          msgEl.textContent = '✅ Datos completados desde Registros.'
+          return
+        }
+        const enPadron = await searchVoterByCedula(ci)
+        if (enPadron.length > 0) {
+          const v = enPadron[0]
+          if (!nombreInput.value.trim()) nombreInput.value = v.nombre || ''
+          if (!seccionalInput.value.trim()) seccionalInput.value = v.local || ''
+          msgEl.textContent = '✅ Datos completados desde el padrón (sin teléfono: el padrón no lo tiene).'
+          return
+        }
+        msgEl.textContent = 'Sin coincidencias en Registros ni en el padrón.'
+      } catch (err) {
+        console.error('Error autocompletando por CI:', err)
+        msgEl.textContent = '❌ ' + err.message
+      }
+    })
+
     document.getElementById('btn-guardar').addEventListener('click', async () => {
+      const ci = document.getElementById('inp-ci').value.trim()
       const nombre = document.getElementById('inp-nombre').value.trim()
       const celular = document.getElementById('inp-celular').value.trim().replace(/\D/g, '')
       const vehiculo = document.getElementById('inp-vehiculo').value.trim()
@@ -444,6 +538,7 @@ export function renderChoferCandidate(container, candidateId) {
 
       try {
         await createDriver(candidateId, {
+          ci,
           nombre,
           celular,
           telefono: celular,
@@ -473,6 +568,8 @@ export function renderChoferCandidate(container, candidateId) {
       <div style="background: white; border-radius: 8px; max-width: 600px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 24px;">
         <h2 style="margin: 0 0 20px 0; font-family: 'Barlow Condensed'; font-size: 1.5rem; text-transform: uppercase; color: #ff9800;">✏️ EDITAR CHOFER</h2>
         <div style="display: grid; gap: 12px;">
+          <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">CI:</label>
+            <input id="inp-ci" type="text" value="${escapeHtml(chofer.ci || '')}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
           <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Nombre:</label>
             <input id="inp-nombre" type="text" value="${escapeHtml(chofer.nombre)}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
           <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Celular:</label>
@@ -496,6 +593,7 @@ export function renderChoferCandidate(container, candidateId) {
     document.body.appendChild(modal)
 
     document.getElementById('btn-guardar').addEventListener('click', async () => {
+      const ci = document.getElementById('inp-ci').value.trim()
       const nombre = document.getElementById('inp-nombre').value.trim()
       const celular = document.getElementById('inp-celular').value.trim().replace(/\D/g, '')
       const vehiculo = document.getElementById('inp-vehiculo').value.trim()
@@ -503,14 +601,34 @@ export function renderChoferCandidate(container, candidateId) {
       const usuarioAsignado = document.getElementById('sel-usuario').value
 
       try {
-        await updateDriver(candidateId, chofer.id, {
-          nombre,
-          celular,
-          telefono: celular,
-          vehiculo,
-          montoEntregado,
-          usuarioAsignado: usuarioAsignado || null
-        })
+        if (chofer.id) {
+          await updateDriver(candidateId, chofer.id, {
+            ci,
+            nombre,
+            celular,
+            telefono: celular,
+            vehiculo,
+            montoEntregado,
+            usuarioAsignado: usuarioAsignado || null
+          })
+        } else {
+          // Fila "auto" (canBeDriver desde Buscar votante, todavía sin doc
+          // propio) — se crea el doc real de drivers acá, linkeado por
+          // savedRecordId para no duplicar la fila en el listado.
+          await createDriver(candidateId, {
+            ci,
+            nombre,
+            celular,
+            telefono: celular,
+            vehiculo,
+            seccional: chofer.seccional,
+            local: chofer.seccional,
+            montoEntregado,
+            usuarioAsignado: usuarioAsignado || null,
+            votantesAsignados: 0,
+            savedRecordId: chofer.savedRecordId
+          })
+        }
         modal.remove()
         cargarChoferes()
       } catch (err) {

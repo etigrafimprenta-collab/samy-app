@@ -27,6 +27,17 @@ export const exportToExcel = (records, filename = 'registros_samy.xlsx') => {
   XLSX.writeFile(wb, filename)
 }
 
+// Genérico para reportes (a diferencia de exportToExcel/exportToExcelFull,
+// que están fijas a la forma de un registro de votante) — cada fila ya
+// viene formada como objeto {columna: valor}, así sirve para cualquier
+// tabla (Finanzas, etc.) sin tener que agregar una función nueva por caso.
+export const exportGenericToExcel = (rows, filename = 'reporte.xlsx', sheetName = 'Reporte') => {
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(rows)
+  XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  XLSX.writeFile(wb, filename)
+}
+
 export const readExcelFile = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()

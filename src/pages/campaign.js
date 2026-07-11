@@ -10,7 +10,10 @@ import {
   getCandidate,
   getCandidateUser,
   updateCandidateBranding,
+  uploadCandidateLogo,
+  deleteCandidateLogo,
   getSharedVotersCount,
+  getPadronMeta,
   getAllRecords,
   getAllCandidateUsers,
   getUserRecords,
@@ -20,9 +23,12 @@ import {
   updateCandidateUserMesaLocal,
   deleteCandidateUser,
   getDrivers,
-  searchVoterByCedula
+  searchVoterByCedula,
+  getRecordByCedula
 } from '../lib/firebaseCandidate.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
+import { can } from '../lib/rbac.js'
+import { ROLE_LABELS } from '../lib/roleLabels.js'
 // Los paneles ricos (Día D admin/control, choferes) se importan
 // dinámicamente en cada tab — no todo campaign_admin necesita bajarlos
 // solo por abrir "Usuarios" (mismo criterio que Fase 4 en app.js/main.js).
@@ -32,17 +38,6 @@ import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../l
 // window.location.origin, que en una sesión de desarrollo sería
 // localhost e inservible para la otra persona).
 const APP_URL = 'https://fastidious-souffle-150794.netlify.app/'
-
-const ROLE_LABELS = {
-  campaign_admin: 'Administrador de campaña',
-  coordinator: 'Coordinador',
-  dirigente: 'Dirigente',
-  mesario: 'Mesario',
-  operador: 'Operador de contacto',
-  chofer: 'Chofer',
-  viewer: 'Visualizador',
-  auditor: 'Auditor'
-}
 
 // Qué pestaña ve cada rol. campaign_admin/superadmin ven todo; el resto
 // se acota a lo que realmente les compete (spec de roles del pedido
@@ -59,10 +54,15 @@ const TAB_ROLES = {
   registros: ['campaign_admin', 'coordinator', 'viewer', 'auditor'],
   auditoria: ['campaign_admin', 'auditor'],
   choferes: ['campaign_admin', 'coordinator'],
+  mesarios: ['campaign_admin', 'coordinator'],
+  dirigentes: ['campaign_admin', 'coordinator'],
+  operadores: ['campaign_admin', 'coordinator'],
   'centro-contacto': ['campaign_admin', 'coordinator', 'operador'],
   'dia-d': ['campaign_admin', 'coordinator'],
   'dia-d-control': ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer'],
-  configuracion: ['campaign_admin']
+  finanzas: ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor'],
+  configuracion: ['campaign_admin'],
+  roles: ['campaign_admin']
 }
 const TAB_LABELS = {
   resumen: '📊 Resumen',
@@ -72,10 +72,55 @@ const TAB_LABELS = {
   registros: '📋 Registros',
   auditoria: '⚠️ Auditoría',
   choferes: '🚗 Choferes',
+  mesarios: '🪑 Mesarios',
+  dirigentes: '🧭 Dirigentes',
+  operadores: '📞 Operadores',
   'centro-contacto': '📞 Centro de Contacto',
   'dia-d': '⚙️ Día D Admin',
   'dia-d-control': '🎮 Día D Control',
-  configuracion: '🛠️ Configuración'
+  finanzas: '💰 Finanzas',
+  configuracion: '🛠️ Configuración',
+  roles: '🔐 Roles y Permisos'
+}
+
+// RBAC (Etapa 6, modo compatibilidad) — mapeo de cada pestaña a su
+// permiso "view" representativo del catálogo nuevo (src/lib/rbacCatalog.js).
+// Se usa SOLO si el usuario ya tiene roleIds asignados (Etapa 5) y esos
+// roles existen en candidates/{candidateId}/roles — si no, se sigue
+// usando TAB_ROLES tal cual (así ningún candidato real, que hoy no tiene
+// nada sembrado en /roles, ve un cambio de comportamiento).
+const TAB_TO_PERMISSION = {
+  resumen: 'dashboard.view',
+  votantes: 'search_voter.view',
+  'mis-registros': 'my_records.view',
+  usuarios: 'users.view',
+  registros: 'records.view',
+  auditoria: 'audit.view',
+  choferes: 'drivers.view',
+  mesarios: 'table_members.view',
+  dirigentes: 'leaders.view',
+  operadores: 'operators.view',
+  'centro-contacto': 'contact_center.view',
+  'dia-d': 'election_day_admin.view_dashboard',
+  'dia-d-control': 'election_day_control.view_operations',
+  finanzas: 'finance.view',
+  configuracion: 'settings.view',
+  roles: 'roles.view'
+}
+
+// Qué módulo (catálogo src/lib/rbacCatalog.js) corresponde a cada pestaña
+// — usado para que el superadmin pueda habilitar/deshabilitar módulos por
+// candidato (candidate.enabledModules) desde el Panel de plataforma. Si
+// el candidato no tiene ese campo (todos los candidatos de hoy, incluidos
+// los 3 reales recién creados), se trata como "todo habilitado" — cero
+// cambio de comportamiento hasta que un superadmin lo configure a mano.
+const TAB_TO_MODULE = {
+  resumen: 'dashboard', votantes: 'search_voter', 'mis-registros': 'my_records',
+  usuarios: 'users', registros: 'records', auditoria: 'audit',
+  choferes: 'drivers', mesarios: 'table_members', dirigentes: 'leaders',
+  operadores: 'operators', 'centro-contacto': 'contact_center',
+  'dia-d': 'election_day_admin', 'dia-d-control': 'election_day_control',
+  finanzas: 'finance', configuracion: 'settings', roles: 'roles'
 }
 
 export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
@@ -85,12 +130,61 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     return
   }
 
-  const myRole = opts.asSuperAdmin
-    ? 'campaign_admin'
-    : (await getCandidateUser(candidateId, user.uid))?.role || 'viewer'
-  const visibleTabs = Object.keys(TAB_ROLES).filter(t => TAB_ROLES[t].includes(myRole))
+  const candidateUserDoc = opts.asSuperAdmin ? null : await getCandidateUser(candidateId, user.uid)
+  const myRole = opts.asSuperAdmin ? 'campaign_admin' : (candidateUserDoc?.role || 'viewer')
+
+  // Modo compatibilidad: si hay roleIds asignados y esos roles existen de
+  // verdad en Firestore, se resuelve la visibilidad con el motor nuevo
+  // (can()); si algo de eso falta, se cae exactamente al TAB_ROLES de
+  // siempre. Nunca lanza — cualquier error acá (rol borrado, permiso sin
+  // catálogo, etc.) también cae al comportamiento viejo en vez de romper
+  // el login.
+  let visibleTabs = null
+  let misRoles = [] // roles Firestore del usuario (Etapa 5/6) — [] si no tiene roleIds o algo falla
+  const roleIds = candidateUserDoc?.roleIds
+  if (roleIds && roleIds.length > 0) {
+    try {
+      const { getRole } = await import('../lib/rolesCandidate.js')
+      misRoles = (await Promise.all(roleIds.map(rid => getRole(candidateId, rid)))).filter(Boolean)
+      if (misRoles.length > 0) {
+        visibleTabs = Object.keys(TAB_ROLES).filter(t => {
+          const permKey = TAB_TO_PERMISSION[t]
+          return permKey ? can(misRoles, permKey) : TAB_ROLES[t].includes(myRole)
+        })
+      }
+    } catch (err) {
+      console.warn('RBAC nuevo no disponible, usando TAB_ROLES de siempre:', err.message)
+    }
+  }
+  if (!visibleTabs) {
+    visibleTabs = Object.keys(TAB_ROLES).filter(t => TAB_ROLES[t].includes(myRole))
+  }
+
+  // Gating por plan/plataforma: el superadmin puede deshabilitar módulos
+  // enteros para un candidato puntual (candidate.enabledModules). No se
+  // aplica cuando el superadmin está "entrando" a mirar (opts.asSuperAdmin)
+  // — ahí necesita ver todo para poder administrar/diagnosticar.
+  if (!opts.asSuperAdmin && Array.isArray(candidate.enabledModules)) {
+    visibleTabs = visibleTabs.filter(t => {
+      const mod = TAB_TO_MODULE[t]
+      return !mod || candidate.enabledModules.includes(mod)
+    })
+  }
+
+  // Etapa 7 (acciones internas, modo compatibilidad): mismo patrón OR que
+  // ya se usa para el menú — el permiso nuevo AMPLÍA lo que ya daba
+  // `legacyRoles.includes(myRole)`, nunca lo achica. Si `misRoles` está
+  // vacío (el caso de todo usuario real hoy sin roleIds), can() siempre
+  // da false y esto se comporta idéntico al chequeo viejo.
+  function puedeCompat(permKey, legacyRoles) {
+    return can(misRoles, permKey) || legacyRoles.includes(myRole)
+  }
 
   let tab = visibleTabs[0] || 'resumen'
+  // Se recuerda entre pestañas dentro de la misma sesión — si volvés a
+  // Registros después de mirar otra pestaña, seguís viendo lo último que
+  // buscaste en vez de que se resetee a la lista completa.
+  let ultimoBuscadoRegistros = ''
   const memberships = opts.asSuperAdmin ? [] : await getCandidateMembershipsForUser(user.uid)
   const otherCandidates = memberships.filter(m => m.candidateId !== candidateId)
 
@@ -144,14 +238,24 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     else if (tab === 'auditoria') renderAuditoria(content)
     else if (tab === 'choferes') {
       import('./chofer-candidate.js').then(({ renderChoferCandidate }) => renderChoferCandidate(content, candidateId))
+    } else if (tab === 'mesarios') {
+      import('./mesario-candidate.js').then(({ renderMesarioCandidate }) => renderMesarioCandidate(content, candidateId))
+    } else if (tab === 'dirigentes') {
+      import('./dirigente-candidate.js').then(({ renderDirigenteCandidate }) => renderDirigenteCandidate(content, candidateId))
+    } else if (tab === 'operadores') {
+      import('./operador-candidate.js').then(({ renderOperadorCandidate }) => renderOperadorCandidate(content, candidateId))
     } else if (tab === 'dia-d') {
       import('../modules/dia-d-admin-candidate.js').then(({ renderDiaDAdminCandidate }) => renderDiaDAdminCandidate(content, candidateId, user))
     } else if (tab === 'configuracion') {
       renderConfiguracion(content)
     } else if (tab === 'dia-d-control') {
-      import('../modules/dia-d-control-candidate.js').then(({ renderDiaDControlCandidate }) => renderDiaDControlCandidate(content, candidateId, user, myRole))
+      import('../modules/dia-d-control-candidate.js').then(({ renderDiaDControlCandidate }) => renderDiaDControlCandidate(content, candidateId, user, myRole, misRoles))
     } else if (tab === 'centro-contacto') {
-      import('./contactCenter.js').then(({ renderContactCenter }) => renderContactCenter(content, candidateId, user, myRole))
+      import('./contactCenter.js').then(({ renderContactCenter }) => renderContactCenter(content, candidateId, user, myRole, misRoles))
+    } else if (tab === 'finanzas') {
+      import('./finanzas-candidate.js').then(({ renderFinanzasCandidate }) => renderFinanzasCandidate(content, candidateId, user, myRole, misRoles))
+    } else if (tab === 'roles') {
+      import('./roles-candidate.js').then(({ renderRolesCandidate }) => renderRolesCandidate(content, candidateId, user, myRole))
     }
   }
 
@@ -162,8 +266,32 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
   async function renderResumen(content) {
     content.innerHTML = '<div style="color:#999;">Cargando...</div>'
-    const [votersCompartidos, users, records, drivers] = await Promise.all([
+
+    // TAB_ROLES.resumen incluye a TODOS los roles (dirigente, mesario,
+    // chofer, operador, viewer, auditor, además de campaign_admin/
+    // coordinator) — pero getAllCandidateUsers/getAllRecords son lecturas
+    // de colección completa que firestore.rules solo permite a
+    // campaign_admin/coordinator. Para el resto, antes esto quedaba
+    // colgado en "Cargando..." con un permission-denied silencioso
+    // (Promise.all sin try/catch) — se detectó probando cada rol en vivo.
+    // Roles sin acceso al dashboard completo ven un resumen acotado a lo
+    // suyo, con datos que sus permisos sí alcanzan.
+    const puedeVerDashboardCompleto = ['campaign_admin', 'coordinator'].includes(myRole)
+    if (!puedeVerDashboardCompleto) {
+      const misRegistros = await getUserRecords(candidateId, user.uid).catch(() => [])
+      content.innerHTML = `
+        <div style="background:white; border:1px solid #e3e3e3; border-radius:10px; padding:28px; text-align:center;">
+          <h2 style="margin:0 0 8px; font-size:1.15rem; color:${candidate.primaryColor || '#1f4b7a'};">👋 Bienvenido/a, ${escapeHtml(candidateUserDoc?.nombre || user.email)}</h2>
+          <p style="color:#666; font-size:.9rem; margin:0 0 4px;">Tu rol en esta campaña: <strong>${escapeHtml(ROLE_LABELS[myRole] || myRole)}</strong></p>
+          ${misRegistros.length > 0 ? `<p style="color:#666; font-size:.85rem; margin-top:12px;">Tenés <strong>${misRegistros.length}</strong> registro(s) propio(s) — los vas a encontrar en la pestaña "Mis registros" si tenés acceso a ella.</p>` : ''}
+        </div>
+      `
+      return
+    }
+
+    const [votersCompartidos, padronMeta, users, records, drivers] = await Promise.all([
       getSharedVotersCount(),
+      getPadronMeta().catch(() => null),
       getAllCandidateUsers(candidateId),
       getAllRecords(candidateId),
       getDrivers(candidateId)
@@ -230,9 +358,13 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       </div>`
     }
 
+    const padronSub = padronMeta?.fileName
+      ? `${escapeHtml(padronMeta.fileName)}${padronMeta.uploadedAt?.toDate ? ' · actualizado ' + padronMeta.uploadedAt.toDate().toLocaleDateString('es-PY') : ''}`
+      : 'Todos los candidatos'
+
     content.innerHTML = `
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;">
-        ${bigCard('Padrón compartido', votersCompartidos.toLocaleString('es-PY'), 'Todos los candidatos')}
+        ${bigCard('Padrón', votersCompartidos.toLocaleString('es-PY'), padronSub)}
         ${bigCard('Registros', records.length, 'Contactos guardados')}
         ${bigCard('Usuarios del equipo', users.length)}
         ${bigCard('Choferes', drivers.length, `${choferesActivos} activo${choferesActivos === 1 ? '' : 's'}`)}
@@ -284,6 +416,23 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   // arma el mensaje de WhatsApp en "Mis registros".
   function renderConfiguracion(content) {
     content.innerHTML = `
+      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px; margin-bottom:16px;">
+        <h2 style="margin:0 0 12px; font-size:1.05rem;">🖼️ Logo de campaña</h2>
+        <div style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+          <img id="logo-preview" src="${escapeHtml(candidate.logoUrl || '')}" style="width:90px; height:90px; object-fit:cover; border-radius:8px; border:1px solid #ddd; background:#f5f5f5; ${candidate.logoUrl ? '' : 'display:none;'}">
+          <div style="flex:1; min-width:220px;">
+            <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">
+              📐 Tamaño recomendado: <strong>180x180 píxeles</strong> (imagen cuadrada) · Formato: <strong>JPG o PNG</strong> · Tamaño máximo: 2 MB.
+            </p>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input id="inp-logo-file" type="file" accept="image/jpeg,image/png" style="font-size:.85rem;">
+              ${candidate.logoUrl ? `<button id="btn-quitar-logo" type="button" style="background:#c62828; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">🗑️ Quitar logo</button>` : ''}
+            </div>
+            <div id="logo-msg" style="font-size:.82rem; margin-top:8px;"></div>
+          </div>
+        </div>
+      </div>
+
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px;">
         <h2 style="margin:0 0 12px; font-size:1.05rem;">🛠️ Configuración de la campaña</h2>
         <form id="form-branding" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px;">
@@ -293,13 +442,67 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <input name="lista" value="${escapeHtml(candidate.lista || '')}" placeholder="Número de Lista" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <input name="opcion" value="${escapeHtml(candidate.opcion || '')}" placeholder="Número de Opción" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <input name="primaryColor" type="color" value="${candidate.primaryColor || '#1f4b7a'}" style="padding:4px; border:1px solid #ccc; border-radius:4px; height:38px;">
-          <input name="logoUrl" value="${escapeHtml(candidate.logoUrl || '')}" placeholder="URL del logo" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <button type="submit" style="padding:10px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Guardar</button>
         </form>
         <div id="branding-msg" style="margin-top:8px; font-size:.85rem;"></div>
         <p style="font-size:.78rem; color:#666; margin-top:16px;">La Lista y la Opción se usan para armar el mensaje de WhatsApp de "Vota Lista X Opción Y" en la pestaña Mis registros.</p>
       </div>
     `
+
+    document.getElementById('inp-logo-file').addEventListener('change', async (e) => {
+      const file = e.target.files[0]
+      if (!file) return
+      const msg = document.getElementById('logo-msg')
+      const preview = document.getElementById('logo-preview')
+
+      // Aviso de dimensiones ANTES de subir — informativo, no bloquea la
+      // subida (un logo rectangular o un poco más grande igual sirve).
+      const dims = await new Promise(resolve => {
+        const img = new Image()
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight })
+        img.onerror = () => resolve(null)
+        img.src = URL.createObjectURL(file)
+      })
+      let avisoDimensiones = ''
+      if (dims && (dims.w !== 180 || dims.h !== 180)) {
+        avisoDimensiones = `⚠️ La imagen es de ${dims.w}x${dims.h}px (se recomienda 180x180px) — se va a subir igual, pero puede verse recortada o distorsionada. `
+      }
+
+      msg.textContent = 'Subiendo...'
+      try {
+        // Si Storage todavía no está habilitado en el proyecto, el SDK
+        // reintenta en silencio contra un bucket inexistente en vez de
+        // fallar rápido — sin este timeout la UI se queda en "Subiendo..."
+        // indefinidamente sin ningún mensaje de error.
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Tiempo de espera agotado — probablemente Firebase Storage todavía no está habilitado en el proyecto (Firebase Console → Storage → "Comenzar").')), 15000))
+        const url = await Promise.race([uploadCandidateLogo(candidateId, file), timeout])
+        candidate.logoUrl = url
+        preview.src = url
+        preview.style.display = ''
+        msg.innerHTML = `<span style="color:#2e7d32;">${avisoDimensiones}✅ Logo actualizado.</span>`
+        setTimeout(() => renderConfiguracion(content), 1200) // refresca para que aparezca el botón "Quitar logo"
+      } catch (err) {
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+
+    document.getElementById('btn-quitar-logo')?.addEventListener('click', async () => {
+      if (!confirm('¿Quitar el logo de la campaña?')) return
+      const msg = document.getElementById('logo-msg')
+      const preview = document.getElementById('logo-preview')
+      msg.textContent = 'Quitando...'
+      try {
+        await deleteCandidateLogo(candidateId, candidate.logoUrl)
+        candidate.logoUrl = ''
+        preview.style.display = 'none'
+        preview.src = ''
+        msg.innerHTML = '<span style="color:#2e7d32;">✅ Logo quitado.</span>'
+        setTimeout(() => renderConfiguracion(content), 1200)
+      } catch (err) {
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+
     document.getElementById('form-branding').addEventListener('submit', async (e) => {
       e.preventDefault()
       const fd = new FormData(e.target)
@@ -311,8 +514,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           electionDate: fd.get('electionDate') || null,
           lista: fd.get('lista').trim(),
           opcion: fd.get('opcion').trim(),
-          primaryColor: fd.get('primaryColor'),
-          logoUrl: fd.get('logoUrl').trim()
+          primaryColor: fd.get('primaryColor')
         }
         await updateCandidateBranding(candidateId, cambios)
         Object.assign(candidate, cambios)
@@ -336,11 +538,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   // del padrón es una operación de plataforma (panel de superadmin), no
   // de cada campaña.
   function renderVotantes(content) {
-    const puedeGuardar = TAB_ROLES['mis-registros'].includes(myRole)
+    const puedeGuardar = puedeCompat('search_voter.create', TAB_ROLES['mis-registros'])
     content.innerHTML = `
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px;">
         <h2 style="margin:0 0 12px; font-size:1.05rem;">🗳️ Buscar votante (padrón compartido)</h2>
-        <p style="font-size:.85rem; color:#666; margin-bottom:16px;">El padrón electoral es el mismo para todos los candidatos. Buscá por cédula o nombre${puedeGuardar ? ' y guardá el contacto para tu campaña' : ''}.</p>
+        <p style="font-size:.85rem; color:#666; margin-bottom:8px;">El padrón electoral es el mismo para todos los candidatos. Buscá por cédula o nombre${puedeGuardar ? ' y guardá el contacto para tu campaña' : ''}.</p>
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin-bottom:16px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
           <input id="inp-buscar-votante" placeholder="Cédula o nombre (mín. 3 letras)" style="flex:1; min-width:220px; padding:8px; border:1px solid #ccc; border-radius:4px;">
           <button id="btn-buscar-votante" style="padding:8px 16px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:700;">Buscar</button>
@@ -546,6 +749,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
     content.innerHTML = `
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
           <input id="input-buscar-mis-reg" placeholder="Buscar por cédula o nombre..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           <select id="sel-local-mis-reg" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
@@ -657,7 +861,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                 <td>${chofer ? escapeHtml(chofer.nombre) : '—'}</td>
                 <td>${siNo(r.canBeDriver)}</td>
                 <td>${siNo(r.wantsToBeMesario)}</td>
-                <td>${siNo(r.needsAssistance)}</td>
+                <td>${Number(r.montoAyuda) > 0 ? `<strong>Gs. ${Number(r.montoAyuda).toLocaleString('es-PY')}</strong>` : siNo(r.needsAssistance)}</td>
                 <td>${siNo(r.requiresPickup)}</td>
                 <td>
                   ${telLimpio ? `
@@ -684,13 +888,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       tablaEl.querySelectorAll('.btn-editar-registro').forEach(btn => {
         btn.addEventListener('click', () => {
           const r = registros.find(x => x.id === btn.dataset.id)
-          const nuevoTelefono = prompt('Teléfono:', r.telefono || '')
-          if (nuevoTelefono === null) return
-          const nuevaNota = prompt('Nota:', r.nota || '')
-          if (nuevaNota === null) return
-          updateRecord(candidateId, r.id, { telefono: nuevoTelefono.trim(), nota: nuevaNota.trim() })
-            .then(() => renderMisRegistros(content))
-            .catch(err => alert('Error: ' + err.message))
+          modalEditarMiRegistro(r)
         })
       })
       tablaEl.querySelectorAll('.btn-borrar-registro').forEach(btn => {
@@ -703,6 +901,79 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       })
 
       return filtrados
+    }
+
+    // Chofer/Mesario/Ayuda/Teléfono editables desde acá. Nota aparte:
+    // asignar un chofer implica que el votante necesita transporte, así
+    // que en vez de duplicar un toggle "Transporte" acá, asignar chofer
+    // fuerza requiresPickup=true por su cuenta (no es bidireccional: sacar
+    // el chofer no desmarca transporte, porque puede seguir necesitándolo
+    // aunque todavía no tenga chofer asignado).
+    function modalEditarMiRegistro(r) {
+      const modal = document.createElement('div')
+      modal.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:center; z-index:9999; padding:20px; overflow-y:auto;'
+      modal.innerHTML = `
+        <div style="background:white; border-radius:8px; padding:24px; max-width:440px; width:100%; margin:20px 0;">
+          <h3 style="margin:0 0 4px;">Editar registro</h3>
+          <p style="margin:0 0 16px; color:#666; font-size:.85rem;">${escapeHtml(r.nombre)} · CI ${escapeHtml(r.cedula)}</p>
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Teléfono:</label>
+          <input id="inp-edit-telefono" value="${escapeHtml(r.telefono || '')}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Nota:</label>
+          <input id="inp-edit-nota" value="${escapeHtml(r.nota || '')}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Chofer asignado:</label>
+          <select id="sel-edit-chofer" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px;">
+            <option value="">-- Sin asignar --</option>
+            ${drivers.map(d => `<option value="${d.id}" ${r.chofer_asignado === d.id ? 'selected' : ''}>${escapeHtml(d.nombre)}</option>`).join('')}
+          </select>
+
+          <div style="border:1px solid #eee; border-radius:6px; padding:10px; margin-bottom:12px; display:grid; gap:8px;">
+            <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
+              <input type="checkbox" id="chk-edit-driver" ${r.canBeDriver ? 'checked' : ''}> Chofer: ¿puede colaborar el Día D?
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
+              <input type="checkbox" id="chk-edit-mesario" ${r.wantsToBeMesario ? 'checked' : ''}> Mesario: ¿quiere sentarse en la mesa?
+            </label>
+          </div>
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Ayuda — Editar Monto (Gs.):</label>
+          <input id="inp-edit-monto-ayuda" type="number" min="0" step="1000" value="${Number(r.montoAyuda) || 0}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
+
+          <div id="edit-registro-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="btn-confirmar-edit" style="flex:1; background:#4caf50; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
+            <button id="btn-cancelar-edit" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      `
+      document.body.appendChild(modal)
+      modal.querySelector('#btn-cancelar-edit').addEventListener('click', () => modal.remove())
+
+      modal.querySelector('#btn-confirmar-edit').addEventListener('click', async () => {
+        const msg = modal.querySelector('#edit-registro-msg')
+        const nuevoChofer = modal.querySelector('#sel-edit-chofer').value
+        const montoAyuda = Number(modal.querySelector('#inp-edit-monto-ayuda').value) || 0
+        try {
+          await updateRecord(candidateId, r.id, {
+            telefono: modal.querySelector('#inp-edit-telefono').value.trim(),
+            nota: modal.querySelector('#inp-edit-nota').value.trim(),
+            chofer_asignado: nuevoChofer || null,
+            canBeDriver: modal.querySelector('#chk-edit-driver').checked,
+            wantsToBeMesario: modal.querySelector('#chk-edit-mesario').checked,
+            montoAyuda,
+            needsAssistance: montoAyuda > 0,
+            // Asignar chofer implica que sí o sí pidió transporte — evita
+            // el toggle "Transporte" duplicado con "Chofer asignado".
+            ...(nuevoChofer ? { requiresPickup: true } : {})
+          })
+          msg.innerHTML = '✅ Guardado'
+          setTimeout(() => { modal.remove(); renderMisRegistros(content) }, 600)
+        } catch (err) {
+          msg.innerHTML = `❌ ${escapeHtml(err.message)}`
+        }
+      })
     }
 
     let ultimosFiltrados = pintarTabla()
@@ -758,6 +1029,10 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   }
 
   async function renderUsuarios(content) {
+    // Qué grupos de rol quedan desplegados — sobrevive a los re-renders de
+    // loadUsersList() dentro de esta misma visita a la pestaña (crear
+    // usuario, cambiar rol, etc. no deben volver a cerrar todo).
+    const rolesEquipoExpandidos = new Set()
     content.innerHTML = `
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px; margin-bottom:16px;">
         <h2 style="margin:0 0 12px; font-size:1.05rem;">➕ Crear usuario</h2>
@@ -771,6 +1046,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           </select>
           <button type="submit" style="padding:8px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Crear</button>
         </form>
+        <div id="autocompletar-ci-msg" style="font-size:.78rem; color:#666; margin-top:6px;"></div>
         <div id="advertencia-ci" style="display:none; background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:10px; border-radius:4px; margin-top:12px; font-size:.82rem;">
           Esta CI no está en el padrón de votantes. ¿Desea guardarlo igual?
           <div style="display:flex; gap:8px; margin-top:8px;">
@@ -780,10 +1056,87 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         </div>
         <div id="crear-usuario-msg" style="margin-top:8px; font-size:.85rem;"></div>
       </div>
+      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px; margin-bottom:16px;">
+        <h2 style="margin:0 0 8px; font-size:1.05rem;">🔗 Invitar por link</h2>
+        <p style="font-size:.82rem; color:#666; margin:0 0 12px;">Generá un link para que la persona cree su propia cuenta con el rol que elijas acá — no hace falta que le generes una contraseña vos. Vale por 7 días y un solo uso.</p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <select id="sel-invite-role" style="flex:1; min-width:180px; padding:8px; border:1px solid #ccc; border-radius:4px;">
+            ${Object.entries(ROLE_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
+          </select>
+          <button id="btn-generar-invitacion" style="padding:8px 16px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Generar link</button>
+        </div>
+        <div id="invitacion-resultado" style="margin-top:12px;"></div>
+      </div>
       <div id="usuarios-list" style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px;">Cargando...</div>
     `
 
+    document.getElementById('btn-generar-invitacion').addEventListener('click', async () => {
+      const rol = document.getElementById('sel-invite-role').value
+      const resultEl = document.getElementById('invitacion-resultado')
+      resultEl.textContent = 'Generando...'
+      try {
+        const crearInvitacion = httpsCallable(functionsInstance, 'crearInvitacion')
+        const result = await crearInvitacion({ candidateId, rol })
+        const link = `${APP_URL}?invite=${result.data.inviteId}`
+        resultEl.innerHTML = `
+          <div style="background:#f0f7ff; border:1px solid #b3d7ff; border-radius:6px; padding:12px;">
+            <div style="font-size:.82rem; color:#333; margin-bottom:8px;">Link para <strong>${escapeHtml(ROLE_LABELS[rol] || rol)}</strong>:</div>
+            <input id="inp-invite-link" readonly value="${escapeHtml(link)}" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box; font-size:.8rem;">
+            <div style="display:flex; gap:8px;">
+              <button id="btn-copiar-invitacion" style="flex:1; background:#4caf50; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer; font-size:.8rem; font-weight:600;">📋 Copiar</button>
+              <button id="btn-wa-invitacion" style="flex:1; background:#25d366; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer; font-size:.8rem; font-weight:600;">📲 WhatsApp</button>
+            </div>
+          </div>
+        `
+        document.getElementById('btn-copiar-invitacion').addEventListener('click', async () => {
+          await navigator.clipboard.writeText(link)
+          const btnCopiar = document.getElementById('btn-copiar-invitacion')
+          btnCopiar.textContent = '✅ Copiado'
+          setTimeout(() => { btnCopiar.textContent = '📋 Copiar' }, 1500)
+        })
+        document.getElementById('btn-wa-invitacion').addEventListener('click', () => {
+          const msg = `Te invito a sumarte al equipo de ${candidate.name || 'la campaña'} como ${ROLE_LABELS[rol] || rol}. Creá tu cuenta acá: ${link}`
+          window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank')
+        })
+      } catch (err) {
+        resultEl.innerHTML = `<div class="alert alert-error">❌ ${escapeHtml(err.message)}</div>`
+      }
+    })
+
     const form = document.getElementById('form-crear-usuario')
+
+    // Autocompletar por CI: primero busca en Registros (savedRecords) de
+    // este candidato — trae nombre y teléfono ya cargados por un
+    // dirigente. Si no está ahí, cae al padrón compartido (solo nombre,
+    // que es lo único que tiene). Nunca pisa lo que el admin ya escribió
+    // a mano en esos campos.
+    form.querySelector('[name="cedula"]').addEventListener('blur', async () => {
+      const cedula = form.querySelector('[name="cedula"]').value.trim()
+      const msgEl = document.getElementById('autocompletar-ci-msg')
+      if (!cedula) { msgEl.textContent = ''; return }
+
+      const nombreInput = form.querySelector('[name="nombre"]')
+      const telefonoInput = form.querySelector('[name="telefono"]')
+      msgEl.textContent = '🔎 Buscando datos de esta CI...'
+      try {
+        const registro = await getRecordByCedula(candidateId, cedula)
+        if (registro) {
+          if (!nombreInput.value.trim()) nombreInput.value = registro.nombre || ''
+          if (!telefonoInput.value.trim()) telefonoInput.value = registro.telefono || ''
+          msgEl.textContent = '✅ Datos completados desde Registros.'
+          return
+        }
+        const enPadron = await searchVoterByCedula(cedula)
+        if (enPadron.length > 0) {
+          if (!nombreInput.value.trim()) nombreInput.value = enPadron[0].nombre || ''
+          msgEl.textContent = '✅ Nombre completado desde el padrón.'
+          return
+        }
+        msgEl.textContent = ''
+      } catch (err) {
+        msgEl.textContent = ''
+      }
+    })
 
     async function crearUsuario() {
       const fd = new FormData(form)
@@ -840,36 +1193,23 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       const ranking = users
         .map(u => ({ ...u, cantidad: porUsuario[u.id] || 0 }))
         .sort((a, b) => b.cantidad - a.cantidad)
+      const topUid = ranking.length && ranking[0].cantidad > 0 ? ranking[0].id : null
 
       listEl.innerHTML = `
         <h2 style="margin:0 0 12px; font-size:1.05rem;">🏆 Equipo (${ranking.length})</h2>
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <input id="inp-buscar-equipo" placeholder="Buscar por nombre, CI o rol..." style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
         <div id="lista-equipo"></div>
       `
       const equipoEl = document.getElementById('lista-equipo')
 
-      function pintarEquipo(filtro = '') {
-        const termino = filtro.trim().toLowerCase()
-        const filtrados = !termino ? ranking : ranking.filter(u =>
-          String(u.nombre || '').toLowerCase().includes(termino) ||
-          String(u.email || '').toLowerCase().includes(termino) ||
-          String(u.cedula || '').toLowerCase().includes(termino) ||
-          String(u.role || '').toLowerCase().includes(termino) ||
-          String(ROLE_LABELS[u.role] || '').toLowerCase().includes(termino)
-        )
-
-        if (filtrados.length === 0) {
-          equipoEl.innerHTML = `<div style="color:#999;">${ranking.length === 0 ? 'Sin usuarios todavía.' : 'Sin resultados.'}</div>`
-          return
-        }
-
-        equipoEl.innerHTML = `
-        <div style="display:grid; gap:12px;">
-          ${filtrados.map((u, idx) => `
-            <div style="border:1px solid #eee; border-radius:6px; padding:14px; background:${idx === 0 ? '#fff9c4' : '#f9f9f9'};">
+      function tarjetaUsuario(u) {
+        const esTop = u.id === topUid
+        return `
+            <div style="border:1px solid #eee; border-radius:6px; padding:14px; background:${esTop ? '#fff9c4' : '#f9f9f9'};">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                 <div>
-                  <div style="font-weight:700;">${idx === 0 ? '🥇 ' : ''}${escapeHtml(u.nombre || u.email)}</div>
+                  <div style="font-weight:700;">${esTop ? '🥇 ' : ''}${escapeHtml(u.nombre || u.email)}</div>
                   <div style="font-size:.75rem; color:#666;">${escapeHtml(u.email)}</div>
                   <span style="display:inline-block; margin-top:4px; background:${roleColor(u.role)}; color:white; padding:2px 8px; border-radius:3px; font-size:.7rem; font-weight:700;">${escapeHtml(ROLE_LABELS[u.role] || u.role)}</span>
                 </div>
@@ -891,10 +1231,10 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                 </div>
               ` : ''}
             </div>
-          `).join('')}
-        </div>
-      `
+        `
+      }
 
+      function bindTarjetaHandlers() {
         equipoEl.querySelectorAll('.btn-editar-rol').forEach(btn => {
           btn.addEventListener('click', () => modalEditarRol(ranking.find(u => u.id === btn.dataset.uid)))
         })
@@ -913,6 +1253,66 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         equipoEl.querySelectorAll('.btn-wa-acceso').forEach(btn => {
           btn.addEventListener('click', () => enviarAccesoWhatsapp(ranking.find(u => u.id === btn.dataset.uid)))
         })
+      }
+
+      function pintarEquipo(filtro = '') {
+        const termino = filtro.trim().toLowerCase()
+        const filtrados = !termino ? ranking : ranking.filter(u =>
+          String(u.nombre || '').toLowerCase().includes(termino) ||
+          String(u.email || '').toLowerCase().includes(termino) ||
+          String(u.cedula || '').toLowerCase().includes(termino) ||
+          String(u.role || '').toLowerCase().includes(termino) ||
+          String(ROLE_LABELS[u.role] || '').toLowerCase().includes(termino)
+        )
+
+        if (filtrados.length === 0) {
+          equipoEl.innerHTML = `<div style="color:#999;">${ranking.length === 0 ? 'Sin usuarios todavía.' : 'Sin resultados.'}</div>`
+          return
+        }
+
+        // Buscando algo puntual: lista plana, sin importar el rol. Sin
+        // búsqueda: agrupado por rol y comprimido (accordion), para no
+        // desplazar una lista larga — el estado abierto/cerrado se
+        // recuerda en rolesEquipoExpandidos mientras dura esta visita a
+        // la pestaña.
+        if (termino) {
+          equipoEl.innerHTML = `<div style="display:grid; gap:12px;">${filtrados.map(tarjetaUsuario).join('')}</div>`
+          bindTarjetaHandlers()
+          return
+        }
+
+        const porRol = {}
+        filtrados.forEach(u => {
+          const key = u.role || 'sin_rol'
+          if (!porRol[key]) porRol[key] = []
+          porRol[key].push(u)
+        })
+        const rolesOrdenados = [...Object.keys(ROLE_LABELS), ...Object.keys(porRol)]
+          .filter((r, idx, arr) => porRol[r]?.length && arr.indexOf(r) === idx)
+
+        equipoEl.innerHTML = rolesOrdenados.map(rol => {
+          const usuariosDelRol = porRol[rol]
+          const abierto = rolesEquipoExpandidos.has(rol)
+          return `
+            <div style="border:1px solid #eee; border-radius:6px; margin-bottom:10px; overflow:hidden;">
+              <button class="btn-toggle-rol-equipo" data-rol="${escapeHtml(rol)}" style="width:100%; text-align:left; background:${roleColor(rol)}; color:white; border:none; padding:12px 14px; cursor:pointer; font-weight:700; display:flex; justify-content:space-between; align-items:center; font-size:.9rem;">
+                <span>${escapeHtml(ROLE_LABELS[rol] || rol)} (${usuariosDelRol.length})</span>
+                <span>${abierto ? '▲' : '▼'}</span>
+              </button>
+              ${abierto ? `<div style="padding:12px; display:grid; gap:12px;">${usuariosDelRol.map(tarjetaUsuario).join('')}</div>` : ''}
+            </div>
+          `
+        }).join('')
+
+        equipoEl.querySelectorAll('.btn-toggle-rol-equipo').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const rol = btn.dataset.rol
+            if (rolesEquipoExpandidos.has(rol)) rolesEquipoExpandidos.delete(rol)
+            else rolesEquipoExpandidos.add(rol)
+            pintarEquipo(document.getElementById('inp-buscar-equipo').value)
+          })
+        })
+        bindTarjetaHandlers()
       }
 
       pintarEquipo()
@@ -1054,6 +1454,11 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   // volumen de un candidato individual es chico (a diferencia de Samy).
   async function renderRegistros(content) {
     content.innerHTML = '<div style="color:#999;">Cargando...</div>'
+    // Solo campaign_admin: firestore.rules únicamente permite actualizar
+    // savedRecords ajenos a campaign_admin (y al propio dirigente dueño) —
+    // coordinator/viewer/auditor ven Registros pero no pueden escribir acá,
+    // así que ni se les muestra el botón de editar.
+    const puedeEditarReg = puedeCompat('records.edit', ['campaign_admin'])
     const [records, users] = await Promise.all([
       getAllRecords(candidateId),
       getAllCandidateUsers(candidateId)
@@ -1070,8 +1475,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
     content.innerHTML = `
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
-          <input id="input-buscar-reg" placeholder="Buscar por cédula o nombre..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="input-buscar-reg" placeholder="Buscar por cédula o nombre..." value="${escapeHtml(ultimoBuscadoRegistros)}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           <select id="sel-local-reg" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <option value="">Todos los locales</option>
             ${locales.map(opcion).join('')}
@@ -1155,10 +1561,10 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         <div style="overflow-x:auto;">
           <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
             <thead><tr style="text-align:left; border-bottom:2px solid #eee;">
-              <th style="padding:6px;">Cédula</th><th>Nombre</th><th>Local</th><th>Mesa</th><th>Orden</th><th>Teléfono</th><th>Dirección / Ubicación</th><th>Dirigente</th><th>Chofer</th><th>Mesario</th><th>Ayuda Gs.</th><th>Transporte</th><th>WhatsApp</th>
+              <th style="padding:6px;">Cédula</th><th>Nombre</th><th>Local</th><th>Mesa</th><th>Orden</th><th>Teléfono</th><th>Dirección / Ubicación</th><th>Dirigente</th><th>Chofer</th><th>Mesario</th><th>Ayuda Gs.</th><th>Transporte</th><th>WhatsApp</th>${puedeEditarReg ? '<th>Acciones</th>' : ''}
             </tr></thead>
             <tbody>
-              ${filtrados.map(r => {
+              ${filtrados.map((r, i) => {
                 const siNo = (flag) => flag
                   ? '<span style="color:#2e7d32; font-weight:700;">Sí</span>'
                   : '<span style="color:#999;">No</span>'
@@ -1168,7 +1574,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                   `Tu lugar de votación es ${r.local || 'N/A'}, mesa ${r.mesa || 'N/A'}, orden ${r.orden || 'N/A'}. ¡Contamos con tu voto!` +
                   (candidate.lista && candidate.opcion ? ` Vota Lista "${candidate.lista}" Opción "${candidate.opcion}"` : '')
                 )
-                return `<tr style="border-bottom:1px solid #eee; ${hayFiltro ? 'background:#fffacd;' : ''}">
+                return `<tr style="border-bottom:1px solid #eee; ${hayFiltro ? 'background:#fffacd;' : ''}" data-idx="${i}">
                 <td style="padding:6px; font-family:monospace; font-size:.78rem;">${escapeHtml(r.cedula)}</td>
                 <td style="padding:6px;"><strong>${escapeHtml(r.nombre)}</strong></td>
                 <td>${escapeHtml(r.local)}</td>
@@ -1179,7 +1585,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                 <td>${escapeHtml(usuariosMap[r.uid] || 'N/A')}</td>
                 <td>${siNo(r.canBeDriver)}</td>
                 <td>${siNo(r.wantsToBeMesario)}</td>
-                <td>${siNo(r.needsAssistance)}</td>
+                <td>${Number(r.montoAyuda) > 0 ? `<strong>Gs. ${Number(r.montoAyuda).toLocaleString('es-PY')}</strong>` : siNo(r.needsAssistance)}</td>
                 <td>${siNo(r.requiresPickup)}</td>
                 <td>
                   ${telLimpio ? `
@@ -1189,6 +1595,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                     </div>
                   ` : '<span style="color:#999; font-size:.75rem;">sin tel.</span>'}
                 </td>
+                ${puedeEditarReg ? `<td><button class="btn-editar-reg" data-idx="${i}" style="background:#ff9800; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.72rem; font-weight:600;">✏️</button></td>` : ''}
               </tr>`
               }).join('')}
             </tbody>
@@ -1196,13 +1603,84 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         </div>
         ${filtrados.length === 0 ? '<div style="text-align:center; padding:30px; color:#999;">Sin resultados.</div>' : ''}
       `
+
+      if (puedeEditarReg) {
+        tablaEl.querySelectorAll('.btn-editar-reg').forEach(btn => {
+          btn.addEventListener('click', () => modalEditarRegistro(filtrados[Number(btn.dataset.idx)]))
+        })
+      }
+
       return filtrados
+    }
+
+    // Edición rápida desde Registros (admin/coordinator): Chofer/Mesario/
+    // Ayuda(monto)/Transporte/Teléfono. A diferencia de Mis Registros, acá
+    // no hay "Chofer asignado" (eso se maneja en Choferes), así que
+    // Transporte sí es un toggle directo — no hay asignación de la que
+    // inferirlo en este modal.
+    function modalEditarRegistro(r) {
+      const modal = document.createElement('div')
+      modal.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:center; z-index:9999; padding:20px; overflow-y:auto;'
+      modal.innerHTML = `
+        <div style="background:white; border-radius:8px; padding:24px; max-width:420px; width:100%; margin:20px 0;">
+          <h3 style="margin:0 0 4px;">Editar registro</h3>
+          <p style="margin:0 0 16px; color:#666; font-size:.85rem;">${escapeHtml(r.nombre)} · CI ${escapeHtml(r.cedula)}</p>
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Teléfono:</label>
+          <input id="inp-editreg-telefono" value="${escapeHtml(r.telefono || '')}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
+
+          <div style="border:1px solid #eee; border-radius:6px; padding:10px; margin-bottom:12px; display:grid; gap:8px;">
+            <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
+              <input type="checkbox" id="chk-editreg-driver" ${r.canBeDriver ? 'checked' : ''}> Chofer: ¿puede colaborar el Día D?
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
+              <input type="checkbox" id="chk-editreg-mesario" ${r.wantsToBeMesario ? 'checked' : ''}> Mesario: ¿quiere sentarse en la mesa?
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
+              <input type="checkbox" id="chk-editreg-transporte" ${r.requiresPickup ? 'checked' : ''}> Transporte: ¿requiere que se le busque?
+            </label>
+          </div>
+
+          <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Ayuda — Editar Monto (Gs.):</label>
+          <input id="inp-editreg-monto-ayuda" type="number" min="0" step="1000" value="${Number(r.montoAyuda) || 0}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
+
+          <div id="editreg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="btn-confirmar-editreg" style="flex:1; background:#4caf50; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
+            <button id="btn-cancelar-editreg" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      `
+      document.body.appendChild(modal)
+      modal.querySelector('#btn-cancelar-editreg').addEventListener('click', () => modal.remove())
+
+      modal.querySelector('#btn-confirmar-editreg').addEventListener('click', async () => {
+        const msg = modal.querySelector('#editreg-msg')
+        const montoAyuda = Number(modal.querySelector('#inp-editreg-monto-ayuda').value) || 0
+        try {
+          await updateRecord(candidateId, r.id, {
+            telefono: modal.querySelector('#inp-editreg-telefono').value.trim(),
+            canBeDriver: modal.querySelector('#chk-editreg-driver').checked,
+            wantsToBeMesario: modal.querySelector('#chk-editreg-mesario').checked,
+            requiresPickup: modal.querySelector('#chk-editreg-transporte').checked,
+            montoAyuda,
+            needsAssistance: montoAyuda > 0
+          })
+          msg.innerHTML = '✅ Guardado'
+          setTimeout(() => { modal.remove(); renderRegistros(content) }, 600)
+        } catch (err) {
+          msg.innerHTML = `❌ ${escapeHtml(err.message)}`
+        }
+      })
     }
 
     let ultimosFiltrados = pintarTabla()
     const actualizar = () => { ultimosFiltrados = pintarTabla() }
 
-    document.getElementById('input-buscar-reg').addEventListener('input', debounce(actualizar, 250))
+    document.getElementById('input-buscar-reg').addEventListener('input', debounce((e) => {
+      ultimoBuscadoRegistros = e.target.value
+      actualizar()
+    }, 250))
     document.getElementById('sel-local-reg').addEventListener('change', actualizar)
     document.getElementById('sel-mesa-reg').addEventListener('change', actualizar)
     document.getElementById('sel-dirigente-reg').addEventListener('change', actualizar)
@@ -1219,37 +1697,79 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       document.getElementById('sel-mesario-reg').value = ''
       document.getElementById('sel-ayuda-reg').value = ''
       document.getElementById('sel-transporte-reg').value = ''
+      ultimoBuscadoRegistros = ''
       actualizar()
     })
 
-    document.getElementById('btn-export-records').addEventListener('click', async () => {
-      const XLSX = await import('xlsx')
-      const ws = XLSX.utils.json_to_sheet(ultimosFiltrados.map(r => ({
-        Nombre: r.nombre, Cedula: r.cedula, Local: r.local, Mesa: r.mesa, Orden: r.orden,
-        Dirigente: usuariosMap[r.uid] || '', Telefono: r.telefono, Direccion: r.direccion, Ubicacion: r.googleMapsUrl,
-        Chofer: r.canBeDriver ? 'Sí' : 'No',
-        Mesario: r.wantsToBeMesario ? 'Sí' : 'No',
-        AyudaGs: r.needsAssistance ? 'Sí' : 'No',
-        Transporte: r.requiresPickup ? 'Sí' : 'No'
-      })))
-      const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(wb, ws, 'Registros')
-      XLSX.writeFile(wb, `registros_${candidateId}_${Date.now()}.xlsx`)
+    // Si hay una búsqueda/filtro activo, pregunta si exportar solo eso o
+    // el listado completo sin filtrar — antes exportaba ultimosFiltrados
+    // sin avisar, lo que podía confundir a quien buscó una cédula puntual
+    // y esperaba el padrón completo (o viceversa).
+    function elegirAlcanceExport(hayFiltro, callback) {
+      if (!hayFiltro) { callback(records); return }
+
+      const modal = document.createElement('div')
+      modal.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:center; z-index:9999; padding:20px;'
+      modal.innerHTML = `
+        <div style="background:white; border-radius:8px; padding:24px; max-width:380px; width:100%;">
+          <h3 style="margin:0 0 16px;">¿Qué querés exportar?</h3>
+          <div style="display:grid; gap:8px;">
+            <button id="btn-export-buscado" style="background:#1976d2; color:white; border:none; padding:12px; border-radius:4px; cursor:pointer; font-weight:700;">🔎 Solo lo buscado (${ultimosFiltrados.length})</button>
+            <button id="btn-export-todo" style="background:#555; color:white; border:none; padding:12px; border-radius:4px; cursor:pointer; font-weight:700;">📋 Todo el listado (${records.length})</button>
+            <button id="btn-export-cancelar" style="background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      `
+      document.body.appendChild(modal)
+      modal.querySelector('#btn-export-buscado').addEventListener('click', () => { modal.remove(); callback(ultimosFiltrados) })
+      modal.querySelector('#btn-export-todo').addEventListener('click', () => { modal.remove(); callback(records) })
+      modal.querySelector('#btn-export-cancelar').addEventListener('click', () => modal.remove())
+    }
+
+    document.getElementById('btn-export-records').addEventListener('click', () => {
+      const hayFiltro = !!ultimoBuscadoRegistros ||
+        document.getElementById('sel-local-reg').value || document.getElementById('sel-mesa-reg').value ||
+        document.getElementById('sel-dirigente-reg').value || document.getElementById('sel-chofer-reg').value ||
+        document.getElementById('sel-mesario-reg').value || document.getElementById('sel-ayuda-reg').value ||
+        document.getElementById('sel-transporte-reg').value
+
+      elegirAlcanceExport(hayFiltro, async (registrosAExportar) => {
+        const XLSX = await import('xlsx')
+        const ws = XLSX.utils.json_to_sheet(registrosAExportar.map(r => ({
+          Nombre: r.nombre, Cedula: r.cedula, Local: r.local, Mesa: r.mesa, Orden: r.orden,
+          Dirigente: usuariosMap[r.uid] || '', Telefono: r.telefono, Direccion: r.direccion, Ubicacion: r.googleMapsUrl,
+          Chofer: r.canBeDriver ? 'Sí' : 'No',
+          Mesario: r.wantsToBeMesario ? 'Sí' : 'No',
+          AyudaGs: r.needsAssistance ? 'Sí' : 'No',
+          Transporte: r.requiresPickup ? 'Sí' : 'No'
+        })))
+        const wb = XLSX.utils.book_new()
+        XLSX.utils.book_append_sheet(wb, ws, 'Registros')
+        XLSX.writeFile(wb, `registros_${candidateId}_${Date.now()}.xlsx`)
+      })
     })
 
     document.getElementById('btn-print-records').addEventListener('click', () => {
-      const printWindow = window.open('', '_blank')
-      printWindow.document.write(`
-        <html><head><title>Registros - ${escapeHtml(candidate.name)}</title>
-        <style>body{font-family:sans-serif;font-size:12px} table{width:100%;border-collapse:collapse} th,td{border:1px solid #ccc;padding:4px;text-align:left}</style>
-        </head><body>
-        <h2>${escapeHtml(candidate.name)} — Registros (${ultimosFiltrados.length})</h2>
-        <table><thead><tr><th>Cédula</th><th>Nombre</th><th>Local</th><th>Mesa</th><th>Orden</th><th>Teléfono</th><th>Dirección</th></tr></thead>
-        <tbody>${ultimosFiltrados.map(r => `<tr><td>${escapeHtml(r.cedula)}</td><td>${escapeHtml(r.nombre)}</td><td>${escapeHtml(r.local)}</td><td>${escapeHtml(r.mesa)}</td><td>${escapeHtml(r.orden)}</td><td>${escapeHtml(r.telefono)}</td><td>${escapeHtml(r.direccion)}</td></tr>`).join('')}</tbody>
-        </table></body></html>
-      `)
-      printWindow.document.close()
-      setTimeout(() => { printWindow.focus(); printWindow.print() }, 300)
+      const hayFiltro = !!ultimoBuscadoRegistros ||
+        document.getElementById('sel-local-reg').value || document.getElementById('sel-mesa-reg').value ||
+        document.getElementById('sel-dirigente-reg').value || document.getElementById('sel-chofer-reg').value ||
+        document.getElementById('sel-mesario-reg').value || document.getElementById('sel-ayuda-reg').value ||
+        document.getElementById('sel-transporte-reg').value
+
+      elegirAlcanceExport(hayFiltro, (registrosAExportar) => {
+        const printWindow = window.open('', '_blank')
+        printWindow.document.write(`
+          <html><head><title>Registros - ${escapeHtml(candidate.name)}</title>
+          <style>body{font-family:sans-serif;font-size:12px} table{width:100%;border-collapse:collapse} th,td{border:1px solid #ccc;padding:4px;text-align:left}</style>
+          </head><body>
+          <h2>${escapeHtml(candidate.name)} — Registros (${registrosAExportar.length})</h2>
+          <table><thead><tr><th>Cédula</th><th>Nombre</th><th>Local</th><th>Mesa</th><th>Orden</th><th>Teléfono</th><th>Dirección</th></tr></thead>
+          <tbody>${registrosAExportar.map(r => `<tr><td>${escapeHtml(r.cedula)}</td><td>${escapeHtml(r.nombre)}</td><td>${escapeHtml(r.local)}</td><td>${escapeHtml(r.mesa)}</td><td>${escapeHtml(r.orden)}</td><td>${escapeHtml(r.telefono)}</td><td>${escapeHtml(r.direccion)}</td></tr>`).join('')}</tbody>
+          </table></body></html>
+        `)
+        printWindow.document.close()
+        setTimeout(() => { printWindow.focus(); printWindow.print() }, 300)
+      })
     })
   }
 

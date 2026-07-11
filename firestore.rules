@@ -87,6 +87,16 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // ── Metadata del padrón compartido (nombre del último .xlsx cargado) ──
+    // Lectura abierta a cualquier candidato (igual criterio que /voters:
+    // el padrón es compartido, así que su metadata también) — solo
+    // superadmin puede escribirla, se actualiza desde el panel de
+    // Superadmin al cargar/actualizar el padrón.
+    match /config/padronMeta {
+      allow read: if isAuth();
+      allow write: if isSuperAdmin();
+    }
+
     match /campaignDrivers2025/{id} {
       allow read: if isLegacyUser();
       allow write: if isAdmin();
@@ -148,8 +158,32 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/candidates/$(candidateId)/users/$(request.auth.uid));
     }
 
+    // RBAC (Etapa 8, modo compatibilidad): además del `role` legacy
+    // (string), un usuario puede tener `roleIds` (array, Etapa 5) con
+    // roles ADICIONALES — si cualquiera de esos roleIds coincide con la
+    // lista permitida, también pasa. get('roleIds', []) es el accessor
+    // seguro de Firestore rules con default: si el campo no existe (el
+    // caso de TODOS los usuarios reales hoy, que no tienen roleIds
+    // todavía), devuelve [] y .hasAny() da false — cero cambio de
+    // comportamiento para nadie que no tenga roleIds asignado.
+    //
+    // LIMITACIÓN CONOCIDA: esto solo cierra el hueco para roleIds que
+    // sean roles DE SISTEMA (su id es el mismo string que `role` ya usa,
+    // ej. 'coordinator') — un rol PERSONALIZADO (id autogenerado de
+    // Firestore, con permisos propios en candidates/{id}/roles) no va a
+    // matchear ningún `role in [...]` de ninguna regla existente, porque
+    // ninguna regla conoce ese id. Resolver permisos custom de verdad
+    // requeriría leer el doc de roles/{roleId} y evaluar su mapa de
+    // permisos+scope DENTRO de cada regla — la sección 14 del pedido
+    // advierte explícitamente evitar esa complejidad/lecturas extra en
+    // rules; si hace falta, es candidato a resolverse vía Cloud Function
+    // para las acciones sensibles, no acá. Por ahora los roles
+    // personalizados siguen siendo "solo menú" hasta una etapa futura.
     function hasCandidateRole(candidateId, roles) {
-      return belongsToCandidate(candidateId) && candidateUserDoc(candidateId).role in roles;
+      return belongsToCandidate(candidateId) && (
+        candidateUserDoc(candidateId).role in roles ||
+        candidateUserDoc(candidateId).get('roleIds', []).hasAny(roles)
+      );
     }
 
     // Un mesario solo puede tocar votos de la mesa que tiene asignada,
@@ -169,6 +203,27 @@ service cloud.firestore {
     function isDriverOwner(candidateId, driverId) {
       return driverId != null &&
         get(/databases/$(database)/documents/candidates/$(candidateId)/drivers/$(driverId)).data.usuarioAsignado == request.auth.uid;
+    }
+
+    // Un operador solo puede tocar electionDayControl del voterId que tiene
+    // asignado en callAssignments (mismo doc id: ambas colecciones usan el
+    // id de savedRecords como clave) — habilita que el botón "Ya votó" del
+    // tab Día D de Centro de Contacto escriba a la fuente única de verdad
+    // (electionDayControl.status), no solo a electionStatus como antes.
+    function isOperatorOfVoter(candidateId, voterId) {
+      return exists(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(voterId)) &&
+        get(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(voterId)).data.assignedUserId == request.auth.uid;
+    }
+
+    // Mecanismo NUEVO de mesario (assignedTableUserId en electionDayControl,
+    // el que usa Día D Control), en paralelo a isMesarioOfMesa (mecanismo
+    // VIEJO, seccional+mesa en el perfil). Ambos coexisten a propósito — ver
+    // auditoría Día D: sin esto, marcarVoto() rechazaba a cualquier mesario
+    // que solo tuviera el mecanismo nuevo configurado, y el "votó" nunca
+    // llegaba a diaD/votes (que es lo que lee Día D Admin).
+    function isMesarioOfControlVoter(candidateId, savedRecordId) {
+      return savedRecordId != null &&
+        get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(savedRecordId)).data.assignedTableUserId == request.auth.uid;
     }
 
     // ── /platformUsers/{uid} — únicamente estado de superadmin ────────
@@ -220,11 +275,17 @@ service cloud.firestore {
 
       // REGLA OBLIGATORIA 1: nadie puede modificar su propio role, ni
       // siquiera un campaign_admin. Los cambios de rol van únicamente por
-      // la Cloud Function cambiarRolUsuarioCandidato.
+      // la Cloud Function cambiarRolUsuarioCandidato. Se extiende acá
+      // mismo a roleIds/primaryRoleId (RBAC, Etapa 5) — aunque hoy ningún
+      // módulo todavía LEE esos campos para decidir acceso (siguen siendo
+      // aditivos), en cuanto empiecen a usarse de verdad (Etapa 6+) un
+      // auto-edit ahí sería una escalada de privilegios idéntica a
+      // editarse `role` directamente. Se cierra ahora para no dejar la
+      // puerta abierta y tener que acordarse de hacerlo después.
       allow update: if !('password' in request.resource.data.keys()) && (
         isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid)) ||
-        (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
+        (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'roleIds', 'primaryRoleId']))
       );
 
       allow delete: if isSuperAdmin() || (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid));
@@ -252,6 +313,15 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['chofer']) &&
           exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
           isDriverOwner(candidateId, get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedDriverId)) ||
+        // Vista propia del chofer (renderChoferView): a diferencia del
+        // caso de arriba, ESTE sí es válido para list() — chofer_asignado
+        // es un campo propio del registro (no de otra colección), así que
+        // Firestore puede probar la condición para toda la query
+        // where('chofer_asignado','==',driverId) sin tener que mirar cada
+        // doc devuelto uno por uno.
+        (hasCandidateRole(candidateId, ['chofer']) &&
+          resource.data.chofer_asignado != null &&
+          isDriverOwner(candidateId, resource.data.chofer_asignado)) ||
         (hasCandidateRole(candidateId, ['mesario']) &&
           exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
           get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedTableUserId == request.auth.uid) ||
@@ -270,7 +340,13 @@ service cloud.firestore {
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
-        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid);
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid) ||
+        // coordinator ya puede crear/editar callAssignments (ver abajo);
+        // esto solo le deja espejar ese mismo dato en el propio
+        // savedRecords (ccAssignedUserId) al asignar/reasignar en Centro
+        // de Contacto — ningún otro campo del registro.
+        (hasCandidateRole(candidateId, ['coordinator']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ccAssignedUserId', 'updatedAt']));
 
       allow delete: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
@@ -285,23 +361,32 @@ service cloud.firestore {
 
     // ── /candidates/{candidateId}/diaD/{diaDDocId}/votes/{voteId} ──────
     // REGLA OBLIGATORIA 5: mesario solo puede marcar votos de su(s)
-    // mesa(s) asignada(s).
+    // mesa(s) asignada(s) — por el mecanismo viejo (isMesarioOfMesa) O el
+    // nuevo (isMesarioOfControlVoter, ver función arriba). Antes solo se
+    // aceptaba el viejo, así que el espejo best-effort desde Día D Control
+    // (setDiaDStatus → marcarVoto) fallaba en silencio para cualquier
+    // mesario asignado solo por assignedTableUserId.
     match /candidates/{candidateId}/diaD/{diaDDocId}/votes/{voteId} {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor', 'viewer']) ||
         isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) ||
+        isMesarioOfControlVoter(candidateId, resource.data.savedRecordId) ||
         (belongsToCandidate(candidateId) && resource.data.markedBy == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
-        (isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) &&
+        ((isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) ||
+          isMesarioOfControlVoter(candidateId, request.resource.data.savedRecordId)) &&
           request.resource.data.markedBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
-        (isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) &&
-          isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) &&
-          request.resource.data.markedBy == resource.data.markedBy);
+        ((
+          (isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) &&
+            isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa)) ||
+          (isMesarioOfControlVoter(candidateId, resource.data.savedRecordId) &&
+            isMesarioOfControlVoter(candidateId, request.resource.data.savedRecordId))
+        ) && request.resource.data.markedBy == resource.data.markedBy);
 
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }
@@ -312,10 +397,219 @@ service cloud.firestore {
       allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
     }
 
+    // ── /candidates/{candidateId}/mesarios/{mesarioId} — roster de mesarios,
+    // capacitaciones y presencia (mismo criterio de acceso que drivers) ───
+    match /candidates/{candidateId}/mesarios/{mesarioId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+    }
+
     // ── /candidates/{candidateId}/config/{configId} — p.ej. electionDay ─
     match /candidates/{candidateId}/config/{configId} {
       allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
       allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // Bloque más específico para config/financeSettings: además de
+    // campaign_admin, finance_admin también puede tocar tarifas. Firestore
+    // evalúa ambos match blocks para esta misma ruta y permite si CUALQUIERA
+    // de los dos lo permite (OR), así que esto amplía el bloque de arriba
+    // sin tener que tocarlo ni afectar ningún otro doc de config/*.
+    match /candidates/{candidateId}/config/financeSettings {
+      allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Finanzas de Campaña — Etapa 1 (modelo de datos, permisos, resumen,
+    // obligaciones). Reutiliza roles existentes (campaign_admin, auditor)
+    // y agrega 3 nuevos (finance_admin, finance_operator, cashier) — ver
+    // CANDIDATE_ROLES en functions/src/index.ts. Pagos/comprobantes/
+    // liquidaciones/caja quedan para Etapa 2+.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /candidates/{candidateId}/financeObligations/{obligationId} ────
+    // Separación de funciones (spec sección 7): finance_operator crea sus
+    // propias obligaciones y puede seguir editándolas mientras sigan en
+    // draft/pending (para corregir antes de que finance_admin las revise),
+    // pero nunca puede moverlas a approved/rejected — ese salto de estado
+    // le queda vedado por la condición `status in ['draft','pending']` de
+    // ambos lados (resource Y request.resource). finance_admin y
+    // campaign_admin sí pueden aprobar/rechazar sin esa restricción. La
+    // regla de "no autoaprobar lo propio" (misma persona crea+aprueba) no
+    // se puede expresar 100% acá sin otro get() — se refuerza en la capa
+    // de app (finanzas-candidate.js) que loguea la excepción si ocurre.
+    match /candidates/{candidateId}/financeObligations/{obligationId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator']) &&
+          request.resource.data.createdBy == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        (hasCandidateRole(candidateId, ['finance_operator']) &&
+          resource.data.createdBy == request.auth.uid &&
+          resource.data.status in ['draft', 'pending'] &&
+          request.resource.data.status in ['draft', 'pending']) ||
+        // cashier no "edita" obligaciones — pero recalcularEstadoObligacion()
+        // (en firebaseCandidate.js) le pisa el status como efecto colateral
+        // automático de marcar un pago como pagado/revertido. Se restringe
+        // a solo esos 2 campos y a los 3 estados que ese cálculo puede
+        // producir, para que no sea una puerta de edición general.
+        (hasCandidateRole(candidateId, ['cashier']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+          request.resource.data.status in ['approved', 'partially_paid', 'paid']);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/financeAuditLogs/{logId} ─────────────
+    // A diferencia de auditLogs (arriba, Admin-SDK-only): acá SÍ escribe
+    // el cliente, porque las aprobaciones/rechazos de Finanzas ocurren
+    // client-side, no vía Cloud Function. Append-only: nunca se edita ni
+    // se borra desde el cliente (sección 14 del spec).
+    match /candidates/{candidateId}/financeAuditLogs/{logId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier']) &&
+          request.resource.data.performedBy == request.auth.uid);
+
+      allow update, delete: if false;
+    }
+
+    // ── /candidates/{candidateId}/financePayments/{paymentId} ─────────
+    // Etapa 2. Quién crea el pago: campaign_admin/finance_admin/cashier
+    // (finance_operator NO crea pagos — sección 7 del spec, su rol es
+    // cargar la obligación y el comprobante). Aprobar/rechazar/revertir:
+    // finance_admin/campaign_admin. Marcar como pagado ("ejecuta el
+    // pago"): cashier además de finance_admin/campaign_admin.
+    // finance_operator solo puede tocar receiptUrl/notes (adjuntar
+    // comprobante a un pago que ya existe), igual que en financeObligations.
+    match /candidates/{candidateId}/financePayments/{paymentId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'cashier']) &&
+          request.resource.data.createdBy == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        (hasCandidateRole(candidateId, ['cashier']) &&
+          resource.data.status == 'approved' &&
+          request.resource.data.status == 'paid') ||
+        (hasCandidateRole(candidateId, ['finance_operator']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['receiptUrl', 'notes', 'updatedAt']));
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/financeReceipts/{receiptId} ─────────
+    // Metadata en Firestore del archivo que vive en Storage (ver
+    // storage.rules) — quien puede subir puede crear este doc; nadie lo
+    // edita (los comprobantes no se "corrigen", se vuelven a subir).
+    match /candidates/{candidateId}/financeReceipts/{receiptId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier']) &&
+          request.resource.data.uploadedBy == request.auth.uid);
+
+      allow update: if false;
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+    }
+
+    // ── /candidates/{candidateId}/paymentBatches/{batchId} ─────────────
+    // Etapa 3. payPaymentBatch() (en firebaseCandidate.js) es lo único que
+    // toca paymentIds/status/paidBy/paidAt al ejecutar una liquidación —
+    // por eso cashier necesita poder escribir esos campos puntuales, igual
+    // que ya puede hacerlo sobre financeObligations.
+    match /candidates/{candidateId}/paymentBatches/{batchId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator']) &&
+          request.resource.data.createdBy == request.auth.uid);
+
+      allow update: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        (hasCandidateRole(candidateId, ['cashier']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentIds', 'status', 'paidBy', 'paidAt', 'updatedAt']) &&
+          request.resource.data.status in ['paid', 'partially_paid']);
+
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/cashAccounts/{accountId} ─────────────
+    match /candidates/{candidateId}/cashAccounts/{accountId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/cashMovements/{movementId} ───────────
+    // cashier puede crear (markFinancePaymentAsPaid auto-genera un egreso
+    // cuando se le pasa cashAccountId) pero no editar/borrar movimientos
+    // ya creados — eso queda para finance_admin/campaign_admin.
+    match /candidates/{candidateId}/cashMovements/{movementId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']);
+
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'cashier']) &&
+          request.resource.data.createdBy == request.auth.uid);
+
+      allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+    }
+
+    // ── /candidates/{candidateId}/financeAlerts/{alertId} ──────────────
+    // Etapa 4. calculateFinanceAlerts() (client-computed, mismo patrón que
+    // electionDayAlerts de Día D Control) las genera y las persiste;
+    // resolveFinanceAlert() solo cambia status/resolvedAt/resolvedBy.
+    match /candidates/{candidateId}/financeAlerts/{alertId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'auditor']);
+
+      allow create: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+
+      allow update: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt', 'resolvedBy']));
+
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Roles y Permisos — Etapa 1-2 (catálogo/motor en código y Firestore,
+    // ver src/lib/rbacCatalog.js y rolesCandidate.js). Este modelo nuevo
+    // convive con el sistema viejo (hasCandidateRole sobre users.role):
+    // todavía NO reemplaza ninguna regla existente, es aditivo. Solo
+    // campaign_admin administra roles por ahora (igual que ya administra
+    // cambios de rol vía Cloud Function) — se abre a más roles cuando
+    // exista de verdad la delegación de "gestión de roles" como permiso.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /candidates/{candidateId}/roles/{roleId} ───────────────────────
+    match /candidates/{candidateId}/roles/{roleId} {
+      allow read: if isSuperAdmin() || belongsToCandidate(candidateId);
+      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+      allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ── /candidates/{candidateId}/roleAuditLogs/{logId} ────────────────
+    // Inmutable desde el cliente (sección 15 del pedido): se crea, nunca
+    // se edita ni se borra.
+    match /candidates/{candidateId}/roleAuditLogs/{logId} {
+      allow read: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'auditor']);
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin']) && request.resource.data.performedBy == request.auth.uid);
+      allow update, delete: if false;
     }
 
     // ── /candidates/{candidateId}/auditLogs/{logId} ────────────────────
@@ -413,9 +707,14 @@ service cloud.firestore {
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
+      // chofer/dirigente/mesario reportan incidencias desde su propia
+      // vista operativa (Día D Control) — mismo criterio que operador:
+      // basta con que se reporten a sí mismos como reportedBy, sin
+      // importar a quién quede asignada (assignedUserId, ver
+      // wireAccionRapida en dia-d-control-candidate.js).
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
-        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.reportedBy == request.auth.uid);
+        (hasCandidateRole(candidateId, ['operador', 'chofer', 'dirigente', 'mesario']) && request.resource.data.reportedBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
@@ -432,12 +731,18 @@ service cloud.firestore {
     // ═══════════════════════════════════════════════════════════════════
 
     // ── /candidates/{candidateId}/electionDayControl/{voterId} ─────────
+    // operador se agregó para que "Ya votó" en el tab Día D de Centro de
+    // Contacto escriba acá (fuente única de verdad de "votó", ver auditoría
+    // Día D) — a diferencia de dirigente/mesario/chofer, operador no tiene
+    // un campo assignedXxx propio en este doc: se valida directo contra
+    // callAssignments (isOperatorOfVoter), que usa el mismo id de documento.
     match /candidates/{candidateId}/electionDayControl/{voterId} {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId));
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId)) ||
+        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
 
       // Creación lazy: la primera vez que cualquier rol operativo toca un
       // voterId se crea el doc, siempre y cuando se cree apuntándose a sí
@@ -446,9 +751,10 @@ service cloud.firestore {
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         (hasCandidateRole(candidateId, ['dirigente']) && request.resource.data.assignedLeaderId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['mesario']) && request.resource.data.assignedTableUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.assignedDriverId));
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.assignedDriverId)) ||
+        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
 
-      // Los 3 roles operativos pueden actualizar el estado de SU propio
+      // Los roles operativos pueden actualizar el estado de SU propio
       // voterId, pero nunca reasignar chofer/dirigente/mesario — eso es
       // exclusivo de campaign_admin/coordinator (REGLA: solo admin reasigna).
       allow update: if isSuperAdmin() ||
@@ -464,6 +770,10 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId) &&
           request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
           request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
+          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId) ||
+        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId) &&
+          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
+          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
           request.resource.data.assignedTableUserId == resource.data.assignedTableUserId);
 
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
@@ -476,10 +786,10 @@ service cloud.firestore {
     match /candidates/{candidateId}/electionDayMovements/{movementId} {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
-        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer']) && resource.data.updatedBy == request.auth.uid);
+        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer', 'operador']) && resource.data.updatedBy == request.auth.uid);
 
       allow create: if (isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer'])) &&
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer', 'operador'])) &&
         request.resource.data.updatedBy == request.auth.uid;
 
       allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);

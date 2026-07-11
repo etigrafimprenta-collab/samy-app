@@ -15,12 +15,24 @@ import {
   getAllRecords,
   getAllCandidateUsers,
   listenAllVotes,
+  listenAllElectionDayControl,
   listenDrivers,
   createDriver,
   deleteDriver,
   updateRecord
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
+
+// "Votó" ya no es solo diaD/votes: electionDayControl.status==='voted' es
+// la fuente única acordada (ver auditoría Día D) — se agrega como fuente
+// adicional acá, sin sacarle diaD/votes, para cubrir el caso donde un
+// operador confirma "Ya votó" desde Centro de Contacto (no tiene mesa
+// asociada, así que el espejo best-effort a diaD/votes no aplica y solo
+// queda registrado en electionDayControl).
+function registroYaVoto(record, allVotos, controlDocs) {
+  return allVotos.some(v => v.cedula === record.cedula && v.voted) ||
+    controlDocs.some(c => c.voterId === record.id && c.status === 'voted')
+}
 
 export function renderDiaDAdminCandidate(container, candidateId, currentUser) {
   container.innerHTML = `
@@ -265,10 +277,17 @@ async function loadAndRender(container, candidateId, currentUser) {
 
     // Ranking global en vivo — a diferencia del viejo panel, no re-lee
     // savedRecords en cada cambio (auditoría IV.2): allRecords ya está en
-    // memoria desde la carga inicial, y listenAllVotes solo trae los votos.
-    listenAllVotes(candidateId, (allVotos) => {
+    // memoria desde la carga inicial, y los listeners de abajo solo traen
+    // votos/estado operativo. "Votó" combina diaD/votes (mecanismo de
+    // siempre) con electionDayControl.status==='voted' (fuente única
+    // acordada — cubre confirmaciones que no pasan por una mesa, como el
+    // botón de Centro de Contacto usado por operadores).
+    let allVotosActual = []
+    let controlDocsActual = []
+
+    function recalcularYRenderizar() {
       const totalV = allRecords.length
-      const totalVotos = allVotos.filter(v => v.voted).length
+      const totalVotos = allRecords.filter(r => registroYaVoto(r, allVotosActual, controlDocsActual)).length
       const pct = totalV > 0 ? ((totalVotos / totalV) * 100).toFixed(2) : 0
 
       document.getElementById('total-militantes').textContent = equipo.length
@@ -285,13 +304,27 @@ async function loadAndRender(container, candidateId, currentUser) {
         if (porMil[r.uid]) porMil[r.uid].registros.push(r)
       })
 
-      allVotos.forEach(v => {
-        if (porMil[v.markedBy] && v.voted) porMil[v.markedBy].votos++
+      // Antes se contaba por `markedBy` (quién marcó el voto) comparado
+      // contra uids de dirigente — subcontaba cualquier voto marcado por
+      // un mesario/chofer/operador. Contar sobre los registros ya
+      // agrupados por dirigente es correcto para ambas fuentes.
+      Object.values(porMil).forEach(m => {
+        m.votos = m.registros.filter(r => registroYaVoto(r, allVotosActual, controlDocsActual)).length
       })
 
-      renderRanking(porMil, allVotos, allRecords, choferes, candidateId)
-      renderLocales(allRecords, allVotos)
-      renderChoferes(choferes, allRecords, allVotos, candidateId)
+      renderRanking(porMil, allVotosActual, controlDocsActual, allRecords, choferes, candidateId)
+      renderLocales(allRecords, allVotosActual, controlDocsActual)
+      renderChoferes(choferes, allRecords, allVotosActual, controlDocsActual, candidateId)
+    }
+
+    listenAllVotes(candidateId, (allVotos) => {
+      allVotosActual = allVotos
+      recalcularYRenderizar()
+    })
+
+    listenAllElectionDayControl(candidateId, (controlDocs) => {
+      controlDocsActual = controlDocs
+      recalcularYRenderizar()
     })
 
     const btnAgregarChofer = document.getElementById('btn-agregar-chofer')
@@ -360,7 +393,7 @@ function updateToggle(enabled, candidateId, uid) {
   }
 }
 
-function renderRanking(porMil, allVotos, allRecords, choferes, candidateId) {
+function renderRanking(porMil, allVotos, controlDocs, allRecords, choferes, candidateId) {
   const ranking = Object.entries(porMil)
     .map(([uid, data]) => ({ uid, ...data }))
     .sort((a, b) => b.votos - a.votos)
@@ -388,14 +421,13 @@ function renderRanking(porMil, allVotos, allRecords, choferes, candidateId) {
         const uid = btn.dataset.uid
         const nombre = porMil[uid].nombre
         const registros = porMil[uid].registros
-        const votos = allVotos.filter(v => v.markedBy === uid)
-        mostrarDetalle(nombre, registros, votos, choferes, candidateId)
+        mostrarDetalle(nombre, registros, allVotos, controlDocs, choferes, candidateId)
       }
     })
   }
 }
 
-function renderLocales(allRecords, allVotos) {
+function renderLocales(allRecords, allVotos, controlDocs) {
   const porLocal = {}
 
   allRecords.forEach(r => {
@@ -412,7 +444,7 @@ function renderLocales(allRecords, allVotos) {
     Object.values(mesas).forEach(regs => {
       regs.forEach(r => {
         totalL++
-        if (allVotos.some(v => v.cedula === r.cedula && v.voted)) votosL++
+        if (registroYaVoto(r, allVotos, controlDocs)) votosL++
       })
     })
 
@@ -426,7 +458,7 @@ function renderLocales(allRecords, allVotos) {
     Object.entries(mesas).forEach(([mesa, registros]) => {
       let votosM = 0
       registros.forEach(r => {
-        if (allVotos.some(v => v.cedula === r.cedula && v.voted)) votosM++
+        if (registroYaVoto(r, allVotos, controlDocs)) votosM++
       })
       const pctM = registros.length > 0 ? ((votosM / registros.length) * 100).toFixed(2) : 0
 
@@ -446,20 +478,20 @@ function renderLocales(allRecords, allVotos) {
     el.innerHTML = html
     document.querySelectorAll('.btn-mesa').forEach(btn => {
       btn.onclick = () => {
-        mostrarMesa(btn.dataset.local, btn.dataset.mesa, allRecords, allVotos)
+        mostrarMesa(btn.dataset.local, btn.dataset.mesa, allRecords, allVotos, controlDocs)
       }
     })
   }
 }
 
-function renderChoferes(choferes, allRecords, allVotos, candidateId) {
+function renderChoferes(choferes, allRecords, allVotos, controlDocs, candidateId) {
   let html = ''
 
   if (choferes.length === 0) {
     html = '<div style="text-align: center; padding: 40px; color: #999;">Sin choferes</div>'
   } else {
     choferes.forEach(chofer => {
-      const faltantes = allRecords.filter(r => r.local === chofer.local && r.chofer_asignado === chofer.id && !allVotos.some(v => v.cedula === r.cedula && v.voted))
+      const faltantes = allRecords.filter(r => r.local === chofer.local && r.chofer_asignado === chofer.id && !registroYaVoto(r, allVotos, controlDocs))
 
       html += '<div style="background: white; border: 2px solid #c41e3a; border-radius: 8px; padding: 16px; margin-bottom: 16px;">'
       html += '<div style="display: flex; justify-content: space-between; margin-bottom: 12px;">'
@@ -502,12 +534,12 @@ function renderChoferes(choferes, allRecords, allVotos, candidateId) {
   }
 }
 
-function mostrarDetalle(nombre, registros, votos, choferes, candidateId) {
+function mostrarDetalle(nombre, registros, allVotos, controlDocs, choferes, candidateId) {
   const modal = document.createElement('div')
   modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; z-index: 9999; overflow-y: auto; padding: 20px;'
 
-  const votados = votos.filter(v => v.voted)
-  const faltantes = registros.filter(r => !votos.some(v => v.cedula === r.cedula && v.voted))
+  const votados = registros.filter(r => registroYaVoto(r, allVotos, controlDocs))
+  const faltantes = registros.filter(r => !registroYaVoto(r, allVotos, controlDocs))
 
   let html = '<div style="background: white; border-radius: 8px; max-width: 900px; width: 100%; margin: 40px auto;">'
   html += '<div style="background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between;">'
@@ -518,14 +550,11 @@ function mostrarDetalle(nombre, registros, votos, choferes, candidateId) {
 
   if (votados.length > 0) {
     html += '<div style="margin-bottom: 24px;"><h3 style="background: #2e7d32; color: white; padding: 12px; border-radius: 4px; margin: 0 0 12px 0;">YA VOTARON (' + votados.length + ')</h3>'
-    votados.forEach(v => {
-      const r = registros.find(x => x.cedula === v.cedula)
-      if (r) {
-        html += '<div style="background: #e8f5e9; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #2e7d32;">'
-        html += '<div style="font-weight: 600;">' + escapeHtml(r.nombre) + '</div>'
-        html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + escapeHtml(v.cedula) + ' | Local: ' + escapeHtml(r.local || 'N/A') + ' | Mesa: ' + escapeHtml(r.mesa || 'N/A') + '</div>'
-        html += '</div>'
-      }
+    votados.forEach(r => {
+      html += '<div style="background: #e8f5e9; padding: 12px; border-radius: 4px; margin-bottom: 8px; border-left: 4px solid #2e7d32;">'
+      html += '<div style="font-weight: 600;">' + escapeHtml(r.nombre) + '</div>'
+      html += '<div style="font-size: 0.8rem; color: #333;">CI: ' + escapeHtml(r.cedula) + ' | Local: ' + escapeHtml(r.local || 'N/A') + ' | Mesa: ' + escapeHtml(r.mesa || 'N/A') + '</div>'
+      html += '</div>'
     })
     html += '</div>'
   }
@@ -607,14 +636,14 @@ function mostrarDetalle(nombre, registros, votos, choferes, candidateId) {
   }
 }
 
-function mostrarMesa(local, mesa, allRecords, allVotos) {
+function mostrarMesa(local, mesa, allRecords, allVotos, controlDocs) {
   const registrosMesa = allRecords.filter(r => r.local === local && r.mesa === mesa)
 
   const modal = document.createElement('div')
   modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; z-index: 9999; overflow-y: auto; padding: 20px;'
 
-  const votados = registrosMesa.filter(r => allVotos.some(v => v.cedula === r.cedula && v.voted))
-  const faltantes = registrosMesa.filter(r => !allVotos.some(v => v.cedula === r.cedula && v.voted))
+  const votados = registrosMesa.filter(r => registroYaVoto(r, allVotos, controlDocs))
+  const faltantes = registrosMesa.filter(r => !registroYaVoto(r, allVotos, controlDocs))
 
   let html = '<div style="background: white; border-radius: 8px; max-width: 900px; width: 100%; margin: 40px auto;">'
   html += '<div style="background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between;">'

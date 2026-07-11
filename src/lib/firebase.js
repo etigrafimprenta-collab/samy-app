@@ -1,7 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import {
   getAuth,
-  createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged
@@ -41,9 +40,6 @@ export const functionsInstance = getFunctions(app)
 
 export const loginUser = (email, password) =>
   signInWithEmailAndPassword(auth, email, password)
-
-export const registerUser = (email, password) =>
-  createUserWithEmailAndPassword(auth, email, password)
 
 export const logoutUser = () => signOut(auth)
 
