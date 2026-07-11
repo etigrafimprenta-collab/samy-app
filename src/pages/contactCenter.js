@@ -6,17 +6,21 @@
 // compartido /voters — ver firebaseCandidate.js. candidateId siempre
 // llega desde la sesión resuelta en campaign.js, nunca se lee de un
 // campo editable acá.
+//
+// ESCALA (50k-100k votantes): la vista de admin/coordinador NO precarga
+// savedRecords/callAssignments/electionStatus completos — cada pestaña
+// trae solo lo que necesita, con where()+limit() o count(). La vista de
+// operador sigue precargando todo en cargarDatos() porque ya está acotada
+// de por sí (getMyCallAssignments/getMyElectionStatuses/getMyIncidents
+// solo traen lo asignado a ese operador, nunca el pool completo).
 import {
-  getAllRecords,
   getAllCandidateUsers,
   getRecordsByIds,
-  getAllCallAssignments,
   getMyCallAssignments,
   assignVoterToOperator,
   assignVotersToOperatorBulk,
   reassignVoter,
   updateCallAssignmentStatus,
-  getAllElectionStatuses,
   getMyElectionStatuses,
   upsertElectionStatus,
   getCallHistory,
@@ -29,10 +33,30 @@ import {
   getAllIncidents,
   getMyIncidents,
   createIncident,
-  updateIncidentStatus
+  updateIncidentStatus,
+  getCallAssignmentStatusCount,
+  getElectionStatusFlagCounts,
+  getOpenIncidentsCount,
+  getCallAssignmentsPage,
+  getElectionStatusByFlag,
+  getOpenIncidents,
+  getElectionStatusesByIds,
+  getCallAssignmentsByIds,
+  getRecentCallAssignments,
+  getCallAssignmentCountForOperator,
+  getElectionStatusFlagCountForOperator,
+  getIncidentsCountForOperator,
+  getUnassignedCount,
+  getUnassignedCountByDirigente,
+  getUnassignedRecordsByDirigente,
+  getUnassignedRecordsByLocal,
+  getUnassignedRecordsPage,
+  searchRecordsForContactCenter,
+  setDiaDStatus
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
+import { can } from '../lib/rbac.js'
 
 const ESTADOS_ELECTORALES = [
   { key: 'contacted', label: 'Contactado', emoji: '📞' },
@@ -88,11 +112,22 @@ function normalizarTelefonoPY(tel) {
   return '595' + digits.replace(/^0/, '')
 }
 
-export async function renderContactCenter(container, candidateId, user, myRole) {
-  const isAdminView = ['campaign_admin', 'coordinator'].includes(myRole)
+export async function renderContactCenter(container, candidateId, user, myRole, misRoles = []) {
+  // Etapa 7 RBAC (modo compatibilidad) — ver nota igual en finanzas-candidate.js.
+  const isAdminView = can(misRoles, 'contact_center.assign_voters') || ['campaign_admin', 'coordinator'].includes(myRole)
   let tab = 'pendientes'
   let filtroDashboard = null
+  // Con el padrón esperado (50.000-100.000 votantes) asignar uno por uno
+  // no escala — modoAsignacion deja elegir entre el flujo manual de
+  // siempre y una asignación masiva automática (por dirigente, por local
+  // de votación, o repartido parejo entre operadores).
+  let modoAsignacion = 'manual'
+  let cursorPendientes = null
 
+  // Estos arrays SOLO contienen "lo que corresponde a la vista actual":
+  // para operador, todo lo suyo (precargado una vez, ya acotado). Para
+  // admin/coordinador, se repueblan en cada pestaña con datos ya
+  // filtrados/paginados server-side — nunca el padrón completo.
   let registros = []
   let asignaciones = []
   let estados = []
@@ -100,25 +135,27 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
   let incidencias = []
 
   const operadores = () => usuarios.filter(u => u.role === 'operador')
+  // Para operador (no admin), `usuarios` nunca se carga (firestore.rules no
+  // deja listar todo el equipo desde ese rol) — como sus asignaciones/
+  // llamadas son siempre propias, el único uid que necesita resolver es el
+  // suyo.
   const usuarioNombre = (uid) => {
     const u = usuarios.find(x => x.id === uid)
-    return u ? (u.nombre || u.email) : '—'
+    if (u) return u.nombre || u.email
+    if (uid === user.uid) return user.displayName || user.email
+    return '—'
   }
   const registroPorId = (id) => registros.find(r => r.id === id)
   const asignacionPorVoterId = (id) => asignaciones.find(a => a.voterId === id)
   const estadoPorVoterId = (id) => estados.find(e => e.voterId === id)
 
   async function cargarDatos() {
-    usuarios = await getAllCandidateUsers(candidateId)
-    if (isAdminView) {
-      const [regs, asigs, ests, incs] = await Promise.all([
-        getAllRecords(candidateId),
-        getAllCallAssignments(candidateId),
-        getAllElectionStatuses(candidateId),
-        getAllIncidents(candidateId)
-      ])
-      registros = regs; asignaciones = asigs; estados = ests; incidencias = incs
-    } else {
+    // getAllCandidateUsers() hace un list() sin filtro sobre todo el
+    // roster: firestore.rules solo lo permite a campaign_admin/coordinator/
+    // superadmin. Un operador que lo llamara recibiría permission-denied y
+    // rompería toda la carga del módulo (antes pasaba justo esto).
+    if (isAdminView) usuarios = await getAllCandidateUsers(candidateId)
+    if (!isAdminView) {
       const [asigs, ests, incs] = await Promise.all([
         getMyCallAssignments(candidateId, user.uid),
         getMyElectionStatuses(candidateId, user.uid),
@@ -127,6 +164,7 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
       asignaciones = asigs; estados = ests; incidencias = incs
       registros = await getRecordsByIds(candidateId, asigs.map(a => a.voterId))
     }
+    // admin/coordinador: nada acá — cada pestaña carga lo suyo, acotado.
   }
 
   function tabBtn(id, label) {
@@ -153,7 +191,7 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
       <div id="cc-tab-body" style="background: white; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; padding: 20px;"></div>
     `
     container.querySelectorAll('.cc-tab-btn').forEach(btn => {
-      btn.addEventListener('click', () => { tab = btn.dataset.tab; filtroDashboard = null; render() })
+      btn.addEventListener('click', () => { tab = btn.dataset.tab; filtroDashboard = null; cursorPendientes = null; renderTab() })
     })
     renderTab()
   }
@@ -183,9 +221,13 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     return modal
   }
 
-  async function abrirFichaVotante(registro) {
-    const asignacion = asignacionPorVoterId(registro.id)
-    let estado = estadoPorVoterId(registro.id)
+  // asignacion/estado se pasan explícitos (el llamador ya los tiene a mano
+  // de la lista que se está mostrando) en vez de resolverlos desde un
+  // array global — a escala, ese array ya no contiene "todo", solo lo de
+  // la vista actual.
+  async function abrirFichaVotante(registro, asignacionInicial, estadoInicial) {
+    const asignacion = asignacionInicial
+    let estado = estadoInicial
     const telLimpio = normalizarTelefonoPY(registro.telefono)
 
     const modal = abrirModal(`
@@ -245,7 +287,6 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
         estado = { ...(estado || {}), ...updates }
         const idx = estados.findIndex(e => e.voterId === registro.id)
         if (idx >= 0) estados[idx] = { ...estados[idx], ...updates }
-        else estados.push({ id: registro.id, voterId: registro.id, assignedUserId: asignacion?.assignedUserId || user.uid, ...updates })
         alert('✅ Estado guardado')
       } catch (err) {
         alert('Error: ' + err.message)
@@ -310,24 +351,69 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     })
   }
 
+  // Tarjeta compacta de votante reutilizada en varias pestañas.
+  function pintarListaVotantes(box, items, mensajeVacio) {
+    if (!box) return
+    if (items.length === 0) {
+      box.innerHTML = `<div style="color:#999; padding:20px; text-align:center;">${mensajeVacio}</div>`
+      return
+    }
+    box.innerHTML = `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px;">
+      ${items.map(({ registro, asignacion, estado }) => `
+        <div class="cc-voter-card" data-id="${registro.id}" style="border:1px solid #eee; border-radius:8px; padding:12px; cursor:pointer; background:#fafafa;">
+          <div style="font-weight:700;">${escapeHtml(registro.nombre)}</div>
+          <div style="font-size:.78rem; color:#666;">CI ${escapeHtml(registro.cedula)} · 📱 ${escapeHtml(registro.telefono) || 'sin tel.'}</div>
+          <div style="font-size:.78rem; color:#666;">🗳️ ${escapeHtml(registro.local) || 'sin local'}</div>
+          <div style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">
+            <span style="background:#eee; color:#555; padding:2px 8px; border-radius:10px; font-size:.68rem; font-weight:700;">${escapeHtml(asignacion?.status || 'sin asignar')}</span>
+            ${estado?.lastStatus ? `<span style="background:#ede7f6; color:#4527a0; padding:2px 8px; border-radius:10px; font-size:.68rem; font-weight:700;">${escapeHtml(estado.lastStatus)}</span>` : ''}
+          </div>
+          <div style="font-size:.72rem; color:#999; margin-top:4px;">👷 ${asignacion ? escapeHtml(usuarioNombre(asignacion.assignedUserId)) : '—'}</div>
+        </div>
+      `).join('')}
+    </div>`
+    box.querySelectorAll('.cc-voter-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const item = items.find(x => x.registro.id === card.dataset.id)
+        if (item) abrirFichaVotante(item.registro, item.asignacion, item.estado)
+      })
+    })
+  }
+
   // ── Pestaña Pendientes (incluye el dashboard de tarjetas) ─────────────
-  function renderPendientes(body) {
+  async function renderPendientes(body) {
     body.innerHTML = '<div style="color:#999;">Cargando...</div>'
 
-    const asignadosConDatos = asignaciones
-      .map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) }))
-      .filter(x => x.registro)
-
-    const conteos = {
-      pendientes: asignaciones.filter(a => a.status === 'pending').length,
-      contactados: estados.filter(e => e.contacted).length,
-      confirmados: estados.filter(e => e.confirmedToVote).length,
-      noContestan: estados.filter(e => e.noAnswer).length,
-      numeroIncorrecto: estados.filter(e => e.wrongNumber).length,
-      indecisos: estados.filter(e => e.undecided).length,
-      requierenTransporte: estados.filter(e => e.requiresPickup).length,
-      precisanAyuda: estados.filter(e => e.needsAssistance).length,
-      incidencias: incidencias.filter(i => i.status === 'open' || i.status === 'in_progress').length
+    let conteos
+    if (isAdminView) {
+      const [pendientes, flagCounts, incidenciasCount] = await Promise.all([
+        getCallAssignmentStatusCount(candidateId, 'pending'),
+        getElectionStatusFlagCounts(candidateId, ['contacted', 'confirmedToVote', 'noAnswer', 'wrongNumber', 'undecided', 'requiresPickup', 'needsAssistance']),
+        getOpenIncidentsCount(candidateId)
+      ])
+      conteos = {
+        pendientes,
+        contactados: flagCounts.contacted,
+        confirmados: flagCounts.confirmedToVote,
+        noContestan: flagCounts.noAnswer,
+        numeroIncorrecto: flagCounts.wrongNumber,
+        indecisos: flagCounts.undecided,
+        requierenTransporte: flagCounts.requiresPickup,
+        precisanAyuda: flagCounts.needsAssistance,
+        incidencias: incidenciasCount
+      }
+    } else {
+      conteos = {
+        pendientes: asignaciones.filter(a => a.status === 'pending').length,
+        contactados: estados.filter(e => e.contacted).length,
+        confirmados: estados.filter(e => e.confirmedToVote).length,
+        noContestan: estados.filter(e => e.noAnswer).length,
+        numeroIncorrecto: estados.filter(e => e.wrongNumber).length,
+        indecisos: estados.filter(e => e.undecided).length,
+        requierenTransporte: estados.filter(e => e.requiresPickup).length,
+        precisanAyuda: estados.filter(e => e.needsAssistance).length,
+        incidencias: incidencias.filter(i => i.status === 'open' || i.status === 'in_progress').length
+      }
     }
 
     const tarjeta = (key, emoji, label, valor, color) => `
@@ -352,9 +438,9 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
       </div>
       <h3 style="margin:0 0 12px; font-size:1.05rem;">Votantes ${filtroDashboard ? '(filtrado)' : 'pendientes'}</h3>
       <div id="cc-pendientes-lista"></div>
+      <div id="cc-pendientes-cargar-mas" style="text-align:center; margin-top:12px;"></div>
     `
 
-    // "Llamados hoy" se calcula aparte (no bloquea el resto del dashboard).
     const inicioHoy = new Date(); inicioHoy.setHours(0, 0, 0, 0)
     getCallsSince(candidateId, inicioHoy, isAdminView ? null : user.uid).then(calls => {
       const el = body.querySelector('[data-filtro="llamadosHoy"] div')
@@ -364,48 +450,68 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     body.querySelectorAll('.cc-dash-card').forEach(btn => {
       btn.addEventListener('click', () => {
         filtroDashboard = filtroDashboard === btn.dataset.filtro ? null : btn.dataset.filtro
+        cursorPendientes = null
         renderPendientes(body)
       })
     })
 
-    function pasaFiltro(x) {
-      if (!filtroDashboard || filtroDashboard === 'llamadosHoy') return true
-      if (filtroDashboard === 'pending') return x.asignacion.status === 'pending'
-      if (filtroDashboard === 'incidents') return incidencias.some(i => i.voterId === x.registro.id && (i.status === 'open' || i.status === 'in_progress'))
-      return !!x.estado?.[filtroDashboard]
-    }
-
-    const lista = asignadosConDatos.filter(pasaFiltro)
-    pintarListaVotantes(document.getElementById('cc-pendientes-lista'), lista, 'Sin votantes en este filtro.')
+    await cargarYPintarListaPendientes(body, { append: false })
   }
 
-  // Tarjeta compacta de votante reutilizada en varias pestañas.
-  function pintarListaVotantes(box, items, mensajeVacio) {
-    if (!box) return
-    if (items.length === 0) {
-      box.innerHTML = `<div style="color:#999; padding:20px; text-align:center;">${mensajeVacio}</div>`
-      return
+  // Único punto que arma "la lista de abajo" de Pendientes, acotado según
+  // corresponda: página de pendientes (con "cargar más"), o un drill-down
+  // acotado a 300 cuando se clickea una tarjeta puntual del dashboard.
+  async function cargarYPintarListaPendientes(body, { append }) {
+    const listaBox = document.getElementById('cc-pendientes-lista')
+    const cargarMasBox = document.getElementById('cc-pendientes-cargar-mas')
+    if (!append) listaBox.innerHTML = '<div style="color:#999; padding:20px;">Cargando...</div>'
+
+    let items = []
+    let hayMas = false
+
+    if (isAdminView) {
+      if (!filtroDashboard || filtroDashboard === 'pending' || filtroDashboard === 'llamadosHoy') {
+        const { assignments, lastDoc, hasMore } = await getCallAssignmentsPage(candidateId, { status: 'pending', cursor: append ? cursorPendientes : null, pageSize: 50 })
+        const ids = assignments.map(a => a.voterId)
+        const [regs, ests] = await Promise.all([getRecordsByIds(candidateId, ids), getElectionStatusesByIds(candidateId, ids)])
+        if (append) { asignaciones = [...asignaciones, ...assignments]; registros = [...registros, ...regs]; estados = [...estados, ...ests] }
+        else { asignaciones = assignments; registros = regs; estados = ests }
+        cursorPendientes = lastDoc
+        hayMas = hasMore
+        // Siempre se pinta desde el array acumulado (no solo la página
+        // nueva) para que "Cargar más" muestre todo lo traído hasta ahora.
+        items = asignaciones.map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) })).filter(x => x.registro)
+      } else if (filtroDashboard === 'incidents') {
+        incidencias = await getOpenIncidents(candidateId, 300)
+        const ids = incidencias.map(i => i.voterId)
+        const [regs, asigs, ests] = await Promise.all([getRecordsByIds(candidateId, ids), getCallAssignmentsByIds(candidateId, ids), getElectionStatusesByIds(candidateId, ids)])
+        registros = regs; asignaciones = asigs; estados = ests
+        items = ids.map(id => ({ registro: registroPorId(id), asignacion: asignacionPorVoterId(id), estado: estadoPorVoterId(id) })).filter(x => x.registro)
+      } else {
+        estados = await getElectionStatusByFlag(candidateId, filtroDashboard, 300)
+        const ids = estados.map(e => e.voterId)
+        const [regs, asigs] = await Promise.all([getRecordsByIds(candidateId, ids), getCallAssignmentsByIds(candidateId, ids)])
+        registros = regs; asignaciones = asigs
+        items = ids.map(id => ({ registro: registroPorId(id), asignacion: asignacionPorVoterId(id), estado: estadoPorVoterId(id) })).filter(x => x.registro)
+      }
+    } else {
+      const asignadosConDatos = asignaciones.map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) })).filter(x => x.registro)
+      function pasaFiltro(x) {
+        if (!filtroDashboard || filtroDashboard === 'llamadosHoy') return true
+        if (filtroDashboard === 'pending') return x.asignacion.status === 'pending'
+        if (filtroDashboard === 'incidents') return incidencias.some(i => i.voterId === x.registro.id && (i.status === 'open' || i.status === 'in_progress'))
+        return !!x.estado?.[filtroDashboard]
+      }
+      items = asignadosConDatos.filter(pasaFiltro)
     }
-    box.innerHTML = `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px;">
-      ${items.map(({ registro, asignacion, estado }) => `
-        <div class="cc-voter-card" data-id="${registro.id}" style="border:1px solid #eee; border-radius:8px; padding:12px; cursor:pointer; background:#fafafa;">
-          <div style="font-weight:700;">${escapeHtml(registro.nombre)}</div>
-          <div style="font-size:.78rem; color:#666;">CI ${escapeHtml(registro.cedula)} · 📱 ${escapeHtml(registro.telefono) || 'sin tel.'}</div>
-          <div style="font-size:.78rem; color:#666;">🗳️ ${escapeHtml(registro.local) || 'sin local'}</div>
-          <div style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">
-            <span style="background:#eee; color:#555; padding:2px 8px; border-radius:10px; font-size:.68rem; font-weight:700;">${escapeHtml(asignacion?.status || 'sin asignar')}</span>
-            ${estado?.lastStatus ? `<span style="background:#ede7f6; color:#4527a0; padding:2px 8px; border-radius:10px; font-size:.68rem; font-weight:700;">${escapeHtml(estado.lastStatus)}</span>` : ''}
-          </div>
-          <div style="font-size:.72rem; color:#999; margin-top:4px;">👷 ${asignacion ? escapeHtml(usuarioNombre(asignacion.assignedUserId)) : '—'}</div>
-        </div>
-      `).join('')}
-    </div>`
-    box.querySelectorAll('.cc-voter-card').forEach(card => {
-      card.addEventListener('click', () => {
-        const registro = registroPorId(card.dataset.id)
-        if (registro) abrirFichaVotante(registro)
-      })
-    })
+
+    pintarListaVotantes(listaBox, items, 'Sin votantes en este filtro.')
+
+    cargarMasBox.innerHTML = hayMas
+      ? `<button id="btn-cargar-mas-pendientes" style="background:#6a1b9a; color:white; border:none; padding:10px 20px; border-radius:6px; cursor:pointer; font-weight:700;">Cargar más</button>`
+      : ''
+    const btnMas = document.getElementById('btn-cargar-mas-pendientes')
+    if (btnMas) btnMas.addEventListener('click', () => cargarYPintarListaPendientes(body, { append: true }))
   }
 
   // ── Pestaña En seguimiento ──────────────────────────────────────────
@@ -414,6 +520,11 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     const followUps = isAdminView
       ? await getPendingFollowUps(candidateId)
       : await getMyPendingFollowUps(candidateId, user.uid)
+
+    if (isAdminView) {
+      const ids = followUps.map(f => f.voterId)
+      registros = await getRecordsByIds(candidateId, ids)
+    }
 
     if (followUps.length === 0) {
       body.innerHTML = '<h3 style="margin:0 0 12px; font-size:1.05rem;">🔄 En seguimiento</h3><div style="color:#999; padding:20px; text-align:center;">No hay seguimientos pendientes.</div>'
@@ -451,7 +562,7 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     `
 
     body.querySelectorAll('.btn-ver-ficha-seg').forEach(btn => {
-      btn.addEventListener('click', () => { const r = registroPorId(btn.dataset.id); if (r) abrirFichaVotante(r) })
+      btn.addEventListener('click', () => { const r = registroPorId(btn.dataset.id); if (r) abrirFichaVotante(r, asignacionPorVoterId(r.id), estadoPorVoterId(r.id)) })
     })
     body.querySelectorAll('.btn-marcar-realizado').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -466,34 +577,49 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
   }
 
   // ── Pestaña Confirmados ──────────────────────────────────────────────
-  function renderConfirmados(body) {
-    const confirmados = estados
-      .filter(e => e.confirmedToVote)
-      .map(e => ({ estado: e, registro: registroPorId(e.voterId), asignacion: asignacionPorVoterId(e.voterId) }))
-      .filter(x => x.registro)
+  async function renderConfirmados(body) {
+    body.innerHTML = '<div style="color:#999;">Cargando...</div>'
+    let confirmados
+    let capado = false
+    if (isAdminView) {
+      estados = await getElectionStatusByFlag(candidateId, 'confirmedToVote', 300)
+      capado = estados.length === 300
+      const ids = estados.map(e => e.voterId)
+      const [regs, asigs] = await Promise.all([getRecordsByIds(candidateId, ids), getCallAssignmentsByIds(candidateId, ids)])
+      registros = regs; asignaciones = asigs
+      confirmados = ids.map(id => ({ estado: estadoPorVoterId(id), registro: registroPorId(id), asignacion: asignacionPorVoterId(id) })).filter(x => x.registro)
+    } else {
+      confirmados = estados
+        .filter(e => e.confirmedToVote)
+        .map(e => ({ estado: e, registro: registroPorId(e.voterId), asignacion: asignacionPorVoterId(e.voterId) }))
+        .filter(x => x.registro)
+    }
 
-    body.innerHTML = `<h3 style="margin:0 0 12px; font-size:1.05rem;">✅ Confirmados (${confirmados.length})</h3><div id="cc-confirmados-lista"></div>`
+    body.innerHTML = `
+      <h3 style="margin:0 0 12px; font-size:1.05rem;">✅ Confirmados (${confirmados.length}${capado ? '+' : ''})</h3>
+      ${capado ? '<p style="font-size:.78rem; color:#999; margin:0 0 12px;">Mostrando los primeros 300 — usá Excel en Registros para el listado completo.</p>' : ''}
+      <div id="cc-confirmados-lista"></div>
+    `
     pintarListaVotantes(document.getElementById('cc-confirmados-lista'), confirmados, 'Todavía no hay votantes confirmados.')
   }
 
   // ── Pestaña Asignación (solo admin/coordinador) ──────────────────────
-  function renderAsignacion(body) {
+  async function renderAsignacion(body) {
     const ops = operadores()
-    const stats = ops.map(op => {
-      const misAsig = asignaciones.filter(a => a.assignedUserId === op.id)
-      const misEstados = estados.filter(e => e.assignedUserId === op.id)
-      return {
-        operador: op,
-        total: misAsig.length,
-        pendientes: misAsig.filter(a => a.status === 'pending').length,
-        contactados: misEstados.filter(e => e.contacted).length,
-        confirmados: misEstados.filter(e => e.confirmedToVote).length,
-        incidencias: incidencias.filter(i => i.assignedUserId === op.id && (i.status === 'open' || i.status === 'in_progress')).length
-      }
-    })
+    body.innerHTML = '<div style="color:#999;">Cargando estadísticas...</div>'
 
-    const sinAsignar = registros.filter(r => !asignacionPorVoterId(r.id))
-    const locales = [...new Set(registros.map(r => r.local).filter(Boolean))].sort()
+    const stats = await Promise.all(ops.map(async op => {
+      const [total, pendientes, contactados, confirmados, incidenciasCount] = await Promise.all([
+        getCallAssignmentCountForOperator(candidateId, op.id),
+        getCallAssignmentCountForOperator(candidateId, op.id, 'pending'),
+        getElectionStatusFlagCountForOperator(candidateId, op.id, 'contacted'),
+        getElectionStatusFlagCountForOperator(candidateId, op.id, 'confirmedToVote'),
+        getIncidentsCountForOperator(candidateId, op.id)
+      ])
+      return { operador: op, total, pendientes, contactados, confirmados, incidencias: incidenciasCount }
+    }))
+
+    const modoBtn = (id, label) => `<button class="cc-modo-asig-btn" data-modo="${id}" style="padding:8px 16px; border:1px solid #6a1b9a; border-radius:6px; cursor:pointer; font-weight:700; font-size:.85rem; background:${modoAsignacion === id ? '#6a1b9a' : 'white'}; color:${modoAsignacion === id ? 'white' : '#6a1b9a'};">${label}</button>`
 
     body.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">👥 Operadores</h3>
@@ -512,51 +638,86 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
         </table>
       </div>`}
 
+      <div style="background:#f5f0fa; border-radius:8px; padding:14px; margin-bottom:20px;">
+        <div style="font-weight:700; font-size:.85rem; margin-bottom:8px; color:#4a148c;">¿Cómo querés asignar los votantes sin operador?</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          ${modoBtn('manual', '✋ Manual (uno por uno / por zona)')}
+          ${modoBtn('automatica', '🤖 Automática (masiva)')}
+        </div>
+      </div>
+
+      <div id="cc-asignacion-body"></div>
+    `
+
+    body.querySelectorAll('.cc-modo-asig-btn').forEach(btn => {
+      btn.addEventListener('click', () => { modoAsignacion = btn.dataset.modo; renderAsignacion(body) })
+    })
+
+    if (modoAsignacion === 'automatica') pintarAsignacionAutomatica(document.getElementById('cc-asignacion-body'), ops)
+    else pintarAsignacionManual(document.getElementById('cc-asignacion-body'), ops)
+  }
+
+  // ── Asignación manual: por zona (query puntual, sin escanear todo) +
+  // por CI/nombre (búsqueda indexada, nunca filtra el padrón completo) ──
+  function pintarAsignacionManual(box, ops) {
+    box.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">📍 Asignar por local/zona</h3>
+      <p style="font-size:.78rem; color:#999; margin:0 0 8px;">Escribí el local tal cual figura en Registros (sensible a mayúsculas/tildes exactas).</p>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:24px;">
-        <select id="sel-zona-asignar" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
-          <option value="">Elegí un local/zona</option>
-          ${locales.map(l => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join('')}
-        </select>
+        <input id="inp-zona-asignar" placeholder="Ej: ESC. Bo REPUBLICA DOMINICANA" style="flex:1; min-width:220px; padding:8px; border:1px solid #ccc; border-radius:4px;">
         <select id="sel-operador-zona" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <option value="">Elegí un operador</option>
           ${ops.map(o => `<option value="${o.id}">${escapeHtml(o.nombre || o.email)}</option>`).join('')}
         </select>
         <button id="btn-asignar-zona" style="background:#6a1b9a; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;">Asignar sin asignar de esa zona</button>
       </div>
+      <div id="cc-zona-msg" style="font-size:.85rem; margin:-16px 0 20px;"></div>
 
       <h3 style="margin:0 0 12px; font-size:1.05rem;">🔎 Asignar / reasignar por CI o nombre</h3>
+      <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
       <input id="inp-buscar-asignacion" placeholder="Buscar votante por CI o nombre..." style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
       <div id="cc-lista-asignacion" style="max-height:420px; overflow-y:auto; border:1px solid #eee; border-radius:6px;"></div>
     `
 
-    body.querySelector('#btn-asignar-zona').addEventListener('click', async () => {
-      const zona = body.querySelector('#sel-zona-asignar').value
-      const operadorId = body.querySelector('#sel-operador-zona').value
-      if (!zona || !operadorId) { alert('Elegí zona y operador.'); return }
-      const idsZona = sinAsignar.filter(r => r.local === zona).map(r => r.id)
-      if (idsZona.length === 0) { alert('No hay votantes sin asignar en esa zona.'); return }
-      if (!confirm(`¿Asignar ${idsZona.length} votante(s) de "${zona}" a este operador?`)) return
+    box.querySelector('#btn-asignar-zona').addEventListener('click', async () => {
+      const zona = box.querySelector('#inp-zona-asignar').value.trim()
+      const operadorId = box.querySelector('#sel-operador-zona').value
+      const msgEl = box.querySelector('#cc-zona-msg')
+      if (!zona || !operadorId) { alert('Escribí la zona/local y elegí un operador.'); return }
+      msgEl.textContent = '🔎 Buscando votantes sin asignar en esa zona...'
       try {
-        await assignVotersToOperatorBulk(candidateId, idsZona, operadorId, user.uid)
-        await recargarYRenderizar()
+        const registrosZona = await getUnassignedRecordsByLocal(candidateId, zona, 5000)
+        if (registrosZona.length === 0) {
+          msgEl.textContent = '❌ No hay votantes sin asignar con ese local exacto.'
+          return
+        }
+        if (!confirm(`¿Asignar ${registrosZona.length} votante(s) de "${zona}" a este operador?`)) { msgEl.textContent = ''; return }
+        msgEl.textContent = `Asignando ${registrosZona.length} votante(s)...`
+        await assignVotersToOperatorBulk(candidateId, registrosZona.map(r => r.id), operadorId, user.uid)
+        msgEl.textContent = `✅ ${registrosZona.length} votante(s) asignado(s).`
       } catch (err) {
-        alert('Error: ' + err.message)
+        msgEl.textContent = '❌ Error: ' + err.message
       }
     })
 
-    function pintarListaAsignacion(filtro = '') {
-      const termino = filtro.trim().toLowerCase()
-      const filtrados = !termino ? registros : registros.filter(r =>
-        String(r.cedula).toLowerCase().includes(termino) || String(r.nombre).toLowerCase().includes(termino)
-      )
+    async function pintarListaAsignacion(filtro = '') {
       const listaBox = document.getElementById('cc-lista-asignacion')
-      if (filtrados.length === 0) {
+      const termino = filtro.trim()
+      if (!termino) {
+        listaBox.innerHTML = '<div style="padding:20px; text-align:center; color:#999;">Escribí una CI o nombre para buscar.</div>'
+        return
+      }
+      listaBox.innerHTML = '<div style="padding:20px; text-align:center; color:#999;">Buscando...</div>'
+      const encontrados = await searchRecordsForContactCenter(candidateId, termino)
+      if (encontrados.length === 0) {
         listaBox.innerHTML = '<div style="padding:20px; text-align:center; color:#999;">Sin resultados.</div>'
         return
       }
-      listaBox.innerHTML = filtrados.slice(0, 200).map(r => {
-        const asig = asignacionPorVoterId(r.id)
+      const asigs = await getCallAssignmentsByIds(candidateId, encontrados.map(r => r.id))
+      const asigPorId = new Map(asigs.map(a => [a.voterId, a]))
+
+      listaBox.innerHTML = encontrados.map(r => {
+        const asig = asigPorId.get(r.id)
         return `
         <div style="padding:8px 12px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
           <div style="font-size:.85rem;">
@@ -578,23 +739,208 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
           const sel = listaBox.querySelector(`.sel-op-fila[data-id="${btn.dataset.id}"]`)
           const operadorId = sel.value
           if (!operadorId) { alert('Elegí un operador.'); return }
-          const asig = asignacionPorVoterId(btn.dataset.id)
+          const asig = asigPorId.get(btn.dataset.id)
           try {
             if (asig) await reassignVoter(candidateId, btn.dataset.id, operadorId, user.uid)
             else await assignVoterToOperator(candidateId, btn.dataset.id, operadorId, user.uid)
-            await recargarYRenderizar()
+            pintarListaAsignacion(termino)
           } catch (err) {
             alert('Error: ' + err.message)
           }
         })
       })
     }
-    pintarListaAsignacion()
-    body.querySelector('#inp-buscar-asignacion').addEventListener('input', debounce(e => pintarListaAsignacion(e.target.value), 250))
+    box.querySelector('#inp-buscar-asignacion').addEventListener('input', debounce(e => pintarListaAsignacion(e.target.value), 250))
+  }
+
+  // ── Asignación automática (masiva): agrupa a los votantes sin operador
+  // por el criterio elegido (dirigente / local de votación / ninguno) y
+  // reparte los grupos entre los operadores seleccionados con un greedy
+  // bin-packing (cada grupo entero va al operador con menos carga en ese
+  // momento). Nunca descarga el padrón completo:
+  // - "dirigente": el universo de dirigentes es chico (equipo, no
+  //   votantes) — se pide/asigna de a un dirigente por vez.
+  // - "local"/"equitativo": se pagina savedRecords en bloques (ver
+  //   getUnassignedRecordsPage) y se reparte página por página,
+  //   manteniendo la carga acumulada entre páginas.
+  function pintarAsignacionAutomatica(box, ops) {
+    box.innerHTML = '<div style="color:#999;">Cargando...</div>'
+
+    getUnassignedCount(candidateId).then(total => pintarUI(total)).catch(err => {
+      box.innerHTML = `<div style="color:#c62828;">Error cargando: ${escapeHtml(err.message)}</div>`
+    })
+
+    function pintarUI(totalSinAsignar) {
+      box.innerHTML = `
+        <h3 style="margin:0 0 8px; font-size:1.05rem;">🤖 Asignación automática masiva</h3>
+        <p style="font-size:.85rem; color:#666; margin:0 0 14px;">Reparte los <strong>${totalSinAsignar}</strong> votantes sin operador entre los operadores que elijas, según el criterio.</p>
+
+        ${ops.length === 0 ? '<div style="color:#999;">No hay operadores creados todavía.</div>' : totalSinAsignar === 0 ? '<div style="color:#999;">No hay votantes sin asignar en este momento.</div>' : `
+          <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:16px;">
+            <div>
+              <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Criterio de reparto:</label>
+              <select id="sel-criterio-auto" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px;">
+                <option value="dirigente">Por dirigente (todos los votantes de un mismo dirigente van al mismo operador)</option>
+                <option value="local">Por local de votación (todos los votantes de un mismo local van al mismo operador)</option>
+                <option value="equitativo">Distribución equitativa (sin agrupar, parejo votante por votante)</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Operadores que participan:</label>
+              <div style="border:1px solid #ccc; border-radius:4px; padding:8px; max-height:120px; overflow-y:auto;">
+                ${ops.map(o => `
+                  <label style="display:flex; align-items:center; gap:6px; font-size:.82rem; padding:2px 0; cursor:pointer;">
+                    <input type="checkbox" class="chk-op-auto" value="${o.id}" checked> ${escapeHtml(o.nombre || o.email)}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+
+          <div id="cc-preview-auto" style="margin-bottom:16px; font-size:.85rem; color:#666;"></div>
+
+          <button id="btn-ejecutar-auto" style="background:#6a1b9a; color:white; border:none; padding:12px 20px; border-radius:6px; cursor:pointer; font-weight:700;">🚀 Ejecutar asignación automática</button>
+          <div id="cc-progreso-auto" style="margin-top:10px; font-size:.85rem; font-weight:700;"></div>
+        `}
+      `
+
+      if (ops.length === 0 || totalSinAsignar === 0) return
+
+      function operadoresSeleccionados() {
+        return [...box.querySelectorAll('.chk-op-auto:checked')].map(chk => chk.value)
+      }
+
+      // Preview exacto solo para "dirigente" (cuesta poco: count() por
+      // cada usuario del equipo, no por votante). Para "local"/
+      // "equitativo" no hay forma barata de adelantar el reparto exacto
+      // sin escanear — se avisa así en vez de fingir precisión.
+      async function pintarPreview() {
+        const criterio = box.querySelector('#sel-criterio-auto').value
+        const opIds = operadoresSeleccionados()
+        const previewBox = box.querySelector('#cc-preview-auto')
+        if (opIds.length === 0) {
+          previewBox.innerHTML = '<div style="color:#e65100;">Elegí al menos un operador.</div>'
+          return
+        }
+        if (criterio !== 'dirigente') {
+          previewBox.innerHTML = '<div>No hay vista previa exacta para este criterio (se calcula al ejecutar) — el reparto se hace en bloques, manteniendo la carga pareja entre operadores.</div>'
+          return
+        }
+        previewBox.innerHTML = 'Calculando vista previa...'
+        const carga = new Map(opIds.map(id => [id, 0]))
+        for (const u of usuarios) {
+          const count = await getUnassignedCountByDirigente(candidateId, u.id)
+          if (count === 0) continue
+          const opMenorCarga = opIds.reduce((min, id) => carga.get(id) < carga.get(min) ? id : min, opIds[0])
+          carga.set(opMenorCarga, carga.get(opMenorCarga) + count)
+        }
+        previewBox.innerHTML = `
+          <div style="font-weight:700; margin-bottom:6px;">Vista previa del reparto:</div>
+          <table style="width:100%; border-collapse:collapse;">
+            <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:4px;">Operador</th><th>Votantes a asignar</th></tr></thead>
+            <tbody>${opIds.map(id => `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${escapeHtml(usuarioNombre(id))}</td><td>${carga.get(id)}</td></tr>`).join('')}</tbody>
+          </table>
+        `
+      }
+      pintarPreview()
+      box.querySelector('#sel-criterio-auto').addEventListener('change', pintarPreview)
+      box.querySelectorAll('.chk-op-auto').forEach(chk => chk.addEventListener('change', pintarPreview))
+
+      box.querySelector('#btn-ejecutar-auto').addEventListener('click', async () => {
+        const criterio = box.querySelector('#sel-criterio-auto').value
+        const opIds = operadoresSeleccionados()
+        if (opIds.length === 0) { alert('Elegí al menos un operador.'); return }
+        if (!confirm(`¿Ejecutar la asignación automática por "${criterio}" entre ${opIds.length} operador(es)? Con muchos votantes puede tardar unos minutos.`)) return
+
+        const progresoEl = box.querySelector('#cc-progreso-auto')
+        const btn = box.querySelector('#btn-ejecutar-auto')
+        btn.disabled = true
+        try {
+          const total = criterio === 'dirigente'
+            ? await ejecutarPorDirigente(opIds, progresoEl)
+            : await ejecutarPorLocalOEquitativo(criterio, opIds, progresoEl)
+          progresoEl.textContent = `✅ Listo: ${total} votante(s) asignado(s) entre ${opIds.length} operador(es).`
+          renderAsignacion(document.getElementById('cc-tab-body'))
+        } catch (err) {
+          progresoEl.textContent = `❌ Error: ${err.message}`
+          btn.disabled = false
+        }
+      })
+    }
+
+    async function ejecutarPorDirigente(operadorIds, progresoEl) {
+      const carga = new Map(operadorIds.map(id => [id, 0]))
+      let total = 0
+      for (const u of usuarios) {
+        const grupo = await getUnassignedRecordsByDirigente(candidateId, u.id, 5000)
+        if (grupo.length === 0) continue
+        const opMenorCarga = operadorIds.reduce((min, id) => carga.get(id) < carga.get(min) ? id : min, operadorIds[0])
+        progresoEl.textContent = `Asignando ${grupo.length} votante(s) de ${usuarioNombre(u.id)} a ${usuarioNombre(opMenorCarga)}... (total hasta ahora: ${total})`
+        await assignVotersToOperatorBulk(candidateId, grupo.map(r => r.id), opMenorCarga, user.uid)
+        carga.set(opMenorCarga, carga.get(opMenorCarga) + grupo.length)
+        total += grupo.length
+      }
+      return total
+    }
+
+    async function ejecutarPorLocalOEquitativo(criterio, operadorIds, progresoEl) {
+      const carga = new Map(operadorIds.map(id => [id, 0]))
+      let cursor = null
+      let total = 0
+      let indiceRoundRobin = 0
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { records, lastDoc, hasMore } = await getUnassignedRecordsPage(candidateId, { cursor, pageSize: 1000 })
+        if (records.length === 0) break
+
+        if (criterio === 'equitativo') {
+          const porOperador = new Map(operadorIds.map(id => [id, []]))
+          records.forEach(r => {
+            const opId = operadorIds[indiceRoundRobin % operadorIds.length]
+            porOperador.get(opId).push(r.id)
+            indiceRoundRobin++
+          })
+          for (const [opId, ids] of porOperador) {
+            if (ids.length === 0) continue
+            await assignVotersToOperatorBulk(candidateId, ids, opId, user.uid)
+            total += ids.length
+          }
+        } else {
+          const porLocal = new Map()
+          records.forEach(r => {
+            const key = r.local || 'Sin local asignado'
+            if (!porLocal.has(key)) porLocal.set(key, [])
+            porLocal.get(key).push(r.id)
+          })
+          const grupos = [...porLocal.values()].sort((a, b) => b.length - a.length)
+          for (const grupoIds of grupos) {
+            const opMenorCarga = operadorIds.reduce((min, id) => carga.get(id) < carga.get(min) ? id : min, operadorIds[0])
+            await assignVotersToOperatorBulk(candidateId, grupoIds, opMenorCarga, user.uid)
+            carga.set(opMenorCarga, carga.get(opMenorCarga) + grupoIds.length)
+            total += grupoIds.length
+          }
+        }
+
+        progresoEl.textContent = `Progreso: ${total} votante(s) asignado(s) hasta ahora...`
+        cursor = lastDoc
+        if (!hasMore) break
+      }
+      return total
+    }
   }
 
   // ── Pestaña Incidencias ──────────────────────────────────────────────
-  function renderIncidencias(body) {
+  // El volumen de incidencias lo genera actividad humana puntual (un
+  // operador marcando un problema), no el tamaño del padrón — se puede
+  // seguir trayendo completo sin escalar mal, a diferencia de savedRecords.
+  async function renderIncidencias(body) {
+    body.innerHTML = '<div style="color:#999;">Cargando...</div>'
+    if (isAdminView) {
+      incidencias = await getAllIncidents(candidateId)
+      const ids = incidencias.map(i => i.voterId)
+      registros = await getRecordsByIds(candidateId, ids)
+    }
+
     const abiertas = incidencias.filter(i => i.status === 'open')
     const enProceso = incidencias.filter(i => i.status === 'in_progress')
     const resueltas = incidencias.filter(i => i.status === 'resolved' || i.status === 'cancelled')
@@ -634,13 +980,13 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
     body.querySelectorAll('.btn-en-proceso').forEach(btn => {
       btn.addEventListener('click', async () => {
         await updateIncidentStatus(candidateId, btn.dataset.id, 'in_progress', user.uid)
-        await recargarYRenderizar()
+        renderIncidencias(body)
       })
     })
     body.querySelectorAll('.btn-resolver').forEach(btn => {
       btn.addEventListener('click', async () => {
         await updateIncidentStatus(candidateId, btn.dataset.id, 'resolved', user.uid)
-        await recargarYRenderizar()
+        renderIncidencias(body)
       })
     })
 
@@ -648,6 +994,7 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
       const formBox = body.querySelector('#cc-form-incidencia')
       formBox.innerHTML = `
         <div style="background:#fff3e0; border-radius:6px; padding:14px; margin-bottom:16px; display:grid; gap:8px;">
+          <div style="font-size:.72rem; color:#856404;">💡 Si buscás por nombre, utilizá el primer apellido.</div>
           <input id="inp-buscar-votante-inc" placeholder="Buscar votante por CI o nombre..." style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <div id="cc-sugerencias-votante-inc" style="max-height:160px; overflow-y:auto; border:1px solid #eee; border-radius:4px; display:none;"></div>
           <input type="hidden" id="inp-votante-id-inc">
@@ -663,16 +1010,20 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
         </div>
       `
       formBox.querySelector('#btn-cancelar-incidencia').addEventListener('click', () => { formBox.innerHTML = '' })
-      formBox.querySelector('#inp-buscar-votante-inc').addEventListener('input', debounce((e) => {
-        const termino = e.target.value.trim().toLowerCase()
+      let ultimosMatches = []
+      formBox.querySelector('#inp-buscar-votante-inc').addEventListener('input', debounce(async (e) => {
+        const termino = e.target.value.trim()
         const sugBox = formBox.querySelector('#cc-sugerencias-votante-inc')
         if (termino.length < 2) { sugBox.style.display = 'none'; return }
-        const matches = registros.filter(r => String(r.cedula).toLowerCase().includes(termino) || String(r.nombre).toLowerCase().includes(termino)).slice(0, 15)
-        sugBox.style.display = matches.length ? 'block' : 'none'
-        sugBox.innerHTML = matches.map(r => `<div class="cc-sug-item" data-id="${r.id}" style="padding:6px 10px; cursor:pointer; font-size:.82rem; border-bottom:1px solid #f0f0f0;">${escapeHtml(r.nombre)} — CI ${escapeHtml(r.cedula)}</div>`).join('')
+        ultimosMatches = isAdminView
+          ? await searchRecordsForContactCenter(candidateId, termino)
+          : registros.filter(r => String(r.cedula).toLowerCase().includes(termino.toLowerCase()) || String(r.nombre).toLowerCase().includes(termino.toLowerCase())).slice(0, 15)
+        sugBox.style.display = ultimosMatches.length ? 'block' : 'none'
+        sugBox.innerHTML = ultimosMatches.map(r => `<div class="cc-sug-item" data-id="${r.id}" style="padding:6px 10px; cursor:pointer; font-size:.82rem; border-bottom:1px solid #f0f0f0;">${escapeHtml(r.nombre)} — CI ${escapeHtml(r.cedula)}</div>`).join('')
         sugBox.querySelectorAll('.cc-sug-item').forEach(item => {
           item.addEventListener('click', () => {
-            const r = registroPorId(item.dataset.id)
+            const r = ultimosMatches.find(x => x.id === item.dataset.id)
+            if (!registroPorId(r.id)) registros.push(r)
             formBox.querySelector('#inp-votante-id-inc').value = r.id
             formBox.querySelector('#cc-votante-elegido-inc').textContent = `Elegido: ${r.nombre} (CI ${r.cedula})`
             sugBox.style.display = 'none'
@@ -685,11 +1036,11 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
         if (!voterId) { alert('Elegí un votante de la lista de sugerencias.'); return }
         const type = formBox.querySelector('#inp-tipo-incidencia').value
         const description = formBox.querySelector('#inp-desc-incidencia').value.trim()
-        const asig = asignacionPorVoterId(voterId)
         try {
+          const [asig] = await getCallAssignmentsByIds(candidateId, [voterId])
           await createIncident(candidateId, voterId, asig?.assignedUserId || null, user.uid, { type, description })
           formBox.innerHTML = ''
-          await recargarYRenderizar()
+          renderIncidencias(body)
         } catch (err) {
           alert('Error: ' + err.message)
         }
@@ -698,13 +1049,26 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
   }
 
   // ── Pestaña Día D — uso rápido con botones grandes ───────────────────
-  function renderDiaD(body) {
-    const asignadosConDatos = asignaciones
-      .map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) }))
-      .filter(x => x.registro)
+  // Para admin/coordinador se acota a las asignaciones más recientes (ver
+  // getRecentCallAssignments) — el día de la elección, para operar sobre
+  // el padrón completo está el módulo dedicado Día D Control.
+  async function renderDiaD(body) {
+    body.innerHTML = '<div style="color:#999;">Cargando...</div>'
+    let asignadosConDatos
+
+    if (isAdminView) {
+      asignaciones = await getRecentCallAssignments(candidateId, 300)
+      const ids = asignaciones.map(a => a.voterId)
+      const [regs, ests] = await Promise.all([getRecordsByIds(candidateId, ids), getElectionStatusesByIds(candidateId, ids)])
+      registros = regs; estados = ests
+      asignadosConDatos = asignaciones.map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) })).filter(x => x.registro)
+    } else {
+      asignadosConDatos = asignaciones.map(a => ({ asignacion: a, registro: registroPorId(a.voterId), estado: estadoPorVoterId(a.voterId) })).filter(x => x.registro)
+    }
 
     body.innerHTML = `
-      <h3 style="margin:0 0 14px; font-size:1.05rem;">🗳️ Día D — Monitoreo rápido (${asignadosConDatos.length})</h3>
+      <h3 style="margin:0 0 14px; font-size:1.05rem;">🗳️ Día D — Monitoreo rápido (${asignadosConDatos.length}${isAdminView ? ', más recientes' : ''})</h3>
+      ${isAdminView ? '<p style="font-size:.78rem; color:#999; margin:-8px 0 14px;">Para operar sobre todo el padrón el día de la elección, usá el módulo dedicado "Día D Control".</p>' : ''}
       <div id="cc-diad-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px;"></div>
     `
     pintarGridDiaD()
@@ -751,6 +1115,17 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
           const lastStatusMap = { voted: 'voted', couldNotVote: 'could_not_vote', arrivedAtPollingPlace: 'arrived', requiresPickup: 'requires_pickup', needsAssistance: 'needs_assistance' }
           try {
             await upsertElectionStatus(candidateId, registro.id, asig?.assignedUserId || user.uid, { [campo]: nuevoValor, lastStatus: nuevoValor ? lastStatusMap[campo] : (estadoPorVoterId(registro.id)?.lastStatus || null) }, user.uid)
+            // "Ya votó" es la única fuente de verdad compartida con Día D
+            // Control (electionDayControl.status==='voted', ver auditoría
+            // Día D) — marcarlo acá también actualiza esa fuente en vez de
+            // quedar solo en electionStatus, que ningún otro panel lee.
+            if (campo === 'voted' && nuevoValor) {
+              try {
+                await setDiaDStatus(candidateId, registro, 'voted', user.uid, myRole)
+              } catch (err) {
+                console.warn('No se pudo sincronizar con Día D Control (electionDayControl):', err.message)
+              }
+            }
             const idx = estados.findIndex(e => e.voterId === registro.id)
             if (idx >= 0) estados[idx] = { ...estados[idx], [campo]: nuevoValor }
             else estados.push({ id: registro.id, voterId: registro.id, assignedUserId: asig?.assignedUserId || user.uid, [campo]: nuevoValor })
@@ -768,7 +1143,7 @@ export async function renderContactCenter(container, candidateId, user, myRole) 
           const descripcion = prompt('Descripción (opcional):', '') || ''
           const asig = asignacionPorVoterId(registro.id)
           createIncident(candidateId, registro.id, asig?.assignedUserId || null, user.uid, { type: tipo, description: descripcion })
-            .then(() => { incidencias.push({ voterId: registro.id, type: tipo, status: 'open' }); alert('✅ Incidencia registrada') })
+            .then(() => alert('✅ Incidencia registrada'))
             .catch(err => alert('Error: ' + err.message))
         })
       })
