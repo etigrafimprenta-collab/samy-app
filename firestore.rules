@@ -266,7 +266,7 @@ service cloud.firestore {
       // más abajo) es una query collectionGroup sobre "users" cruzando
       // candidateId — por eso esa búsqueda ya no se hace acá.
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         isOwner(uid);
 
       allow create: if (isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin'])) &&
@@ -633,7 +633,7 @@ service cloud.firestore {
     // ── /candidates/{candidateId}/callAssignments/{voterId} ────────────
     match /candidates/{candidateId}/callAssignments/{voterId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
@@ -651,7 +651,7 @@ service cloud.firestore {
     // ── /candidates/{candidateId}/electionStatus/{voterId} ─────────────
     match /candidates/{candidateId}/electionStatus/{voterId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
@@ -670,7 +670,7 @@ service cloud.firestore {
     // ── /candidates/{candidateId}/calls/{callId} — historial, inmutable ─
     match /candidates/{candidateId}/calls/{callId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
@@ -704,7 +704,7 @@ service cloud.firestore {
     // ── /candidates/{candidateId}/incidents/{incidentId} ────────────────
     match /candidates/{candidateId}/incidents/{incidentId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       // chofer/dirigente/mesario reportan incidencias desde su propia
@@ -738,7 +738,7 @@ service cloud.firestore {
     // callAssignments (isOperatorOfVoter), que usa el mismo id de documento.
     match /candidates/{candidateId}/electionDayControl/{voterId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId)) ||

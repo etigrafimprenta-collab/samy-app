@@ -41,6 +41,30 @@
       ]
     },
     {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "local", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "seccional", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "mesa", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "callAssignments",
       "queryScope": "COLLECTION",
       "fields": [

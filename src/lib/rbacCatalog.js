@@ -43,7 +43,8 @@ export const MODULES = [
   { key: 'election_day_control', name: 'Día D Control', icon: '🎮', route: 'dia-d-control', order: 13 },
   { key: 'finance', name: 'Finanzas', icon: '💰', route: 'finanzas', order: 14 },
   { key: 'settings', name: 'Configuración', icon: '🛠️', route: 'configuracion', order: 15 },
-  { key: 'roles', name: 'Roles y Permisos', icon: '🔐', route: 'roles', order: 16, isNew: true }
+  { key: 'roles', name: 'Roles y Permisos', icon: '🔐', route: 'roles', order: 16, isNew: true },
+  { key: 'reports', name: 'Reportes', icon: '📊', route: 'reportes', order: 17, isNew: true }
 ]
 
 // ── Permisos ──────────────────────────────────────────────────────────
@@ -149,7 +150,11 @@ export const PERMISSIONS = [
   { key: 'roles.duplicate', module: 'roles', name: 'Duplicar rol', planned: true },
   { key: 'roles.disable', module: 'roles', name: 'Desactivar rol', planned: true },
   { key: 'roles.assign_users', module: 'roles', name: 'Asignar roles a usuarios' },
-  { key: 'roles.view_audit', module: 'roles', name: 'Ver auditoría de roles' }
+  { key: 'roles.view_audit', module: 'roles', name: 'Ver auditoría de roles' },
+
+  // reports (módulo nuevo — Reportes)
+  { key: 'reports.view', module: 'reports', name: 'Ver reportes' },
+  { key: 'reports.export', module: 'reports', name: 'Exportar reportes a Excel' }
 ]
 
 export const PERMISSION_KEYS = PERMISSIONS.map(p => p.key)

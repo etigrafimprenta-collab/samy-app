@@ -405,10 +405,92 @@ export async function getUserRecords(candidateId, uid) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
+// ── Reportes > Equipo: counts puntuales por usuario, nunca getAllRecords ──
+export async function getUserRecordsCount(candidateId, uid) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(
+    query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where('uid', '==', uid))
+  )
+  return snap.data().count
+}
+
+// Genérica: cuenta savedRecords de un usuario que matchean un valor de
+// campo puntual (ej. telefono==''). Dos igualdades sin orderBy — Firestore
+// no exige índice compuesto para esto (confirmado con
+// getUnassignedCountByDirigente, mismo patrón ya en producción).
+export async function getRecordFlagCountForUser(candidateId, uid, field, value) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(
+    query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where('uid', '==', uid), where(field, '==', value))
+  )
+  return snap.data().count
+}
+
+export async function getLastRecordActivityForUser(candidateId, uid) {
+  const q = query(
+    collection(db, ...candidatePath(candidateId, 'savedRecords')),
+    where('uid', '==', uid),
+    orderBy('savedAt', 'desc'),
+    limit(1)
+  )
+  const snap = await getDocs(q)
+  return snap.docs.length > 0 ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null
+}
+
+export async function getCallsCountByOperator(candidateId, operatorUid) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(
+    query(collection(db, ...candidatePath(candidateId, 'calls')), where('operatorUserId', '==', operatorUid))
+  )
+  return snap.data().count
+}
+
+// ── Reportes > Votantes: flags auto-declarados al registrar (distinto de
+// electionStatus, que es lo confirmado por Centro de Contacto en una
+// llamada) ──────────────────────────────────────────────────────────────
+export async function getRecordFlagCounts(candidateId, flags) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const entries = await Promise.all(flags.map(async flag => {
+    const snap = await getCountFromServer(
+      query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where(flag, '==', true))
+    )
+    return [flag, snap.data().count]
+  }))
+  return Object.fromEntries(entries)
+}
+
+// Drill-down acotado por flag auto-declarado (requiresPickup/needsAssistance/
+// canBeDriver/wantsToBeMesario) — mismo criterio de tope que
+// getElectionStatusByFlag (300), nunca colección completa.
+export async function getRecordsByFlag(candidateId, flag, maxCount = 300) {
+  const q = query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where(flag, '==', true), limit(maxCount))
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
 // Página de registros para el panel de campaña (reemplaza a getAllRecords
 // sin límite — auditoría IV).
 export async function listRecordsPage(candidateId, { cursor = null, pageSize = DEFAULT_PAGE_SIZE } = {}) {
   const clauses = [orderBy('savedAt', 'desc')]
+  if (cursor) clauses.push(startAfter(cursor))
+  clauses.push(limit(pageSize))
+  const snap = await getDocs(query(collection(db, ...candidatePath(candidateId, 'savedRecords')), ...clauses))
+  return {
+    records: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    lastDoc: snap.docs[snap.docs.length - 1] || null,
+    hasMore: snap.docs.length === pageSize
+  }
+}
+
+// Página de registros filtrada por UN eje (dirigente/local/seccional/mesa)
+// — para Reportes > Registros. Un solo filtro a la vez a propósito: cada
+// combinación adicional exigiría su propio índice compuesto, y no hace
+// falta en Etapa 1. `by` es el nombre del campo tal cual se guarda en
+// savedRecords ('uid' para dirigente, 'local', 'seccional' o 'mesa').
+export async function listRecordsPageFiltered(candidateId, { by = null, value = null, cursor = null, pageSize = DEFAULT_PAGE_SIZE } = {}) {
+  const clauses = []
+  if (by && value != null) clauses.push(where(by, '==', by === 'mesa' ? String(value) : value))
+  clauses.push(orderBy('savedAt', 'desc'))
   if (cursor) clauses.push(startAfter(cursor))
   clauses.push(limit(pageSize))
   const snap = await getDocs(query(collection(db, ...candidatePath(candidateId, 'savedRecords')), ...clauses))
@@ -474,6 +556,21 @@ export async function getRecordByCedula(candidateId, cedula) {
 export async function getAllRecords(candidateId) {
   const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'savedRecords')))
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// Cédulas guardadas más de una vez por distintos usuarios de ESTE
+// candidato — usada por la pestaña Auditoría (campaign.js) y por Reportes
+// > Votantes. Un solo punto de verdad para no repetir el agrupamiento.
+export async function getDuplicateCedulas(candidateId) {
+  const records = await getAllRecords(candidateId)
+  const porCedula = {}
+  records.forEach(r => {
+    if (!porCedula[r.cedula]) porCedula[r.cedula] = []
+    porCedula[r.cedula].push(r)
+  })
+  return Object.entries(porCedula)
+    .filter(([, regs]) => regs.length > 1)
+    .map(([cedula, registros]) => ({ cedula, registros }))
 }
 
 export async function getAllCandidateUsers(candidateId) {
@@ -728,6 +825,25 @@ export async function getCandidateCounts(candidateId) {
     records: records.data().count,
     drivers: drivers.data().count
   }
+}
+
+// Genérica y reusable para cualquier rol legacy (dirigente/mesario/etc.) —
+// usada por Reportes > Resumen General. Cuenta el total del rol, no un
+// corte por "activo": el campo `status` de users tiene una inconsistencia
+// real ('active' vs 'activo' según la Cloud Function que lo escribió), así
+// que un filtro por status subcontaría en silencio.
+export async function getCandidateUsersCountByRole(candidateId, role) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(
+    query(collection(db, ...candidatePath(candidateId, 'users')), where('role', '==', role))
+  )
+  return snap.data().count
+}
+
+export async function getMesariosCount(candidateId) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(collection(db, ...candidatePath(candidateId, 'mesarios')))
+  return snap.data().count
 }
 
 // Tamaño del padrón compartido — un solo número para toda la plataforma,
@@ -1325,6 +1441,17 @@ export async function getElectionDayControl(candidateId, voterId) {
 export async function getAllElectionDayControl(candidateId) {
   const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'electionDayControl')))
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// Conteo por status — para Reportes > Resumen General. electionDayControl
+// es la ÚNICA fuente de verdad de "votó" (ver setDiaDStatus/marcarVoto más
+// abajo), nunca leer electionStatus.voted ni diaD/votes para esta métrica.
+export async function getElectionDayControlStatusCount(candidateId, status) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const snap = await getCountFromServer(
+    query(collection(db, ...candidatePath(candidateId, 'electionDayControl')), where('status', '==', status))
+  )
+  return snap.data().count
 }
 
 // Suscripción en vivo a TODO electionDayControl del candidato — usada por

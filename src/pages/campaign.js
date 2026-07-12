@@ -16,6 +16,7 @@ import {
   getPadronMeta,
   getAllRecords,
   getAllCandidateUsers,
+  getDuplicateCedulas,
   getUserRecords,
   saveRecord,
   updateRecord,
@@ -62,7 +63,8 @@ const TAB_ROLES = {
   'dia-d-control': ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer'],
   finanzas: ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor'],
   configuracion: ['campaign_admin'],
-  roles: ['campaign_admin']
+  roles: ['campaign_admin'],
+  reportes: ['campaign_admin', 'coordinator', 'auditor']
 }
 const TAB_LABELS = {
   resumen: '📊 Resumen',
@@ -80,7 +82,8 @@ const TAB_LABELS = {
   'dia-d-control': '🎮 Día D Control',
   finanzas: '💰 Finanzas',
   configuracion: '🛠️ Configuración',
-  roles: '🔐 Roles y Permisos'
+  roles: '🔐 Roles y Permisos',
+  reportes: '📊 Reportes'
 }
 
 // RBAC (Etapa 6, modo compatibilidad) — mapeo de cada pestaña a su
@@ -105,7 +108,8 @@ const TAB_TO_PERMISSION = {
   'dia-d-control': 'election_day_control.view_operations',
   finanzas: 'finance.view',
   configuracion: 'settings.view',
-  roles: 'roles.view'
+  roles: 'roles.view',
+  reportes: 'reports.view'
 }
 
 // Qué módulo (catálogo src/lib/rbacCatalog.js) corresponde a cada pestaña
@@ -120,7 +124,8 @@ const TAB_TO_MODULE = {
   choferes: 'drivers', mesarios: 'table_members', dirigentes: 'leaders',
   operadores: 'operators', 'centro-contacto': 'contact_center',
   'dia-d': 'election_day_admin', 'dia-d-control': 'election_day_control',
-  finanzas: 'finance', configuracion: 'settings', roles: 'roles'
+  finanzas: 'finance', configuracion: 'settings', roles: 'roles',
+  reportes: 'reports'
 }
 
 export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
@@ -256,6 +261,8 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       import('./finanzas-candidate.js').then(({ renderFinanzasCandidate }) => renderFinanzasCandidate(content, candidateId, user, myRole, misRoles))
     } else if (tab === 'roles') {
       import('./roles-candidate.js').then(({ renderRolesCandidate }) => renderRolesCandidate(content, candidateId, user, myRole))
+    } else if (tab === 'reportes') {
+      import('./reportes-candidate.js').then(({ renderReportesCandidate }) => renderReportesCandidate(content, candidateId, user, myRole, misRoles))
     }
   }
 
@@ -1778,21 +1785,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   async function renderAuditoria(content) {
     content.innerHTML = '<div style="color:#999;">⏳ Analizando registros...</div>'
     try {
-      const [records, users] = await Promise.all([
-        getAllRecords(candidateId),
+      const [duplicados, users] = await Promise.all([
+        getDuplicateCedulas(candidateId),
         getAllCandidateUsers(candidateId)
       ])
       const usuariosMap = {}
       users.forEach(u => { usuariosMap[u.id] = u.nombre || u.email || 'N/A' })
-
-      const cedulasCount = {}
-      records.forEach(r => {
-        if (!cedulasCount[r.cedula]) cedulasCount[r.cedula] = []
-        cedulasCount[r.cedula].push(r)
-      })
-      const duplicados = Object.entries(cedulasCount)
-        .filter(([, regs]) => regs.length > 1)
-        .map(([cedula, regs]) => ({ cedula, registros: regs }))
 
       content.innerHTML = `
         <div style="background:#eef3f8; border:1px solid #cfe0ee; border-radius:8px; padding:14px; margin-bottom:16px; font-size:.85rem; color:#1f4b7a;">
