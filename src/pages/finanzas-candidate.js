@@ -96,11 +96,11 @@ const PAYMENT_STATUS_COLORS = {
   pending: '#f9a825', approved: '#1976d2', paid: '#2e7d32',
   failed: '#c62828', reversed: '#e65100', cancelled: '#757575'
 }
-const PAYMENT_METHOD_LABELS = {
+export const PAYMENT_METHOD_LABELS = {
   cash: '💵 Efectivo', bank_transfer: '🏦 Transferencia', wallet: '📱 Billetera digital',
   check: '📄 Cheque', card: '💳 Tarjeta', other: '📦 Otro'
 }
-const BATCH_STATUS_LABELS = {
+export const BATCH_STATUS_LABELS = {
   draft: '📝 Borrador', ready_for_approval: '⏳ Esperando aprobación', approved: '🔵 Aprobado',
   partially_paid: '🟢 Pago parcial', paid: '✅ Pagado', cancelled: '⚪ Cancelado'
 }
@@ -124,7 +124,7 @@ const TABS = [
   { id: 'configuracion-finanzas', label: '⚙️ Configuración', ready: true }
 ]
 
-function money(n, currency = 'PYG') {
+export function money(n, currency = 'PYG') {
   return (currency === 'PYG' ? 'Gs. ' : currency + ' ') + (Number(n) || 0).toLocaleString('es-PY')
 }
 

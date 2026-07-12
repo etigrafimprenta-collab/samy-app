@@ -4,8 +4,12 @@
  * Centraliza reportes de votantes/registros/equipo/Día D/finanzas/
  * auditoría. Implementación por etapas (ver plan): Etapa 1 — Resumen
  * General, Votantes, Registros, Equipo. Etapa 2 — Centro de Contacto,
- * Día D, Choferes, Mesarios, Dirigentes. El resto (Finanzas, Auditoría,
- * Reportes Guardados) queda como "🚧 Próximamente" hasta sus etapas.
+ * Día D, Choferes, Mesarios, Dirigentes. Etapa 3 — Finanzas, Auditoría
+ * (ambas con `roles` en TABS: ninguna colección de Finanzas ni auditLogs
+ * permite lectura a coordinator en firestore.rules, así que esos 2 tabs
+ * se ocultan para ese rol en vez de romper con permission-denied) + CSV
+ * como opción de exportación junto a Excel. Reportes Guardados (Etapa 4)
+ * queda como "🚧 Próximamente".
  *
  * Todo acá lee colecciones YA existentes (savedRecords, users,
  * electionStatus, callAssignments, electionDayControl, incidents,
@@ -33,8 +37,12 @@ const TABS = [
   { id: 'choferes', label: '🚗 Choferes', ready: true },
   { id: 'mesarios', label: '🪑 Mesarios', ready: true },
   { id: 'dirigentes', label: '🧭 Dirigentes', ready: true },
-  { id: 'finanzas', label: '💰 Finanzas', ready: false, etapa: 3 },
-  { id: 'auditoria', label: '⚠️ Auditoría', ready: false, etapa: 3 },
+  // roles: ninguna colección de Finanzas ni auditLogs permite lectura a
+  // coordinator en firestore.rules (solo campaign_admin/auditor, mismo
+  // criterio que TAB_ROLES.auditoria en campaign.js) — sin este filtro,
+  // coordinator vería el tab y se colgaría con permission-denied.
+  { id: 'finanzas', label: '💰 Finanzas', ready: true, roles: ['campaign_admin', 'auditor'] },
+  { id: 'auditoria', label: '⚠️ Auditoría', ready: true, roles: ['campaign_admin', 'auditor'] },
   { id: 'guardados', label: '💾 Reportes Guardados', ready: false, etapa: 4 }
 ]
 
@@ -46,16 +54,20 @@ const statCard = (label, value, color, key) => `
 
 export async function renderReportesCandidate(container, candidateId, user, myRole, misRoles = []) {
   let tab = 'resumen-general'
+  // Tabs sin `roles` = visibles para cualquiera con acceso al módulo
+  // (comportamiento de siempre); con `roles`, solo si myRole está en la
+  // lista — hoy solo Finanzas/Auditoría lo usan (ver comentario en TABS).
+  const visibleTabs = TABS.filter(t => !t.roles || t.roles.includes(myRole))
 
   function render() {
     container.innerHTML = `
       <div style="background: linear-gradient(135deg, #283593 0%, #1a237e 100%); color: white; padding: 24px; border-radius: 8px 8px 0 0;">
         <h2 style="margin: 0; font-family: 'Barlow Condensed', sans-serif; font-size: 2rem; text-transform: uppercase;">📊 REPORTES</h2>
-        <p style="margin: 6px 0 0 0; font-size: .82rem; opacity: .9;">Votantes, registros, equipo, centro de contacto, Día D, choferes, mesarios y dirigentes — (próximamente) finanzas y auditoría</p>
+        <p style="margin: 6px 0 0 0; font-size: .82rem; opacity: .9;">Votantes, registros, equipo, centro de contacto, Día D, choferes, mesarios, dirigentes, finanzas y auditoría</p>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
-          ${TABS.map(t => `<button class="rep-tab" data-tab="${t.id}" style="padding:8px 14px; border:none; border-radius:6px 6px 0 0; cursor:pointer; font-weight:600; font-size:.82rem; background:${tab === t.id ? '#283593' : '#f0f0f0'}; color:${tab === t.id ? 'white' : '#333'};">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
+          ${visibleTabs.map(t => `<button class="rep-tab" data-tab="${t.id}" style="padding:8px 14px; border:none; border-radius:6px 6px 0 0; cursor:pointer; font-weight:600; font-size:.82rem; background:${tab === t.id ? '#283593' : '#f0f0f0'}; color:${tab === t.id ? 'white' : '#333'};">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
         </div>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:20px;">
@@ -120,6 +132,16 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       body.innerHTML = 'Cargando...'
       const { renderReporteDirigentes } = await import('./reportes-dirigentes-candidate.js')
       return renderReporteDirigentes(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'finanzas') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteFinanzas } = await import('./reportes-finanzas-candidate.js')
+      return renderReporteFinanzas(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'auditoria') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteAuditoria } = await import('./reportes-auditoria-candidate.js')
+      return renderReporteAuditoria(body, candidateId, user, myRole, misRoles)
     }
   }
 

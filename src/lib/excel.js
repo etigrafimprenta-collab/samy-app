@@ -38,6 +38,21 @@ export const exportGenericToExcel = (rows, filename = 'reporte.xlsx', sheetName 
   XLSX.writeFile(wb, filename)
 }
 
+// Mismo shape de entrada que exportGenericToExcel — reusa el mismo
+// json_to_sheet y solo cambia el writer, para no reimplementar el
+// escapado/BOM de CSV a mano.
+export const exportGenericToCsv = (rows, filename = 'reporte.csv', sheetName = 'Reporte') => {
+  const ws = XLSX.utils.json_to_sheet(rows)
+  const csv = XLSX.utils.sheet_to_csv(ws)
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export const readExcelFile = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
