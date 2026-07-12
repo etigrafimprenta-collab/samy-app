@@ -123,65 +123,41 @@ export function renderChoferCandidate(container, candidateId) {
           </div>
         </div>
 
-        <div style="overflow-x: auto;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
-            <thead style="background: #000; color: white;">
-              <tr>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Nombre</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">CI</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Celular</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Vehículo</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Local electoral</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Usuario</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Votantes</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Monto entregado</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Origen</th>
-                <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${filasChoferes.length === 0 ? `
-                <tr><td colspan="10" style="padding: 40px; text-align: center; color: #999;">No hay choferes creados. ➕ Crear uno nuevo.</td></tr>
-              ` : filasChoferes.map((c, i) => {
-                const usuarioAsignado = usuarios.find(u => u.id === c.usuarioAsignado)
-                const origenBadge = c.origen === 'manual'
-                  ? '<span style="background:#eee; color:#555; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Manual</span>'
-                  : c.origen === 'auto'
-                    ? '<span style="background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto (Buscar votante)</span>'
-                    : '<span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto + editado</span>'
-                return `
-                <tr style="border-bottom: 1px solid #eee;" data-idx="${i}">
-                  <td style="padding: 10px;"><strong>${escapeHtml(c.nombre)}</strong></td>
-                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(c.ci) || '—'}</td>
-                  <td style="padding: 10px;">${escapeHtml(c.celular || c.telefono)}</td>
-                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(c.vehiculo) || '—'}${c.tipoVehiculo ? ' (' + escapeHtml(c.tipoVehiculo) + ')' : ''}</td>
-                  <td style="padding: 10px;"><strong>${escapeHtml(c.seccional) || '—'}</strong></td>
-                  <td style="padding: 10px; font-size: 0.8rem;">
-                    ${usuarioAsignado ? `<span style="background: #e3f2fd; color: #1976d2; padding: 2px 6px; border-radius: 3px;">👤 ${escapeHtml(usuarioAsignado.nombre || usuarioAsignado.email)}</span>` : '<span style="color: #999;">Sin asignar</span>'}
-                  </td>
-                  <td style="padding: 10px; text-align: center;">
-                    <span style="background: #e3f2fd; color: #1976d2; padding: 4px 8px; border-radius: 3px; font-weight: 700;">
-                      ${c.votantesAsignados || 0}
-                    </span>
-                  </td>
-                  <td style="padding: 10px;">
-                    <span style="background: #e8f5e9; color: #2e7d32; padding: 4px 8px; border-radius: 3px; font-weight: 700;">
-                      Gs. ${(Number(c.montoEntregado) || 0).toLocaleString('es-PY')}
-                    </span>
-                  </td>
-                  <td style="padding: 10px;">${origenBadge}</td>
-                  <td style="padding: 10px; display: flex; gap: 4px;">
-                    <button class="btn-wa" data-idx="${i}" style="background: #25d366; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📲</button>
-                    ${c.id ? `<button class="btn-asignar" data-idx="${i}" style="background: #2196f3; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">📋</button>` : ''}
-                    <button class="btn-editar" data-idx="${i}" style="background: #ff9800; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">✏️</button>
-                    <button class="btn-eliminar" data-idx="${i}" style="background: #d32f2f; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.75rem; font-weight: 600;">🗑️</button>
-                  </td>
-                </tr>
-              `
-              }).join('')}
-            </tbody>
-          </table>
-        </div>
+        ${filasChoferes.length === 0 ? `
+          <div style="padding: 40px 20px; text-align: center; color: #999;">No hay choferes creados. ➕ Crear uno nuevo.</div>
+        ` : `
+          <div class="roster-card-grid">
+            ${filasChoferes.map((c, i) => {
+              const usuarioAsignado = usuarios.find(u => u.id === c.usuarioAsignado)
+              const origenBadge = c.origen === 'manual'
+                ? '<span style="background:#eee; color:#555; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Manual</span>'
+                : c.origen === 'auto'
+                  ? '<span style="background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto (Buscar votante)</span>'
+                  : '<span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto + editado</span>'
+              return `
+              <div class="roster-card" data-idx="${i}">
+                <div class="roster-card-name">${escapeHtml(c.nombre)}</div>
+                <div class="roster-card-fields">
+                  <div class="roster-card-field"><strong>CI:</strong> ${escapeHtml(c.ci) || '—'}</div>
+                  <div class="roster-card-field"><strong>Celular:</strong> ${escapeHtml(c.celular || c.telefono)}</div>
+                  <div class="roster-card-field"><strong>Vehículo:</strong> ${escapeHtml(c.vehiculo) || '—'}${c.tipoVehiculo ? ' (' + escapeHtml(c.tipoVehiculo) + ')' : ''}</div>
+                  <div class="roster-card-field"><strong>Local electoral:</strong> ${escapeHtml(c.seccional) || '—'}</div>
+                  <div class="roster-card-field"><strong>Usuario:</strong> ${usuarioAsignado ? `👤 ${escapeHtml(usuarioAsignado.nombre || usuarioAsignado.email)}` : 'Sin asignar'}</div>
+                  <div class="roster-card-field"><strong>Votantes:</strong> <span style="background: #e3f2fd; color: #1976d2; padding: 2px 8px; border-radius: 3px; font-weight: 700;">${c.votantesAsignados || 0}</span></div>
+                  <div class="roster-card-field"><strong>Entregado:</strong> <span style="background: #e8f5e9; color: #2e7d32; padding: 2px 8px; border-radius: 3px; font-weight: 700;">Gs. ${(Number(c.montoEntregado) || 0).toLocaleString('es-PY')}</span></div>
+                  <div class="roster-card-field">${origenBadge}</div>
+                </div>
+                <div class="roster-card-actions">
+                  <button class="btn-wa btn-compact" data-idx="${i}" style="background: #25d366; color: white;">📲 WhatsApp</button>
+                  ${c.id ? `<button class="btn-asignar btn-compact" data-idx="${i}" style="background: #2196f3; color: white;">📋 Asignar</button>` : ''}
+                  <button class="btn-editar btn-compact" data-idx="${i}" style="background: #ff9800; color: white;">✏️ Editar</button>
+                  <button class="btn-eliminar btn-compact" data-idx="${i}" style="background: #d32f2f; color: white;">🗑️ Eliminar</button>
+                </div>
+              </div>
+            `
+            }).join('')}
+          </div>
+        `}
       </div>
     `
 
@@ -289,45 +265,25 @@ export function renderChoferCandidate(container, candidateId) {
     tablaBox.innerHTML = asignados.length === 0 ? `
       <div style="color: #999; padding: 30px; text-align: center; border: 1px solid #eee; border-radius: 6px;">Este chofer todavía no tiene votantes asignados.</div>
     ` : `
-        <div style="overflow-x: auto;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
-            <thead style="background: #000; color: white;">
-              <tr>
-                <th style="padding: 10px; text-align: left;">Cédula</th>
-                <th style="padding: 10px; text-align: left;">Nombre</th>
-                <th style="padding: 10px; text-align: left;">Local electoral</th>
-                <th style="padding: 10px; text-align: left;">Mesa</th>
-                <th style="padding: 10px; text-align: left;">Orden</th>
-                <th style="padding: 10px; text-align: left;">Teléfono</th>
-                <th style="padding: 10px; text-align: left;">Dirección</th>
-                <th style="padding: 10px; text-align: left;">WhatsApp</th>
-                <th style="padding: 10px; text-align: left;">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${asignados.map(r => {
-                const tel = (r.telefono || '').replace(/\D/g, '')
-                const telLimpio = tel ? '595' + tel.replace(/^0/, '') : ''
-                return `
-                <tr style="border-bottom: 1px solid #eee;">
-                  <td style="padding: 10px; font-family: monospace; font-size: 0.8rem;">${escapeHtml(r.cedula)}</td>
-                  <td style="padding: 10px;"><strong>${escapeHtml(r.nombre)}</strong></td>
-                  <td style="padding: 10px;">${escapeHtml(r.local) || '—'}</td>
-                  <td style="padding: 10px;">${escapeHtml(r.mesa) || '—'}</td>
-                  <td style="padding: 10px;">${escapeHtml(r.orden) || '—'}</td>
-                  <td style="padding: 10px;">${escapeHtml(r.telefono) || '—'}</td>
-                  <td style="padding: 10px;">${escapeHtml(r.direccion) || '—'}</td>
-                  <td style="padding: 10px;">
-                    ${telLimpio ? `<a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">💬 Blanco</a>` : '<span style="color:#999; font-size:.75rem;">sin tel.</span>'}
-                  </td>
-                  <td style="padding: 10px;">
-                    <button class="btn-quitar-asignado" data-id="${r.id}" style="background:#d32f2f; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.72rem; font-weight:600;">✕ Quitar</button>
-                  </td>
-                </tr>
-              `
-              }).join('')}
-            </tbody>
-          </table>
+        <div class="roster-card-grid">
+          ${asignados.map(r => {
+            const tel = (r.telefono || '').replace(/\D/g, '')
+            const telLimpio = tel ? '595' + tel.replace(/^0/, '') : ''
+            return `
+            <div class="roster-card">
+              <div class="roster-card-name">${escapeHtml(r.nombre)}</div>
+              <div class="roster-card-fields">
+                <div class="roster-card-field"><strong>Cédula:</strong> ${escapeHtml(r.cedula)}</div>
+                <div class="roster-card-field"><strong>Local / Mesa / Orden:</strong> ${escapeHtml(r.local) || '—'} · ${escapeHtml(r.mesa) || '—'} · ${escapeHtml(r.orden) || '—'}</div>
+                <div class="roster-card-field"><strong>Teléfono:</strong> ${escapeHtml(r.telefono) || '—'} ${telLimpio ? `<a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:2px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">💬</a>` : ''}</div>
+                <div class="roster-card-field"><strong>Dirección:</strong> ${escapeHtml(r.direccion) || '—'}</div>
+              </div>
+              <div class="roster-card-actions">
+                <button class="btn-quitar-asignado btn-compact" data-id="${r.id}" style="background:#d32f2f; color:white;">✕ Quitar</button>
+              </div>
+            </div>
+          `
+          }).join('')}
         </div>
     `
 
@@ -371,7 +327,7 @@ export function renderChoferCandidate(container, candidateId) {
     panel.innerHTML = `
       <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
-        <input id="inp-buscar-asignar" placeholder="Buscar por CI o nombre..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+        <div class="filter-input-wrap"><input id="inp-buscar-asignar" class="filter-input" placeholder="Buscar por CI o nombre..."></div>
         <select id="sel-local-asignar" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           <option value="">Todos los locales</option>
           ${locales.map(opcion).join('')}

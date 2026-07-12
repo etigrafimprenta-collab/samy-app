@@ -31,11 +31,11 @@ export async function renderReporteVotantes(body, candidateId) {
 
     body.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">🗳️ Necesidades declaradas al registrar</h3>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:24px;">
+      <div class="stats-grid" style="margin-bottom:24px;">
         ${Object.entries(FLAG_LABELS).map(([flag, label]) => `
-          <button class="rv-flag-card" data-flag="${flag}" style="text-align:left; cursor:pointer; background:white; border:1px solid #ddd; border-left:4px solid #1976d2; border-radius:8px; padding:14px;">
-            <div style="font-size:1.4rem; font-weight:800; color:#1976d2;">${autoDeclarados[flag] || 0}</div>
-            <div style="font-size:.72rem; font-weight:700; color:#666;">${label}</div>
+          <button class="rv-flag-card stat-card stat-card--accent" data-flag="${flag}" style="--accent:#1976d2; cursor:pointer;">
+            <div class="stat-num">${autoDeclarados[flag] || 0}</div>
+            <div class="stat-label">${label}</div>
           </button>
         `).join('')}
       </div>
@@ -70,7 +70,7 @@ export async function renderReporteVotantes(body, candidateId) {
       <div style="background:#eef3f8; border:1px solid #cfe0ee; border-radius:8px; padding:14px;">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
           <strong>${label} — ${registros.length}${registros.length === 300 ? '+' : ''}</strong>
-          <button id="rv-export" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel</button>
+          <button id="rv-export" class="btn-compact" style="background:#455a64; color:white;">⬇️ Exportar Excel</button>
         </div>
         ${registros.length === 300 ? '<div style="font-size:.78rem; color:#856404; margin-bottom:8px;">Mostrando los primeros 300 — el Excel exporta exactamente estos 300.</div>' : ''}
         <div style="overflow-x:auto; max-height:400px; overflow-y:auto;">

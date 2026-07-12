@@ -66,12 +66,12 @@ export async function renderReporteRegistros(body, candidateId, user, myRole, mi
           ${EJES.map(e => `<option value="${e.id}" ${e.id === eje ? 'selected' : ''}>${e.label}</option>`).join('')}
         </select>
         <input id="rr-valor" placeholder="Valor a filtrar (uid de dirigente, nombre de local, seccional o mesa)" value="${escapeHtml(valor)}" style="flex:1; min-width:220px; padding:8px; border:1px solid #ccc; border-radius:4px;" ${eje ? '' : 'disabled'}>
-        <button id="rr-btn-filtrar" style="background:#283593; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;" ${eje ? '' : 'disabled'}>Filtrar</button>
+        <button id="rr-btn-filtrar" class="btn-compact" style="background:#283593; color:white;" ${eje ? '' : 'disabled'}>Filtrar</button>
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-        <input id="rr-direccion" placeholder="Buscar por dirección (dentro de lo ya filtrado)..." style="flex:1; min-width:200px; padding:8px; border:1px solid #ccc; border-radius:4px;">
-        <button id="rr-btn-guardar" style="background:#00695c; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;" ${filtroAplicado ? '' : 'disabled'} title="${filtroAplicado ? '' : 'Elegí un filtro, escribí un valor y presioná Filtrar primero'}">💾 Guardar este filtro</button>
-        <button id="rr-btn-export" style="background:#455a64; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;">⬇️ Exportar Excel</button>
+        <div class="filter-input-wrap" style="flex:1; min-width:200px;"><input id="rr-direccion" class="filter-input" placeholder="Buscar por dirección (dentro de lo ya filtrado)..."></div>
+        <button id="rr-btn-guardar" class="btn-compact" style="background:#00695c; color:white;" ${filtroAplicado ? '' : 'disabled'} title="${filtroAplicado ? '' : 'Elegí un filtro, escribí un valor y presioná Filtrar primero'}">💾 Guardar este filtro</button>
+        <button id="rr-btn-export" class="btn-compact" style="background:#455a64; color:white;">⬇️ Exportar Excel</button>
       </div>
       <div id="rr-lista"></div>
       <div style="text-align:center; margin-top:12px;"><button id="rr-btn-mas" style="display:none; background:#eee; border:none; padding:8px 16px; border-radius:6px; cursor:pointer;">Cargar más</button></div>

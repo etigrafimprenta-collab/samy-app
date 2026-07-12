@@ -45,9 +45,9 @@ export function renderOperadorCandidate(container, candidateId) {
   }
 
   function statCard(label, value) {
-    return `<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; text-align:center;">
-      <div style="font-size:1.8rem; font-weight:700; color:#6a1b9a;">${value}</div>
-      <div style="font-size:.75rem; color:#666; text-transform:uppercase; font-weight:600;">${label}</div>
+    return `<div class="stat-card" style="--accent:#6a1b9a;">
+      <div class="stat-num">${value}</div>
+      <div class="stat-label">${label}</div>
     </div>`
   }
 
@@ -60,13 +60,13 @@ export function renderOperadorCandidate(container, candidateId) {
         <button id="btn-nuevo-operador" style="background: #4caf50; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700;">➕ NUEVO OPERADOR</button>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:20px;">
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px;">
+        <div class="stats-grid">
           ${statCard('Operadores', operadores.length)}
           ${statCard('Total entregado (Gs.)', totalEntregado.toLocaleString('es-PY'))}
         </div>
 
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
-        <input id="input-buscar-operador" placeholder="Buscar por nombre o email..." style="width:100%; box-sizing:border-box; padding:10px; border:1px solid #ddd; border-radius:4px; margin-bottom:16px;">
+        <div class="filter-input-wrap" style="margin-bottom:16px;"><input id="input-buscar-operador" class="filter-input" placeholder="Buscar por nombre o email..."></div>
 
         <div id="tabla-operadores"></div>
       </div>
@@ -88,44 +88,52 @@ export function renderOperadorCandidate(container, candidateId) {
     )
 
     const tablaEl = document.getElementById('tabla-operadores')
+    if (filtrados.length === 0) {
+      tablaEl.innerHTML = `<div style="padding:40px 20px; text-align:center; color:#999;">${operadores.length === 0 ? 'No hay operadores creados todavía.' : 'Sin resultados.'}</div>`
+      return
+    }
+
     tablaEl.innerHTML = `
-      <div style="overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;">
-            <th style="padding:6px;">Nombre</th><th>CI</th><th>Email</th><th>Teléfono</th><th>Monto entregado</th><th>Cadencia</th><th>Acciones</th>
-          </tr></thead>
-          <tbody>
-            ${filtrados.length === 0 ? `
-              <tr><td colspan="7" style="padding:40px; text-align:center; color:#999;">${operadores.length === 0 ? 'No hay operadores creados todavía.' : 'Sin resultados.'}</td></tr>
-            ` : filtrados.map((o, i) => `
-              <tr style="border-bottom:1px solid #eee;" data-idx="${i}">
-                <td style="padding:6px;"><strong>${escapeHtml(o.nombre) || '—'}</strong></td>
-                <td style="font-family:monospace; font-size:.8rem;">${escapeHtml(o.cedula) || '—'}</td>
-                <td>${escapeHtml(o.email) || '—'}</td>
-                <td>${escapeHtml(o.telefono) || '—'}</td>
-                <td>
-                  <span style="background:#e8f5e9; color:#2e7d32; padding:4px 8px; border-radius:3px; font-weight:700;">
-                    Gs. ${(Number(o.montoEntregado) || 0).toLocaleString('es-PY')}
-                  </span>
-                </td>
-                <td>${o.cadenciaPago ? escapeHtml(CADENCIA_LABELS[o.cadenciaPago] || o.cadenciaPago) : '<span style="color:#999;">Sin definir</span>'}</td>
-                <td style="display:flex; gap:4px;">
-                  <button class="btn-editar-pago" data-idx="${i}" style="background:#ff9800; color:white; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:.75rem; font-weight:600;">✏️ Pago</button>
-                  <button class="btn-quitar-operador" data-idx="${i}" style="background:#d32f2f; color:white; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:.75rem; font-weight:600;">🗑️</button>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+      <div class="roster-card-grid">
+        ${filtrados.map((o, i) => `
+          <div class="roster-card" data-idx="${i}">
+            <div class="roster-card-name">${escapeHtml(o.nombre) || '—'}</div>
+            <div class="roster-card-fields">
+              <div class="roster-card-field"><strong>CI:</strong> ${escapeHtml(o.cedula) || '—'}</div>
+              <div class="roster-card-field"><strong>Email:</strong> ${escapeHtml(o.email) || '—'}</div>
+              <div class="roster-card-field"><strong>Teléfono:</strong> ${escapeHtml(o.telefono) || '—'}</div>
+              <div class="roster-card-field"><strong>Entregado:</strong> <span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:3px; font-weight:700;">Gs. ${(Number(o.montoEntregado) || 0).toLocaleString('es-PY')}</span></div>
+              <div class="roster-card-field"><strong>Cadencia:</strong> ${o.cadenciaPago ? escapeHtml(CADENCIA_LABELS[o.cadenciaPago] || o.cadenciaPago) : 'Sin definir'}</div>
+            </div>
+            <div class="roster-card-actions">
+              <button class="btn-editar-pago btn-compact" data-idx="${i}" style="background:#ff9800; color:white;">✏️ Pago</button>
+              <button class="btn-editar-operador btn-compact" data-idx="${i}" style="background:#2196f3; color:white;">✏️ Editar rol</button>
+              <button class="btn-eliminar-operador btn-compact" data-idx="${i}" style="background:#d32f2f; color:white;">🗑️ Eliminar</button>
+            </div>
+          </div>
+        `).join('')}
       </div>
     `
 
     tablaEl.querySelectorAll('.btn-editar-pago').forEach(btn => {
       btn.addEventListener('click', () => mostrarModalPago(filtrados[Number(btn.dataset.idx)]))
     })
-    tablaEl.querySelectorAll('.btn-quitar-operador').forEach(btn => {
-      btn.addEventListener('click', () => mostrarModalQuitar(filtrados[Number(btn.dataset.idx)]))
+    tablaEl.querySelectorAll('.btn-editar-operador').forEach(btn => {
+      btn.addEventListener('click', () => mostrarModalCambiarRol(filtrados[Number(btn.dataset.idx)]))
     })
+    tablaEl.querySelectorAll('.btn-eliminar-operador').forEach(btn => {
+      btn.addEventListener('click', () => eliminarOperador(filtrados[Number(btn.dataset.idx)]))
+    })
+  }
+
+  async function eliminarOperador(operador) {
+    if (!confirm(`¿Borrar el perfil de ${operador.nombre || operador.email}? No podrá seguir usando el panel (su cuenta de login no se borra).`)) return
+    try {
+      await deleteCandidateUser(candidateId, operador.id)
+      cargarDatos()
+    } catch (err) {
+      alert('Error: ' + err.message)
+    }
   }
 
   function mostrarModalCrear() {
@@ -249,39 +257,6 @@ export function renderOperadorCandidate(container, candidateId) {
       }
     })
 
-    modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
-  }
-
-  function mostrarModalQuitar(operador) {
-    const modal = document.createElement('div')
-    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; overflow-y: auto; padding: 20px;'
-    modal.innerHTML = `
-      <div style="background: white; border-radius: 8px; max-width: 460px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 24px;">
-        <h2 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed'; font-size: 1.4rem; text-transform: uppercase; color: #d32f2f;">🗑️ QUITAR A ${escapeHtml(operador.nombre || operador.email).toUpperCase()}</h2>
-        <p style="font-size:.9rem; color:#555; margin-bottom:16px;">Esto también se refleja en el módulo Usuarios (es la misma cuenta).</p>
-        <div style="display: grid; gap: 8px;">
-          <button id="btn-cambiar-rol" style="background: #2196f3; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">✏️ Cambiar de rol (deja de ser operador)</button>
-          <button id="btn-borrar" style="background: #d32f2f; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">🗑️ Borrar el perfil completo</button>
-          <button id="btn-cancelar" style="background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">❌ CANCELAR</button>
-        </div>
-      </div>
-    `
-    document.body.appendChild(modal)
-
-    modal.querySelector('#btn-cambiar-rol').addEventListener('click', () => {
-      modal.remove()
-      mostrarModalCambiarRol(operador)
-    })
-    modal.querySelector('#btn-borrar').addEventListener('click', async () => {
-      if (!confirm(`¿Borrar el perfil de ${operador.nombre || operador.email}? No podrá seguir usando el panel (su cuenta de login no se borra).`)) return
-      try {
-        await deleteCandidateUser(candidateId, operador.id)
-        modal.remove()
-        cargarDatos()
-      } catch (err) {
-        alert('Error: ' + err.message)
-      }
-    })
     modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
   }
 

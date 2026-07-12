@@ -34,8 +34,8 @@ export async function renderReporteGuardados(body, candidateId, user, myRole, mi
               <td>${escapeHtml(p.createdByName || '')}</td>
               <td>${p.createdAt?.toDate ? p.createdAt.toDate().toLocaleString('es-PY') : ''}</td>
               <td style="white-space:nowrap;">
-                <button class="rgd-btn-abrir" data-id="${p.id}" style="background:#283593; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem; margin-right:4px;">▶️ Abrir</button>
-                <button class="rgd-btn-borrar" data-id="${p.id}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">🗑️</button>
+                <button class="rgd-btn-abrir btn-compact" data-id="${p.id}" style="background:#283593; color:white; margin-right:4px;">▶️ Abrir</button>
+                <button class="rgd-btn-borrar btn-compact" data-id="${p.id}" style="background:#c62828; color:white;">🗑️</button>
               </td>
             </tr>`).join('')}</tbody>
           </table>

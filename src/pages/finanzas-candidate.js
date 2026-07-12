@@ -176,7 +176,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
-          ${TABS.map(t => `<button class="fin-tab" data-tab="${t.id}" style="padding:8px 14px; border:none; border-radius:6px 6px 0 0; cursor:pointer; font-weight:600; font-size:.82rem; background:${tab === t.id ? '#00695c' : '#f0f0f0'}; color:${tab === t.id ? 'white' : '#333'};">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
+          ${TABS.map(t => `<button class="fin-tab btn-tab${tab === t.id ? ' active' : ''}" data-tab="${t.id}" style="--tab-color:#00695c;">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
         </div>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:20px;">
@@ -226,13 +226,13 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         getOpenFinanceAlerts(candidateId)
       ])
       const card = (label, value, color) => `
-        <div style="background:white; border:1px solid #ddd; border-left:4px solid ${color}; border-radius:8px; padding:14px;">
-          <div style="font-size:1.4rem; font-weight:800; color:${color};">${value}</div>
-          <div style="font-size:.72rem; font-weight:700; color:#666; text-transform:uppercase;">${label}</div>
+        <div class="stat-card stat-card--accent" style="--accent:${color};">
+          <div class="stat-num">${value}</div>
+          <div class="stat-label">${label}</div>
         </div>`
       body.innerHTML = `
         <div id="fin-alertas" style="margin-bottom:20px;"></div>
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px;">
+        <div class="stats-grid">
           ${card('Total pendiente', money(s.pendingSum), STATUS_COLORS.pending)}
           ${card('Total aprobado', money(s.approvedSum), STATUS_COLORS.approved)}
           ${card('Total pagado', money(s.paidSum), STATUS_COLORS.paid)}
@@ -996,10 +996,10 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         💡 El sistema nunca paga solo porque exista una asignación — acá solo se generan obligaciones en estado <strong>pendiente</strong>, con la señal de validación a la vista, para que un humano decida qué incluir. Después siguen el mismo circuito de aprobación de siempre.
       </p>
       <div style="display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap;">
-        <button class="dd-tipo-btn" data-tipo="chofer" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; background:${diaDTipoActivo === 'chofer' ? '#6a1b9a' : '#eee'}; color:${diaDTipoActivo === 'chofer' ? 'white' : '#333'};">🚗 Choferes</button>
-        <button class="dd-tipo-btn" data-tipo="mesario" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; background:${diaDTipoActivo === 'mesario' ? '#6a1b9a' : '#eee'}; color:${diaDTipoActivo === 'mesario' ? 'white' : '#333'};">🪑 Mesarios</button>
-        <button class="dd-tipo-btn" data-tipo="dirigente" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; background:${diaDTipoActivo === 'dirigente' ? '#6a1b9a' : '#eee'}; color:${diaDTipoActivo === 'dirigente' ? 'white' : '#333'};">🧭 Dirigentes</button>
-        <button class="dd-tipo-btn" data-tipo="votante" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; background:${diaDTipoActivo === 'votante' ? '#6a1b9a' : '#eee'}; color:${diaDTipoActivo === 'votante' ? 'white' : '#333'};">🗳️ Ayuda a votantes</button>
+        <button class="dd-tipo-btn btn-tab btn-tab--pill${diaDTipoActivo === 'chofer' ? ' active' : ''}" data-tipo="chofer" style="--tab-color:#6a1b9a;">🚗 Choferes</button>
+        <button class="dd-tipo-btn btn-tab btn-tab--pill${diaDTipoActivo === 'mesario' ? ' active' : ''}" data-tipo="mesario" style="--tab-color:#6a1b9a;">🪑 Mesarios</button>
+        <button class="dd-tipo-btn btn-tab btn-tab--pill${diaDTipoActivo === 'dirigente' ? ' active' : ''}" data-tipo="dirigente" style="--tab-color:#6a1b9a;">🧭 Dirigentes</button>
+        <button class="dd-tipo-btn btn-tab btn-tab--pill${diaDTipoActivo === 'votante' ? ' active' : ''}" data-tipo="votante" style="--tab-color:#6a1b9a;">🗳️ Ayuda a votantes</button>
       </div>
       <div id="dd-fin-body">Cargando...</div>
     `

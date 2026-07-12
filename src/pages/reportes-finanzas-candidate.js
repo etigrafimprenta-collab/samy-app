@@ -25,15 +25,15 @@ import {
 import { money, PAYMENT_METHOD_LABELS, BATCH_STATUS_LABELS } from './finanzas-candidate.js'
 
 const statCard = (label, value, color) => `
-  <div style="background:white; border:1px solid #ddd; border-left:4px solid ${color}; border-radius:8px; padding:14px;">
-    <div style="font-size:1.4rem; font-weight:800; color:${color};">${value}</div>
-    <div style="font-size:.72rem; font-weight:700; color:#666; text-transform:uppercase;">${label}</div>
+  <div class="stat-card stat-card--accent" style="--accent:${color};">
+    <div class="stat-num">${value}</div>
+    <div class="stat-label">${label}</div>
   </div>`
 
 const exportButtons = (id) => `
-  <button id="${id}-xlsx" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ Excel</button>
-  <button id="${id}-csv" style="background:#607d8b; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ CSV</button>
-  <button id="${id}-pdf" style="background:#8d6e63; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ PDF</button>`
+  <button id="${id}-xlsx" class="btn-compact" style="background:#455a64; color:white; margin-right:6px;">⬇️ Excel</button>
+  <button id="${id}-csv" class="btn-compact" style="background:#607d8b; color:white; margin-right:6px;">⬇️ CSV</button>
+  <button id="${id}-pdf" class="btn-compact" style="background:#8d6e63; color:white;">⬇️ PDF</button>`
 
 function wireExport(id, rows, filenameBase, sheetName) {
   const xlsx = document.getElementById(`${id}-xlsx`)
@@ -60,7 +60,7 @@ export async function renderReporteFinanzas(body, candidateId) {
 
     body.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">💰 Resumen de obligaciones</h3>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-bottom:24px;">
+      <div class="stats-grid" style="margin-bottom:24px;">
         ${statCard('Pendientes', `${summary.pendingCount} · ${money(summary.pendingSum)}`, '#f9a825')}
         ${statCard('Aprobadas', `${summary.approvedCount} · ${money(summary.approvedSum)}`, '#1976d2')}
         ${statCard('Pagadas', `${summary.paidCount} · ${money(summary.paidSum)}`, '#2e7d32')}

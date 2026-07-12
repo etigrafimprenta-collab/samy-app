@@ -63,7 +63,7 @@ export async function renderReporteEquipo(body, candidateId) {
     body.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
         <h3 style="margin:0; font-size:1.05rem;">👥 Equipo (${stats.length})</h3>
-        <button id="re-btn-export" style="background:#455a64; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;">⬇️ Exportar Excel</button>
+        <button id="re-btn-export" class="btn-compact" style="background:#455a64; color:white;">⬇️ Exportar Excel</button>
       </div>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:.85rem;">

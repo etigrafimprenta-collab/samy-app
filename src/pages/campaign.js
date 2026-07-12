@@ -211,7 +211,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
             <button id="btn-logout" style="padding:8px 14px; background:rgba(255,255,255,.15); color:#fff; border:1px solid rgba(255,255,255,.3); border-radius:6px; cursor:pointer;">Salir</button>
           </div>
         </div>
-        <div style="max-width:1100px; margin:14px auto 0; display:flex; gap:6px; flex-wrap:wrap;">
+        <div class="nav-grid" style="max-width:1100px; margin:14px auto 0; --tile-color:${candidate.primaryColor || '#1f4b7a'};">
           ${visibleTabs.map(t => navBtn(t, TAB_LABELS[t])).join('')}
         </div>
       </div>
@@ -268,7 +268,15 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
   function navBtn(id, label) {
     const active = tab === id
-    return `<button data-tab="${id}" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:.85rem; background:${active ? 'white' : 'rgba(255,255,255,.15)'}; color:${active ? candidate.primaryColor || '#1f4b7a' : 'white'};">${label}</button>`
+    // TAB_LABELS siempre trae "emoji + texto" — se separan para el
+    // layout de tile (ícono arriba, texto abajo) del menú compacto.
+    const espacio = label.indexOf(' ')
+    const icono = espacio === -1 ? label : label.slice(0, espacio)
+    const texto = espacio === -1 ? '' : label.slice(espacio + 1)
+    return `<button data-tab="${id}" class="nav-tile${active ? ' active' : ''}">
+      <span class="nav-tile-icon">${icono}</span>
+      <span class="nav-tile-label">${texto}</span>
+    </button>`
   }
 
   async function renderResumen(content) {
@@ -330,9 +338,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     const sectionTitle = (label) => `<h2 style="margin:28px 0 12px; font-size:.8rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:${color}; display:flex; align-items:center; gap:8px;"><span style="width:20px; height:2px; background:${color}; display:inline-block;"></span>${label}</h2>`
 
     const bigCard = (label, value, sub) => `
-      <div style="background:white; border:1px solid #e3e3e3; border-radius:10px; padding:18px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.04);">
-        <div style="font-size:2rem; font-weight:800; color:${color}; line-height:1.1;">${value}</div>
-        <div style="font-size:.78rem; color:#555; text-transform:uppercase; font-weight:700; letter-spacing:.03em; margin-top:4px;">${label}</div>
+      <div class="stat-card" style="--accent:${color};">
+        <div class="stat-num">${value}</div>
+        <div class="stat-label">${label}</div>
         ${sub ? `<div style="font-size:.72rem; color:#999; margin-top:2px;">${sub}</div>` : ''}
       </div>`
 
@@ -370,7 +378,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       : 'Todos los candidatos'
 
     content.innerHTML = `
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;">
+      <div class="stats-grid">
         ${bigCard('Padrón', votersCompartidos.toLocaleString('es-PY'), padronSub)}
         ${bigCard('Registros', records.length, 'Contactos guardados')}
         ${bigCard('Usuarios del equipo', users.length)}
@@ -378,12 +386,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       </div>
 
       ${sectionTitle('👥 Equipo por rol')}
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;">
+      <div class="stats-grid">
         ${Object.keys(ROLE_LABELS).map(role => bigCard(ROLE_LABELS[role], porRol[role] || 0)).join('')}
       </div>
 
       ${sectionTitle('🙋 Necesidades de los votantes registrados')}
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px;">
+      <div class="stats-grid">
         ${needCard('🚐', 'Requieren que se les busque (transporte)', requierenTransporte, records.length)}
         ${needCard('🦽', 'Precisan ayuda para votar', precisanAyuda, records.length)}
         ${needCard('🚗', 'Pueden colaborar como chofer', puedenSerChofer, records.length)}
@@ -534,9 +542,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   }
 
   function statCard(label, value) {
-    return `<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; text-align:center;">
-      <div style="font-size:1.8rem; font-weight:700; color:${candidate.primaryColor || '#1f4b7a'};">${value}</div>
-      <div style="font-size:.75rem; color:#666; text-transform:uppercase; font-weight:600;">${label}</div>
+    return `<div class="stat-card" style="--accent:${candidate.primaryColor || '#1f4b7a'};">
+      <div class="stat-num">${value}</div>
+      <div class="stat-label">${label}</div>
     </div>`
   }
 
@@ -758,7 +766,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
-          <input id="input-buscar-mis-reg" placeholder="Buscar por cédula o nombre..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div class="filter-input-wrap"><input id="input-buscar-mis-reg" class="filter-input" placeholder="Buscar por cédula o nombre..."></div>
           <select id="sel-local-mis-reg" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <option value="">Todos los locales</option>
             ${locales.map(opcion).join('')}
@@ -796,7 +804,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <button id="btn-print-mis-reg" style="background:#555; color:white; border:none; padding:10px 18px; border-radius:4px; font-weight:700; cursor:pointer;">🖨️ Imprimir</button>
         </div>
       </div>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px;">
+      <div class="stats-grid">
         ${statCard('Mis registros', registros.length)}
         ${statCard('Chofer', registros.filter(r => r.canBeDriver).length)}
         ${statCard('Mesario', registros.filter(r => r.wantsToBeMesario).length)}
@@ -1205,7 +1213,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       listEl.innerHTML = `
         <h2 style="margin:0 0 12px; font-size:1.05rem;">🏆 Equipo (${ranking.length})</h2>
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
-        <input id="inp-buscar-equipo" placeholder="Buscar por nombre, CI o rol..." style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
+        <div class="filter-input-wrap" style="margin-bottom:16px;"><input id="inp-buscar-equipo" class="filter-input" placeholder="Buscar por nombre, CI o rol..."></div>
         <div id="lista-equipo"></div>
       `
       const equipoEl = document.getElementById('lista-equipo')
@@ -1484,7 +1492,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:10px;">
-          <input id="input-buscar-reg" placeholder="Buscar por cédula o nombre..." value="${escapeHtml(ultimoBuscadoRegistros)}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div class="filter-input-wrap"><input id="input-buscar-reg" class="filter-input" placeholder="Buscar por cédula o nombre..." value="${escapeHtml(ultimoBuscadoRegistros)}"></div>
           <select id="sel-local-reg" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <option value="">Todos los locales</option>
             ${locales.map(opcion).join('')}
@@ -1526,7 +1534,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <button id="btn-print-records" style="background:#555; color:white; border:none; padding:10px 18px; border-radius:4px; font-weight:700; cursor:pointer;">🖨️ Imprimir</button>
         </div>
       </div>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px;">
+      <div class="stats-grid">
         ${statCard('Registros totales', records.length)}
         ${statCard('Usuarios activos', new Set(records.map(r => r.uid)).size)}
         ${statCard('Promedio por usuario', records.length && new Set(records.map(r => r.uid)).size ? Math.round(records.length / new Set(records.map(r => r.uid)).size) : 0)}

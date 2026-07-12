@@ -47,9 +47,9 @@ export function renderDirigenteCandidate(container, candidateId) {
   }
 
   function statCard(label, value) {
-    return `<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; text-align:center;">
-      <div style="font-size:1.8rem; font-weight:700; color:#9c27b0;">${value}</div>
-      <div style="font-size:.75rem; color:#666; text-transform:uppercase; font-weight:600;">${label}</div>
+    return `<div class="stat-card stat-card--accent" style="--accent:#9c27b0;">
+      <div class="stat-num">${value}</div>
+      <div class="stat-label">${label}</div>
     </div>`
   }
 
@@ -57,18 +57,20 @@ export function renderDirigenteCandidate(container, candidateId) {
     const totalRegistros = dirigentes.reduce((sum, d) => sum + d.cantidadRegistros, 0)
 
     container.innerHTML = `
-      <div style="background: linear-gradient(135deg, #9c27b0 0%, #6a1b9a 100%); color: white; padding: 24px; border-radius: 8px 8px 0 0; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-        <h2 style="margin: 0; font-family: 'Barlow Condensed'; font-size: 2rem; text-transform: uppercase;">🧭 DIRIGENTES</h2>
-        <button id="btn-nuevo-dirigente" style="background: #4caf50; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700;">➕ NUEVO DIRIGENTE</button>
+      <div style="background: linear-gradient(135deg, #9c27b0 0%, #6a1b9a 100%); color: white; padding: 18px 20px; border-radius: 8px 8px 0 0; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+        <h2 style="margin: 0; font-family: 'Barlow Condensed'; font-size: 1.6rem; text-transform: uppercase;">🧭 DIRIGENTES</h2>
+        <button id="btn-nuevo-dirigente" class="btn-compact" style="background: #4caf50; color: white;">➕ NUEVO</button>
       </div>
-      <div style="background:white; border:1px solid #ddd; border-top:none; padding:20px;">
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px;">
+      <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px;">
+        <div class="stats-grid" style="margin-bottom:14px;">
           ${statCard('Dirigentes', dirigentes.length)}
           ${statCard('Registros captados', totalRegistros)}
         </div>
 
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
-        <input id="input-buscar-dirigente" placeholder="Buscar por nombre, CI o email..." style="width:100%; box-sizing:border-box; padding:10px; border:1px solid #ddd; border-radius:4px; margin-bottom:16px;">
+        <div class="filter-input-wrap" style="margin-bottom:14px;">
+          <input id="input-buscar-dirigente" class="filter-input" placeholder="Buscar por nombre, CI o email...">
+        </div>
 
         <div id="tabla-dirigentes"></div>
       </div>
@@ -90,37 +92,47 @@ export function renderDirigenteCandidate(container, candidateId) {
     )
 
     const tablaEl = document.getElementById('tabla-dirigentes')
+    if (filtrados.length === 0) {
+      tablaEl.innerHTML = `<div style="padding:40px 20px; text-align:center; color:#999;">${dirigentes.length === 0 ? 'No hay dirigentes creados todavía.' : 'Sin resultados.'}</div>`
+      return
+    }
+
     tablaEl.innerHTML = `
-      <div style="overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;">
-            <th style="padding:6px;">Nombre</th><th>CI</th><th>Email</th><th>Teléfono</th><th>Registros propios</th><th>Acciones</th>
-          </tr></thead>
-          <tbody>
-            ${filtrados.length === 0 ? `
-              <tr><td colspan="6" style="padding:40px; text-align:center; color:#999;">${dirigentes.length === 0 ? 'No hay dirigentes creados todavía.' : 'Sin resultados.'}</td></tr>
-            ` : filtrados.map((d, i) => `
-              <tr style="border-bottom:1px solid #eee;" data-idx="${i}">
-                <td style="padding:6px;"><strong>${escapeHtml(d.nombre) || '—'}</strong></td>
-                <td style="font-family:monospace; font-size:.8rem;">${escapeHtml(d.cedula) || '—'}</td>
-                <td>${escapeHtml(d.email) || '—'}</td>
-                <td>${escapeHtml(d.telefono) || '—'}</td>
-                <td>
-                  <span style="background:#f3e5f5; color:#6a1b9a; padding:4px 8px; border-radius:3px; font-weight:700;">${d.cantidadRegistros}</span>
-                </td>
-                <td style="display:flex; gap:4px;">
-                  <button class="btn-quitar-dirigente" data-idx="${i}" style="background:#d32f2f; color:white; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:.75rem; font-weight:600;">🗑️</button>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+      <div class="roster-card-grid">
+        ${filtrados.map((d, i) => `
+          <div class="roster-card" data-idx="${i}">
+            <div class="roster-card-name">${escapeHtml(d.nombre) || '—'}</div>
+            <div class="roster-card-fields">
+              <div class="roster-card-field"><strong>CI:</strong> ${escapeHtml(d.cedula) || '—'}</div>
+              <div class="roster-card-field"><strong>Email:</strong> ${escapeHtml(d.email) || '—'}</div>
+              <div class="roster-card-field"><strong>Teléfono:</strong> ${escapeHtml(d.telefono) || '—'}</div>
+              <div class="roster-card-field"><strong>Registros:</strong> <span style="background:#f3e5f5; color:#6a1b9a; padding:2px 8px; border-radius:3px; font-weight:700;">${d.cantidadRegistros}</span></div>
+            </div>
+            <div class="roster-card-actions">
+              <button class="btn-editar-dirigente btn-compact" data-idx="${i}" style="background:#2196f3; color:white;">✏️ Editar</button>
+              <button class="btn-eliminar-dirigente btn-compact" data-idx="${i}" style="background:#d32f2f; color:white;">🗑️ Eliminar</button>
+            </div>
+          </div>
+        `).join('')}
       </div>
     `
 
-    tablaEl.querySelectorAll('.btn-quitar-dirigente').forEach(btn => {
-      btn.addEventListener('click', () => mostrarModalQuitar(filtrados[Number(btn.dataset.idx)]))
+    tablaEl.querySelectorAll('.btn-editar-dirigente').forEach(btn => {
+      btn.addEventListener('click', () => mostrarModalCambiarRol(filtrados[Number(btn.dataset.idx)]))
     })
+    tablaEl.querySelectorAll('.btn-eliminar-dirigente').forEach(btn => {
+      btn.addEventListener('click', () => eliminarDirigente(filtrados[Number(btn.dataset.idx)]))
+    })
+  }
+
+  async function eliminarDirigente(dirigente) {
+    if (!confirm(`¿Borrar el perfil de ${dirigente.nombre || dirigente.email}? No podrá seguir usando el panel (su cuenta de login no se borra).`)) return
+    try {
+      await deleteCandidateUser(candidateId, dirigente.id)
+      cargarDatos()
+    } catch (err) {
+      alert('Error: ' + err.message)
+    }
   }
 
   function mostrarModalCrear() {
@@ -206,39 +218,6 @@ export function renderDirigenteCandidate(container, candidateId) {
       }
     })
 
-    modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
-  }
-
-  function mostrarModalQuitar(dirigente) {
-    const modal = document.createElement('div')
-    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; overflow-y: auto; padding: 20px;'
-    modal.innerHTML = `
-      <div style="background: white; border-radius: 8px; max-width: 460px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 24px;">
-        <h2 style="margin: 0 0 16px 0; font-family: 'Barlow Condensed'; font-size: 1.4rem; text-transform: uppercase; color: #d32f2f;">🗑️ QUITAR A ${escapeHtml(dirigente.nombre || dirigente.email).toUpperCase()}</h2>
-        <p style="font-size:.9rem; color:#555; margin-bottom:16px;">Esto también se refleja en el módulo Usuarios (es la misma cuenta). Sus registros ya guardados no se borran.</p>
-        <div style="display: grid; gap: 8px;">
-          <button id="btn-cambiar-rol" style="background: #2196f3; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">✏️ Cambiar de rol (deja de ser dirigente)</button>
-          <button id="btn-borrar" style="background: #d32f2f; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">🗑️ Borrar el perfil completo</button>
-          <button id="btn-cancelar" style="background: #999; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: 700;">❌ CANCELAR</button>
-        </div>
-      </div>
-    `
-    document.body.appendChild(modal)
-
-    modal.querySelector('#btn-cambiar-rol').addEventListener('click', () => {
-      modal.remove()
-      mostrarModalCambiarRol(dirigente)
-    })
-    modal.querySelector('#btn-borrar').addEventListener('click', async () => {
-      if (!confirm(`¿Borrar el perfil de ${dirigente.nombre || dirigente.email}? No podrá seguir usando el panel (su cuenta de login no se borra).`)) return
-      try {
-        await deleteCandidateUser(candidateId, dirigente.id)
-        modal.remove()
-        cargarDatos()
-      } catch (err) {
-        alert('Error: ' + err.message)
-      }
-    })
     modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
   }
 

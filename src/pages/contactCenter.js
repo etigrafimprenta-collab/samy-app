@@ -169,7 +169,7 @@ export async function renderContactCenter(container, candidateId, user, myRole, 
 
   function tabBtn(id, label) {
     const active = tab === id
-    return `<button class="cc-tab-btn" data-tab="${id}" style="padding:8px 14px; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:.85rem; background:${active ? 'white' : 'rgba(255,255,255,.15)'}; color:${active ? '#7b1fa2' : 'white'};">${label}</button>`
+    return `<button class="cc-tab-btn btn-tab btn-tab--pill btn-tab--on-dark${active ? ' active' : ''}" data-tab="${id}" style="--tab-color:#7b1fa2;">${label}</button>`
   }
 
   function render() {
@@ -424,7 +424,7 @@ export async function renderContactCenter(container, candidateId, user, myRole, 
 
     body.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">📊 Resumen</h3>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:24px;">
+      <div class="stats-grid" style="margin-bottom:24px;">
         ${tarjeta('pending', '📋', 'Pendientes', conteos.pendientes, '#6a1b9a')}
         ${tarjeta('llamadosHoy', '📞', 'Llamados hoy', '…', '#2196f3')}
         ${tarjeta('contacted', '☎️', 'Contactados', conteos.contactados, '#00897b')}
@@ -675,7 +675,7 @@ export async function renderContactCenter(container, candidateId, user, myRole, 
 
       <h3 style="margin:0 0 12px; font-size:1.05rem;">🔎 Asignar / reasignar por CI o nombre</h3>
       <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
-      <input id="inp-buscar-asignacion" placeholder="Buscar votante por CI o nombre..." style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
+      <div class="filter-input-wrap" style="margin-bottom:12px;"><input id="inp-buscar-asignacion" class="filter-input" placeholder="Buscar votante por CI o nombre..."></div>
       <div id="cc-lista-asignacion" style="max-height:420px; overflow-y:auto; border:1px solid #eee; border-radius:6px;"></div>
     `
 
@@ -995,7 +995,7 @@ export async function renderContactCenter(container, candidateId, user, myRole, 
       formBox.innerHTML = `
         <div style="background:#fff3e0; border-radius:6px; padding:14px; margin-bottom:16px; display:grid; gap:8px;">
           <div style="font-size:.72rem; color:#856404;">💡 Si buscás por nombre, utilizá el primer apellido.</div>
-          <input id="inp-buscar-votante-inc" placeholder="Buscar votante por CI o nombre..." style="padding:8px; border:1px solid #ccc; border-radius:4px;">
+          <div class="filter-input-wrap"><input id="inp-buscar-votante-inc" class="filter-input" placeholder="Buscar votante por CI o nombre..."></div>
           <div id="cc-sugerencias-votante-inc" style="max-height:160px; overflow-y:auto; border:1px solid #eee; border-radius:4px; display:none;"></div>
           <input type="hidden" id="inp-votante-id-inc">
           <div id="cc-votante-elegido-inc" style="font-size:.8rem; color:#555;"></div>

@@ -52,9 +52,9 @@ const TABS = [
 ]
 
 const statCard = (label, value, color, key) => `
-  <button class="rep-stat-card" data-key="${key || ''}" style="text-align:left; cursor:${key ? 'pointer' : 'default'}; background:white; border:1px solid #ddd; border-left:4px solid ${color}; border-radius:8px; padding:14px;">
-    <div style="font-size:1.5rem; font-weight:800; color:${color};">${value}</div>
-    <div style="font-size:.72rem; font-weight:700; color:#666; text-transform:uppercase;">${label}</div>
+  <button class="rep-stat-card stat-card stat-card--accent" data-key="${key || ''}" style="--accent:${color}; cursor:${key ? 'pointer' : 'default'};">
+    <div class="stat-num">${value}</div>
+    <div class="stat-label">${label}</div>
   </button>`
 
 export async function renderReportesCandidate(container, candidateId, user, myRole, misRoles = []) {
@@ -73,7 +73,7 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
-          ${visibleTabs.map(t => `<button class="rep-tab" data-tab="${t.id}" style="padding:8px 14px; border:none; border-radius:6px 6px 0 0; cursor:pointer; font-weight:600; font-size:.82rem; background:${tab === t.id ? '#283593' : '#f0f0f0'}; color:${tab === t.id ? 'white' : '#333'};">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
+          ${visibleTabs.map(t => `<button class="rep-tab btn-tab${tab === t.id ? ' active' : ''}" data-tab="${t.id}" style="--tab-color:#283593;">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
         </div>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:20px;">
@@ -227,7 +227,7 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
           <button id="rg-btn-excel" style="background:#455a64; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">⬇️ Excel</button>
           <button id="rg-btn-pdf" style="background:#607d8b; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">⬇️ PDF</button>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px;">
+        <div class="stats-grid">
           ${statCard('Total votantes (padrón)', padron.toLocaleString('es-PY'), '#455a64')}
           ${statCard('Comprometidos', counts.records.toLocaleString('es-PY'), '#1976d2')}
           ${statCard('Contactados', flags.contacted, '#00897b')}

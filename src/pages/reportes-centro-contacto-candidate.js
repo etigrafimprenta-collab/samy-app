@@ -27,9 +27,9 @@ const FLAG_LABELS = {
 }
 
 const statCard = (label, value, color) => `
-  <div style="background:white; border:1px solid #ddd; border-left:4px solid ${color}; border-radius:8px; padding:14px;">
-    <div style="font-size:1.4rem; font-weight:800; color:${color};">${value}</div>
-    <div style="font-size:.72rem; font-weight:700; color:#666; text-transform:uppercase;">${label}</div>
+  <div class="stat-card stat-card--accent" style="--accent:${color};">
+    <div class="stat-num">${value}</div>
+    <div class="stat-label">${label}</div>
   </div>`
 
 async function cargarOperadores(candidateId) {
@@ -71,7 +71,7 @@ export async function renderReporteCentroContacto(body, candidateId) {
 
     body.innerHTML = `
       <h3 style="margin:0 0 12px; font-size:1.05rem;">📞 Progreso de llamadas</h3>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:24px;">
+      <div class="stats-grid" style="margin-bottom:24px;">
         ${statCard('Sin asignar', sinAsignar, '#455a64')}
         ${statCard('Pendientes', pendientes, '#6a1b9a')}
         ${FLAGS.map(f => statCard(FLAG_LABELS[f], flags[f] || 0, '#00897b')).join('')}
@@ -81,7 +81,7 @@ export async function renderReporteCentroContacto(body, candidateId) {
 
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
         <h3 style="margin:0; font-size:1.05rem;">👥 Por operador (${stats.length})</h3>
-        <button id="rcc-btn-export" style="background:#455a64; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;">⬇️ Exportar Excel</button>
+        <button id="rcc-btn-export" class="btn-compact" style="background:#455a64; color:white;">⬇️ Exportar Excel</button>
       </div>
       ${stats.length === 0 ? '<div style="color:#999; padding:20px; text-align:center;">Todavía no hay operadores en el equipo.</div>' : `
         <div style="overflow-x:auto;">

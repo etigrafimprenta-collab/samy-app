@@ -84,9 +84,9 @@ export function renderMesarioCandidate(container, candidateId) {
   }
 
   function statCard(label, value) {
-    return `<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; text-align:center;">
-      <div style="font-size:1.8rem; font-weight:700; color:#1976d2;">${value}</div>
-      <div style="font-size:.75rem; color:#666; text-transform:uppercase; font-weight:600;">${label}</div>
+    return `<div class="stat-card" style="--accent:#1976d2;">
+      <div class="stat-num">${value}</div>
+      <div class="stat-label">${label}</div>
     </div>`
   }
 
@@ -103,7 +103,7 @@ export function renderMesarioCandidate(container, candidateId) {
         <button id="btn-nuevo-mesario" style="background: #4caf50; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-weight: 700;">➕ NUEVO MESARIO</button>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:20px;">
-        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px;">
+        <div class="stats-grid">
           ${statCard('Mesarios', total)}
           ${statCard('Con capacitación cargada', conCapacitacion)}
           ${statCard('Asistieron a capacitación', asistieron)}
@@ -114,7 +114,7 @@ export function renderMesarioCandidate(container, candidateId) {
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 10px;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
 
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:16px;">
-          <input id="input-buscar-mesario" placeholder="Buscar por CI, nombre o proponente..." style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div class="filter-input-wrap"><input id="input-buscar-mesario" class="filter-input" placeholder="Buscar por CI, nombre o proponente..."></div>
           <select id="sel-local-mesario" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <option value="">Todos los locales</option>
           </select>
@@ -160,31 +160,22 @@ export function renderMesarioCandidate(container, candidateId) {
         ? '<span style="background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto (Buscar votante)</span>'
         : '<span style="background:#e8f5e9; color:#2e7d32; padding:2px 8px; border-radius:3px; font-size:.72rem; font-weight:700;">Auto + editado</span>'
     return `
-      <tr style="border-bottom:1px solid #eee;" data-idx="${idxGlobal}">
-        <td style="padding:6px;"><strong>${escapeHtml(f.nombre) || '—'}</strong></td>
-        <td style="font-family:monospace; font-size:.8rem;">${escapeHtml(f.ci) || '—'}</td>
-        <td>${escapeHtml(f.telefono) || '—'}</td>
-        <td>${escapeHtml(f.proponente) || '—'}</td>
-        <td>${escapeHtml(f.local) || '—'}</td>
-        <td>${escapeHtml(f.mesa) || '—'}</td>
-        <td>
-          ${caps.length === 0 ? '<span style="color:#999;">Sin capacitación cargada</span>' : caps.map(c => `
-            <div style="white-space:nowrap; font-size:.75rem; margin-bottom:2px;">
-              ${c.asistio ? '✅' : '❌'} ${escapeHtml(c.fecha)}
-            </div>
-          `).join('')}
-        </td>
-        <td><strong>Gs. ${montoConsolidado(f).toLocaleString('es-PY')}</strong></td>
-        <td>${montoDiaD(f) > 0 ? `Gs. ${montoDiaD(f).toLocaleString('es-PY')}` : '<span style="color:#999;">—</span>'}</td>
-        <td>${origenBadge}</td>
-        <td>
-          ${telLimpio ? `<a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">💬</a>` : '<span style="color:#999; font-size:.75rem;">sin tel.</span>'}
-        </td>
-        <td style="display:flex; gap:4px;">
-          <button class="btn-editar-mesario" data-idx="${idxGlobal}" style="background:#ff9800; color:white; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:.75rem; font-weight:600;">✏️</button>
-          <button class="btn-eliminar-mesario" data-idx="${idxGlobal}" style="background:#d32f2f; color:white; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:.75rem; font-weight:600;">🗑️</button>
-        </td>
-      </tr>`
+      <div class="roster-card" data-idx="${idxGlobal}">
+        <div class="roster-card-name">${escapeHtml(f.nombre) || '—'}</div>
+        <div class="roster-card-fields">
+          <div class="roster-card-field"><strong>CI:</strong> ${escapeHtml(f.ci) || '—'}</div>
+          <div class="roster-card-field"><strong>Teléfono:</strong> ${escapeHtml(f.telefono) || '—'} ${telLimpio ? `<a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:2px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">💬</a>` : ''}</div>
+          <div class="roster-card-field"><strong>Proponente:</strong> ${escapeHtml(f.proponente) || '—'}</div>
+          <div class="roster-card-field"><strong>Local / Mesa:</strong> ${escapeHtml(f.local) || '—'} · ${escapeHtml(f.mesa) || '—'}</div>
+          <div class="roster-card-field"><strong>Capacitaciones:</strong> ${caps.length === 0 ? 'Sin cargar' : caps.map(c => `${c.asistio ? '✅' : '❌'} ${escapeHtml(c.fecha)}`).join(', ')}</div>
+          <div class="roster-card-field"><strong>Monto:</strong> Gs. ${montoConsolidado(f).toLocaleString('es-PY')}${montoDiaD(f) > 0 ? ` · Día D: Gs. ${montoDiaD(f).toLocaleString('es-PY')}` : ''}</div>
+          <div class="roster-card-field">${origenBadge}</div>
+        </div>
+        <div class="roster-card-actions">
+          <button class="btn-editar-mesario btn-compact" data-idx="${idxGlobal}" style="background:#ff9800; color:white;">✏️ Editar</button>
+          <button class="btn-eliminar-mesario btn-compact" data-idx="${idxGlobal}" style="background:#d32f2f; color:white;">🗑️ Eliminar</button>
+        </div>
+      </div>`
   }
 
   function bindFilaHandlers(filtradas) {
@@ -207,10 +198,6 @@ export function renderMesarioCandidate(container, candidateId) {
       })
     })
   }
-
-  const THEAD = `<thead><tr style="text-align:left; border-bottom:2px solid #eee;">
-    <th style="padding:6px;">Nombre</th><th>CI</th><th>Teléfono</th><th>Proponente</th><th>Local</th><th>Mesa</th><th>Capacitaciones</th><th>Monto consolidado</th><th>Día D</th><th>Origen</th><th>WhatsApp</th><th>Acciones</th>
-  </tr></thead>`
 
   function pintarTabla() {
     const termino = document.getElementById('input-buscar-mesario').value.trim().toLowerCase()
@@ -241,12 +228,7 @@ export function renderMesarioCandidate(container, candidateId) {
     if (termino) {
       tablaEl.innerHTML = `
         ${hayFiltro ? `<div style="background:#e3f2fd; border-left:4px solid #1976d2; padding:10px; border-radius:4px; margin-bottom:12px; font-size:.85rem;"><strong>${filtradas.length}</strong> de ${filas.length} mesarios</div>` : ''}
-        <div style="overflow-x:auto;">
-          <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-            ${THEAD}
-            <tbody>${filtradas.map((f, i) => filaTabla(f, i)).join('')}</tbody>
-          </table>
-        </div>
+        <div class="roster-card-grid">${filtradas.map((f, i) => filaTabla(f, i)).join('')}</div>
       `
       bindFilaHandlers(filtradas)
       return
@@ -273,11 +255,8 @@ export function renderMesarioCandidate(container, candidateId) {
               <span>Gs. ${totalLocal.toLocaleString('es-PY')} ${abierto ? '▲' : '▼'}</span>
             </button>
             ${abierto ? `
-              <div style="overflow-x:auto;">
-                <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-                  ${THEAD}
-                  <tbody>${filasDelLocal.map(f => filaTabla(f, filtradas.indexOf(f))).join('')}</tbody>
-                </table>
+              <div style="padding:10px;">
+                <div class="roster-card-grid">${filasDelLocal.map(f => filaTabla(f, filtradas.indexOf(f))).join('')}</div>
               </div>
             ` : ''}
           </div>

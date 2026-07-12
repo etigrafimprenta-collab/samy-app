@@ -19,9 +19,9 @@ import { httpsCallable } from 'firebase/functions'
 import { getDuplicateCedulas, listAuditLogsPage } from '../lib/firebaseCandidate.js'
 
 const exportButtons = (id) => `
-  <button id="${id}-xlsx" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ Excel</button>
-  <button id="${id}-csv" style="background:#607d8b; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ CSV</button>
-  <button id="${id}-pdf" style="background:#8d6e63; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ PDF</button>`
+  <button id="${id}-xlsx" class="btn-compact" style="background:#455a64; color:white; margin-right:6px;">⬇️ Excel</button>
+  <button id="${id}-csv" class="btn-compact" style="background:#607d8b; color:white; margin-right:6px;">⬇️ CSV</button>
+  <button id="${id}-pdf" class="btn-compact" style="background:#8d6e63; color:white;">⬇️ PDF</button>`
 
 function wireExport(id, rows, filenameBase, sheetName) {
   const xlsx = document.getElementById(`${id}-xlsx`)

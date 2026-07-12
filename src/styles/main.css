@@ -591,7 +591,7 @@ html, body {
   font-family: 'Oswald', sans-serif;
   font-size: 2rem;
   font-weight: 700;
-  color: var(--rojo);
+  color: var(--accent, var(--rojo));
   line-height: 1;
 }
 
@@ -894,4 +894,193 @@ tr:hover td { background: #fafafa; }
   font-weight: 700;
   color: white;
   line-height: 1.2;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   MOBILE-FIRST — flujo multicandidato (campaign.js y todo lo que
+   importa dinámicamente). Todo lo de arriba es del flujo legacy de un
+   solo candidato (ya usa estas clases desde antes); este bloque es
+   nuevo y no le cambia nada, salvo el fallback `var(--accent, ...)` ya
+   agregado a `.stat-num` arriba (no-op si `--accent` no está seteado).
+   Breakpoints usados acá: 480px (teléfono grande/tablet chica) y 700px
+   (roster cards en 2 columnas). Mobile-first real: los estilos base
+   son para 360-430px, los `@media (min-width:...)` solo AGREGAN
+   mejoras para pantallas más anchas.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Stat cards con acento de color (Reportes/Finanzas/rosters) ──── */
+.stat-card--accent {
+  text-align: left;
+  border-left: 4px solid var(--accent, var(--rojo));
+  padding: 12px 14px;
+}
+.stat-card--accent .stat-num {
+  font-size: clamp(1.2rem, 5vw, 1.6rem);
+  line-height: 1.15;
+}
+.stat-card--accent .stat-label {
+  font-size: 0.7rem;
+  margin-top: 2px;
+}
+
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat-card { padding: 12px 12px; }
+  .stat-num { font-size: clamp(1.3rem, 6vw, 1.7rem); }
+}
+
+/* ── Nav grid (Menú principal multicandidato) — nunca 1 columna: 2 en
+   mobile, 3 desde 480px ──────────────────────────────────────────── */
+.nav-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+@media (min-width: 480px) {
+  .nav-grid { grid-template-columns: repeat(3, 1fr); gap: 10px; }
+}
+
+.nav-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+  padding: 12px 6px;
+  border: none;
+  border-radius: var(--radio);
+  cursor: pointer;
+  font-family: 'Barlow', sans-serif;
+  font-weight: 600;
+  font-size: 0.72rem;
+  line-height: 1.15;
+  background: rgba(255,255,255,0.12);
+  color: white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  transition: background 0.15s, transform 0.1s;
+  min-height: 64px;
+}
+.nav-tile:active { transform: scale(0.97); }
+.nav-tile.active {
+  background: white;
+  color: var(--tile-color, var(--rojo));
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+}
+.nav-tile-icon { font-size: 1.3rem; line-height: 1; }
+.nav-tile-label { overflow-wrap: break-word; word-break: break-word; }
+
+/* ── Buscador full-width con ícono integrado ─────────────────────── */
+.filter-input-wrap { position: relative; width: 100%; }
+.filter-input-wrap::before {
+  content: '🔍';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.9rem;
+  pointer-events: none;
+  opacity: 0.6;
+}
+.filter-input {
+  width: 100%;
+  padding: 11px 14px 11px 36px;
+  border: 1.5px solid var(--gris-medio);
+  border-radius: var(--radio);
+  font-family: 'Barlow', sans-serif;
+  font-size: 0.9rem;
+  background: white;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+.filter-input:focus {
+  border-color: var(--rojo);
+  box-shadow: 0 0 0 3px rgba(200,16,46,0.1);
+}
+
+/* ── Tabs unificadas (--tab-color por instancia) ─────────────────── */
+.btn-tab {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  font-family: 'Barlow', sans-serif;
+  font-weight: 600;
+  font-size: 0.82rem;
+  background: #f0f0f0;
+  color: #333;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-tab.active { background: var(--tab-color, var(--rojo)); color: white; }
+.btn-tab--pill { border-radius: 8px; }
+/* Variante para tabs sobre un header de color (en vez de sobre blanco) */
+.btn-tab--on-dark { background: rgba(255,255,255,0.15); color: white; }
+.btn-tab--on-dark.active { background: white; color: var(--tab-color, var(--rojo)); }
+
+/* ── Botones de acción compactos ─────────────────────────────────── */
+.btn-compact {
+  padding: 7px 12px;
+  border: none;
+  border-radius: var(--radio);
+  cursor: pointer;
+  font-family: 'Barlow', sans-serif;
+  font-weight: 600;
+  font-size: 0.78rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  transition: transform 0.1s, box-shadow 0.15s;
+}
+.btn-compact:active { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+
+/* ── Roster cards — reemplaza tablas de roster en mobile (Dirigentes,
+   Operadores, Mesarios, Choferes): 1 columna en mobile, 2 desde 700px,
+   acciones siempre visibles sin scroll horizontal ─────────────────── */
+.roster-card-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+@media (min-width: 700px) {
+  .roster-card-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.roster-card {
+  background: white;
+  border-radius: var(--radio);
+  padding: 14px 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.roster-card-name {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--negro);
+}
+
+.roster-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.roster-card-field {
+  display: flex;
+  gap: 6px;
+  font-size: 0.83rem;
+  color: var(--gris-texto);
+  flex-wrap: wrap;
+}
+.roster-card-field strong { color: var(--negro); font-weight: 600; }
+
+.roster-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gris-claro);
 }

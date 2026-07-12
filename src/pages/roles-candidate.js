@@ -52,7 +52,7 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
-          ${TABS.map(t => `<button class="rp-tab" data-tab="${t.id}" style="padding:8px 14px; border:none; border-radius:6px 6px 0 0; cursor:pointer; font-weight:600; font-size:.82rem; background:${tab === t.id ? '#4527a0' : '#f0f0f0'}; color:${tab === t.id ? 'white' : '#333'};">${t.label}</button>`).join('')}
+          ${TABS.map(t => `<button class="rp-tab btn-tab${tab === t.id ? ' active' : ''}" data-tab="${t.id}" style="--tab-color:#4527a0;">${t.label}</button>`).join('')}
         </div>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:20px;">
