@@ -2,9 +2,10 @@
  * MÓDULO: REPORTES (candidato-scoped).
  *
  * Centraliza reportes de votantes/registros/equipo/Día D/finanzas/
- * auditoría. Implementación por etapas (ver plan): Etapa 1 = esta —
- * Resumen General, Votantes, Registros, Equipo. El resto queda como
- * "🚧 Próximamente" hasta sus etapas.
+ * auditoría. Implementación por etapas (ver plan): Etapa 1 — Resumen
+ * General, Votantes, Registros, Equipo. Etapa 2 — Centro de Contacto,
+ * Día D, Choferes, Mesarios, Dirigentes. El resto (Finanzas, Auditoría,
+ * Reportes Guardados) queda como "🚧 Próximamente" hasta sus etapas.
  *
  * Todo acá lee colecciones YA existentes (savedRecords, users,
  * electionStatus, callAssignments, electionDayControl, incidents,
@@ -27,11 +28,11 @@ const TABS = [
   { id: 'votantes', label: '🗳️ Votantes', ready: true },
   { id: 'registros', label: '📋 Registros', ready: true },
   { id: 'equipo', label: '👥 Equipo', ready: true },
-  { id: 'centro-contacto', label: '📞 Centro de Contacto', ready: false, etapa: 2 },
-  { id: 'dia-d', label: '🗳️ Día D', ready: false, etapa: 2 },
-  { id: 'choferes', label: '🚗 Choferes', ready: false, etapa: 2 },
-  { id: 'mesarios', label: '🪑 Mesarios', ready: false, etapa: 2 },
-  { id: 'dirigentes', label: '🧭 Dirigentes', ready: false, etapa: 2 },
+  { id: 'centro-contacto', label: '📞 Centro de Contacto', ready: true },
+  { id: 'dia-d', label: '🗳️ Día D', ready: true },
+  { id: 'choferes', label: '🚗 Choferes', ready: true },
+  { id: 'mesarios', label: '🪑 Mesarios', ready: true },
+  { id: 'dirigentes', label: '🧭 Dirigentes', ready: true },
   { id: 'finanzas', label: '💰 Finanzas', ready: false, etapa: 3 },
   { id: 'auditoria', label: '⚠️ Auditoría', ready: false, etapa: 3 },
   { id: 'guardados', label: '💾 Reportes Guardados', ready: false, etapa: 4 }
@@ -50,7 +51,7 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
     container.innerHTML = `
       <div style="background: linear-gradient(135deg, #283593 0%, #1a237e 100%); color: white; padding: 24px; border-radius: 8px 8px 0 0;">
         <h2 style="margin: 0; font-family: 'Barlow Condensed', sans-serif; font-size: 2rem; text-transform: uppercase;">📊 REPORTES</h2>
-        <p style="margin: 6px 0 0 0; font-size: .82rem; opacity: .9;">Votantes, registros, equipo y (próximamente) Día D, finanzas y auditoría</p>
+        <p style="margin: 6px 0 0 0; font-size: .82rem; opacity: .9;">Votantes, registros, equipo, centro de contacto, Día D, choferes, mesarios y dirigentes — (próximamente) finanzas y auditoría</p>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
@@ -94,6 +95,31 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       body.innerHTML = 'Cargando...'
       const { renderReporteEquipo } = await import('./reportes-equipo-candidate.js')
       return renderReporteEquipo(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'centro-contacto') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteCentroContacto } = await import('./reportes-centro-contacto-candidate.js')
+      return renderReporteCentroContacto(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'dia-d') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteDiaD } = await import('./reportes-dia-d-candidate.js')
+      return renderReporteDiaD(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'choferes') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteChoferes } = await import('./reportes-choferes-candidate.js')
+      return renderReporteChoferes(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'mesarios') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteMesarios } = await import('./reportes-mesarios-candidate.js')
+      return renderReporteMesarios(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'dirigentes') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteDirigentes } = await import('./reportes-dirigentes-candidate.js')
+      return renderReporteDirigentes(body, candidateId, user, myRole, misRoles)
     }
   }
 

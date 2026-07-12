@@ -687,7 +687,7 @@ service cloud.firestore {
     // ── /candidates/{candidateId}/followUps/{followUpId} ────────────────
     match /candidates/{candidateId}/followUps/{followUpId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
@@ -785,7 +785,7 @@ service cloud.firestore {
     // (updatedBy == uid), nunca los de otro, ni siquiera del mismo votante.
     match /candidates/{candidateId}/electionDayMovements/{movementId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer', 'operador']) && resource.data.updatedBy == request.auth.uid);
 
       allow create: if (isSuperAdmin() ||
@@ -800,7 +800,7 @@ service cloud.firestore {
     // cliente de un rol operativo. Un operativo solo ve las suyas.
     match /candidates/{candidateId}/electionDayAlerts/{alertId} {
       allow read: if isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer']) && resource.data.assignedUserId == request.auth.uid);
       allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
@@ -808,7 +808,7 @@ service cloud.firestore {
 
     // ── /candidates/{candidateId}/electionDayReports/{reportId} ────────
     match /candidates/{candidateId}/electionDayReports/{reportId} {
-      allow read: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+      allow read: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']);
       allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }

@@ -23,6 +23,24 @@ import { debounce } from '../lib/debounce.js'
 
 const PAGO_CONCEPTOS = ['Capacitación', 'Día D', 'Movilidad', 'Otro']
 
+// Puras (solo dependen de `fila`) — exportadas para que Reportes > Mesarios
+// calcule capacitación/montos exactamente igual que este módulo, sin
+// reimplementar la lógica en un segundo lugar.
+export function estadoPresencia(fila) {
+  const caps = fila.capacitaciones || []
+  if (caps.length === 0) return 'sin_capacitacion'
+  return caps.some(c => c.asistio) ? 'asistio' : 'no_asistio'
+}
+
+// "Consolidado" = todos los pagos sumados; "Día D" se muestra aparte
+// porque es el concepto que más se pregunta en el cierre de campaña.
+export function montoConsolidado(fila) {
+  return (fila.pagos || []).reduce((sum, p) => sum + (Number(p.monto) || 0), 0)
+}
+export function montoDiaD(fila) {
+  return (fila.pagos || []).filter(p => p.concepto === 'Día D').reduce((sum, p) => sum + (Number(p.monto) || 0), 0)
+}
+
 export function renderMesarioCandidate(container, candidateId) {
   let filas = []
   // Qué locales quedan desplegados en la vista agrupada — sobrevive a los
@@ -33,21 +51,6 @@ export function renderMesarioCandidate(container, candidateId) {
     if (!tel) return ''
     const digits = String(tel).replace(/\D/g, '')
     return digits ? '595' + digits.replace(/^0/, '') : ''
-  }
-
-  function estadoPresencia(fila) {
-    const caps = fila.capacitaciones || []
-    if (caps.length === 0) return 'sin_capacitacion'
-    return caps.some(c => c.asistio) ? 'asistio' : 'no_asistio'
-  }
-
-  // "Consolidado" = todos los pagos sumados; "Día D" se muestra aparte
-  // porque es el concepto que más se pregunta en el cierre de campaña.
-  function montoConsolidado(fila) {
-    return (fila.pagos || []).reduce((sum, p) => sum + (Number(p.monto) || 0), 0)
-  }
-  function montoDiaD(fila) {
-    return (fila.pagos || []).filter(p => p.concepto === 'Día D').reduce((sum, p) => sum + (Number(p.monto) || 0), 0)
   }
 
   async function cargarDatos() {
