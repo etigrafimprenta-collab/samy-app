@@ -6,7 +6,7 @@
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
 import { exportGenericToExcel } from '../lib/excel.js'
-import { listRecordsPageFiltered, listCandidateUsersPage } from '../lib/firebaseCandidate.js'
+import { listRecordsPageFiltered, listCandidateUsersPage, createReportPreset } from '../lib/firebaseCandidate.js'
 
 const EJES = [
   { id: '', label: 'Sin filtro (más recientes)' },
@@ -30,9 +30,14 @@ async function cargarRoster(candidateId) {
   return equipo
 }
 
-export async function renderReporteRegistros(body, candidateId) {
-  let eje = ''
-  let valor = ''
+export async function renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset = null) {
+  let eje = preset?.eje || ''
+  let valor = preset?.valor || ''
+  // Solo se puede guardar un filtro recién aplicado con "Filtrar" (o
+  // heredado de un preset) — si se cambia el eje sin volver a filtrar,
+  // `valor` queda de un eje distinto y guardar produciría un preset
+  // inconsistente (ej. eje=mesa con el valor de un uid de dirigente).
+  let filtroAplicado = !!(eje && valor)
   let textoDireccion = ''
   let registros = []
   let cursor = null
@@ -58,13 +63,14 @@ export async function renderReporteRegistros(body, candidateId) {
       </p>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
         <select id="rr-eje" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
-          ${EJES.map(e => `<option value="${e.id}">${e.label}</option>`).join('')}
+          ${EJES.map(e => `<option value="${e.id}" ${e.id === eje ? 'selected' : ''}>${e.label}</option>`).join('')}
         </select>
-        <input id="rr-valor" placeholder="Valor a filtrar (uid de dirigente, nombre de local, seccional o mesa)" style="flex:1; min-width:220px; padding:8px; border:1px solid #ccc; border-radius:4px;" ${eje ? '' : 'disabled'}>
+        <input id="rr-valor" placeholder="Valor a filtrar (uid de dirigente, nombre de local, seccional o mesa)" value="${escapeHtml(valor)}" style="flex:1; min-width:220px; padding:8px; border:1px solid #ccc; border-radius:4px;" ${eje ? '' : 'disabled'}>
         <button id="rr-btn-filtrar" style="background:#283593; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;" ${eje ? '' : 'disabled'}>Filtrar</button>
       </div>
-      <div style="display:flex; gap:8px; margin-bottom:14px;">
-        <input id="rr-direccion" placeholder="Buscar por dirección (dentro de lo ya filtrado)..." style="flex:1; padding:8px; border:1px solid #ccc; border-radius:4px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+        <input id="rr-direccion" placeholder="Buscar por dirección (dentro de lo ya filtrado)..." style="flex:1; min-width:200px; padding:8px; border:1px solid #ccc; border-radius:4px;">
+        <button id="rr-btn-guardar" style="background:#00695c; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;" ${filtroAplicado ? '' : 'disabled'} title="${filtroAplicado ? '' : 'Elegí un filtro, escribí un valor y presioná Filtrar primero'}">💾 Guardar este filtro</button>
         <button id="rr-btn-export" style="background:#455a64; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:700;">⬇️ Exportar Excel</button>
       </div>
       <div id="rr-lista"></div>
@@ -72,17 +78,39 @@ export async function renderReporteRegistros(body, candidateId) {
     `
     document.getElementById('rr-eje').addEventListener('change', e => {
       eje = e.target.value
+      valor = ''
+      filtroAplicado = false
+      document.getElementById('rr-valor').value = ''
       document.getElementById('rr-valor').disabled = !eje
       document.getElementById('rr-btn-filtrar').disabled = !eje
+      document.getElementById('rr-btn-guardar').disabled = true
     })
     document.getElementById('rr-btn-filtrar').addEventListener('click', () => {
       const v = document.getElementById('rr-valor').value.trim()
       if (!v) { alert('Escribí un valor para filtrar.'); return }
       valor = v
+      filtroAplicado = true
+      document.getElementById('rr-btn-guardar').disabled = false
       cargar(true)
     })
     document.getElementById('rr-direccion').addEventListener('input', debounce(e => { textoDireccion = e.target.value.trim().toLowerCase(); pintarLista() }, 250))
     document.getElementById('rr-btn-export').addEventListener('click', exportar)
+    document.getElementById('rr-btn-guardar').addEventListener('click', guardarFiltro)
+  }
+
+  async function guardarFiltro() {
+    if (!eje || !valor || !filtroAplicado) { alert('Elegí un filtro, escribí un valor y presioná "Filtrar" antes de guardar.'); return }
+    const nombre = prompt('Nombre para este filtro guardado:', `${EJES.find(e => e.id === eje)?.label || eje}: ${valor}`)
+    if (!nombre || !nombre.trim()) return
+    try {
+      await createReportPreset(candidateId, {
+        nombre: nombre.trim(), eje, valor,
+        createdBy: user.uid, createdByName: user.displayName || user.email
+      })
+      alert('Filtro guardado. Lo vas a encontrar en la pestaña "💾 Reportes Guardados".')
+    } catch (err) {
+      alert('No se pudo guardar el filtro: ' + err.message)
+    }
   }
 
   async function cargar(reset) {

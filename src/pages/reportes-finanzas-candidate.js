@@ -12,6 +12,7 @@
  */
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { exportGenericToExcel, exportGenericToCsv } from '../lib/excel.js'
+import { exportGenericToPdf } from '../lib/pdf.js'
 import {
   getFinanceSummary,
   getFinancePaymentsSumByMethod,
@@ -31,13 +32,16 @@ const statCard = (label, value, color) => `
 
 const exportButtons = (id) => `
   <button id="${id}-xlsx" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ Excel</button>
-  <button id="${id}-csv" style="background:#607d8b; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ CSV</button>`
+  <button id="${id}-csv" style="background:#607d8b; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem; margin-right:6px;">⬇️ CSV</button>
+  <button id="${id}-pdf" style="background:#8d6e63; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ PDF</button>`
 
 function wireExport(id, rows, filenameBase, sheetName) {
   const xlsx = document.getElementById(`${id}-xlsx`)
   const csv = document.getElementById(`${id}-csv`)
+  const pdf = document.getElementById(`${id}-pdf`)
   if (xlsx) xlsx.addEventListener('click', () => exportGenericToExcel(rows, `${filenameBase}.xlsx`, sheetName))
   if (csv) csv.addEventListener('click', () => exportGenericToCsv(rows, `${filenameBase}.csv`, sheetName))
+  if (pdf) pdf.addEventListener('click', () => exportGenericToPdf(rows, `${filenameBase}.pdf`, sheetName))
 }
 
 export async function renderReporteFinanzas(body, candidateId) {

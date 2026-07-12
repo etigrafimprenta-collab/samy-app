@@ -37,3 +37,11 @@ Gracias por el Apoyo!!!`
 export const shareWhatsApp = (voter) => {
   alert("Por favor, guarda el registro con teléfono para compartir por WhatsApp")
 }
+
+// Genérico para Reportes — a diferencia de shareWhatsAppDirect (mensaje
+// fijo para un votante puntual), esto comparte texto libre sin número
+// destinatario: abre el selector de contacto/grupo de WhatsApp.
+export const shareTextViaWhatsApp = (text) => {
+  const encoded = encodeURIComponent(text.trim())
+  window.open(`https://wa.me/?text=${encoded}`, "_blank")
+}

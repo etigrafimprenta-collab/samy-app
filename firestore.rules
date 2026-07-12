@@ -404,6 +404,20 @@ service cloud.firestore {
       allow write: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
     }
 
+    // ── /candidates/{candidateId}/reportPresets/{id} — Reportes Guardados
+    // (Etapa 4): presets de filtro para Reportes > Registros. Lectura con
+    // los mismos roles que TAB_ROLES.reportes en campaign.js (doc-
+    // independiente, seguro para list() sin filtro). Escritura SIN
+    // auditor, igual que el resto del archivo (auditLogs/roleAuditLogs/
+    // financeAuditLogs/financeAlerts todos excluyen a auditor de write) —
+    // un auditor no debería poder borrar/sobreescribir filtros ajenos.
+    match /candidates/{candidateId}/reportPresets/{presetId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']);
+      allow write: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
+    }
+
     // ── /candidates/{candidateId}/config/{configId} — p.ej. electionDay ─
     match /candidates/{candidateId}/config/{configId} {
       allow read: if isSuperAdmin() || belongsToCandidate(candidateId);

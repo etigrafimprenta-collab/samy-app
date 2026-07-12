@@ -8,8 +8,10 @@
  * (ambas con `roles` en TABS: ninguna colección de Finanzas ni auditLogs
  * permite lectura a coordinator en firestore.rules, así que esos 2 tabs
  * se ocultan para ese rol en vez de romper con permission-denied) + CSV
- * como opción de exportación junto a Excel. Reportes Guardados (Etapa 4)
- * queda como "🚧 Próximamente".
+ * como opción de exportación junto a Excel. Etapa 4 (parcial) — WhatsApp
+ * y PDF en Resumen General/Finanzas/Auditoría, Reportes Guardados (presets
+ * de filtro para Registros, vía `reportPresets`). Correo y optimización de
+ * bundle quedan pendientes (ver plan).
  *
  * Todo acá lee colecciones YA existentes (savedRecords, users,
  * electionStatus, callAssignments, electionDayControl, incidents,
@@ -17,6 +19,9 @@
  * paginación, nunca getAllRecords/getAllCandidateUsers sin acotar.
  */
 import { escapeHtml } from '../lib/escapeHtml.js'
+import { exportGenericToExcel } from '../lib/excel.js'
+import { exportGenericToPdf } from '../lib/pdf.js'
+import { shareTextViaWhatsApp } from '../lib/whatsapp.js'
 import {
   getSharedVotersCount,
   getCandidateCounts,
@@ -43,7 +48,7 @@ const TABS = [
   // coordinator vería el tab y se colgaría con permission-denied.
   { id: 'finanzas', label: '💰 Finanzas', ready: true, roles: ['campaign_admin', 'auditor'] },
   { id: 'auditoria', label: '⚠️ Auditoría', ready: true, roles: ['campaign_admin', 'auditor'] },
-  { id: 'guardados', label: '💾 Reportes Guardados', ready: false, etapa: 4 }
+  { id: 'guardados', label: '💾 Reportes Guardados', ready: true }
 ]
 
 const statCard = (label, value, color, key) => `
@@ -54,6 +59,7 @@ const statCard = (label, value, color, key) => `
 
 export async function renderReportesCandidate(container, candidateId, user, myRole, misRoles = []) {
   let tab = 'resumen-general'
+  let presetPendiente = null // seteado por "Abrir" en Reportes Guardados, consumido una vez por pintarTab
   // Tabs sin `roles` = visibles para cualquiera con acceso al módulo
   // (comportamiento de siempre); con `roles`, solo si myRole está en la
   // lista — hoy solo Finanzas/Auditoría lo usan (ver comentario en TABS).
@@ -100,8 +106,15 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
     }
     if (tab === 'registros') {
       body.innerHTML = 'Cargando...'
+      // Capturar y limpiar ANTES del import: si dos renders de este tab se
+      // superponen (doble click en "Abrir", o carga inicial del módulo
+      // lenta), el import (async) puede resolver en distinto orden entre
+      // invocaciones — leer presetPendiente después dejaría que la
+      // invocación más lenta pise el preset de la más rápida con null.
+      const preset = presetPendiente
+      presetPendiente = null
       const { renderReporteRegistros } = await import('./reportes-registros-candidate.js')
-      return renderReporteRegistros(body, candidateId, user, myRole, misRoles)
+      return renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset)
     }
     if (tab === 'equipo') {
       body.innerHTML = 'Cargando...'
@@ -143,6 +156,15 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       const { renderReporteAuditoria } = await import('./reportes-auditoria-candidate.js')
       return renderReporteAuditoria(body, candidateId, user, myRole, misRoles)
     }
+    if (tab === 'guardados') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteGuardados } = await import('./reportes-guardados-candidate.js')
+      return renderReporteGuardados(body, candidateId, user, myRole, misRoles, (preset) => {
+        presetPendiente = preset
+        tab = 'registros'
+        render()
+      })
+    }
   }
 
   // ── Resumen General — todo con count(), cero descarga de documentos ────
@@ -174,10 +196,37 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       // Evita una query not-in y reusa counts que ya se piden arriba.
       const pendientes = Math.max(0, counts.records - votaron - noIran)
 
+      const filas = [
+        { Indicador: 'Total votantes (padrón)', Valor: padron },
+        { Indicador: 'Comprometidos', Valor: counts.records },
+        { Indicador: 'Contactados', Valor: flags.contacted },
+        { Indicador: 'Confirmados para votar', Valor: flags.confirmedToVote },
+        { Indicador: 'Ya votaron', Valor: votaron },
+        { Indicador: 'Pendientes', Valor: pendientes },
+        { Indicador: 'Requieren transporte', Valor: flags.requiresPickup },
+        { Indicador: 'Precisan ayuda', Valor: flags.needsAssistance },
+        { Indicador: 'Choferes', Valor: counts.drivers },
+        { Indicador: 'Mesarios', Valor: mesariosTotal },
+        { Indicador: 'Dirigentes', Valor: dirigentesTotal },
+        { Indicador: 'Usuarios (total)', Valor: counts.users },
+        { Indicador: 'Incidencias abiertas', Valor: incidenciasAbiertas }
+      ]
+      const textoWhatsApp = `📊 *Resumen de campaña*\n\n` +
+        `Comprometidos: ${counts.records}\n` +
+        `Contactados: ${flags.contacted}\n` +
+        `Confirmados para votar: ${flags.confirmedToVote}\n` +
+        `Ya votaron: ${votaron}\n` +
+        `Pendientes: ${pendientes}`
+
       body.innerHTML = `
         <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 16px;">
           💡 "Comprometidos" = votantes guardados por tu equipo (no el padrón entero). "Usuarios/Mesarios/Dirigentes" muestran el total del rol, no un corte por "activo" (el dato de actividad no es confiable hoy en todas las cuentas).
         </p>
+        <div style="display:flex; justify-content:flex-end; gap:6px; margin-bottom:12px; flex-wrap:wrap;">
+          <button id="rg-btn-whatsapp" style="background:#25d366; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">📤 Compartir por WhatsApp</button>
+          <button id="rg-btn-excel" style="background:#455a64; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">⬇️ Excel</button>
+          <button id="rg-btn-pdf" style="background:#607d8b; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">⬇️ PDF</button>
+        </div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px;">
           ${statCard('Total votantes (padrón)', padron.toLocaleString('es-PY'), '#455a64')}
           ${statCard('Comprometidos', counts.records.toLocaleString('es-PY'), '#1976d2')}
@@ -194,6 +243,9 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
           ${statCard('Incidencias abiertas', incidenciasAbiertas, '#c62828')}
         </div>
       `
+      document.getElementById('rg-btn-whatsapp').addEventListener('click', () => shareTextViaWhatsApp(textoWhatsApp))
+      document.getElementById('rg-btn-excel').addEventListener('click', () => exportGenericToExcel(filas, `reporte_resumen_general_${candidateId}.xlsx`, 'Resumen General'))
+      document.getElementById('rg-btn-pdf').addEventListener('click', () => exportGenericToPdf(filas, `reporte_resumen_general_${candidateId}.pdf`, 'Resumen General'))
     } catch (err) {
       body.innerHTML = `<div style="color:#c62828; padding:20px;">Error cargando el resumen: ${escapeHtml(err.message)}</div>`
     }

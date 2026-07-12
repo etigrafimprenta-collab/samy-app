@@ -2791,3 +2791,22 @@ export async function deleteCandidateLogo(candidateId, currentLogoUrl) {
 
 export { LOGO_ALLOWED_TYPES, LOGO_MAX_SIZE, LOGO_RECOMMENDED_SIZE }
 export { collectionGroup }
+
+// ── Reportes Guardados (Etapa 4) — presets de filtro para Reportes >
+// Registros. Escala de "decenas guardadas a mano", mismo criterio ya
+// aceptado para getDrivers/getMesarios (lista sin filtro pero acotada).
+export async function createReportPreset(candidateId, { nombre, eje, valor, createdBy, createdByName }) {
+  return addDoc(collection(db, ...candidatePath(candidateId, 'reportPresets')), {
+    candidateId, nombre, eje, valor, createdBy, createdByName,
+    createdAt: serverTimestamp()
+  })
+}
+
+export async function listReportPresets(candidateId) {
+  const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'reportPresets')))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export async function deleteReportPreset(candidateId, id) {
+  return deleteDoc(doc(db, ...candidatePath(candidateId, 'reportPresets', id)))
+}
