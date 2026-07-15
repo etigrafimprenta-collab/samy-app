@@ -22,7 +22,23 @@ async function init() {
   root.innerHTML = '<div class="loader"><div class="spinner"></div> Cargando...</div>'
   onAuthChange(async (user) => {
     console.log('🚀 onAuthChange - user:', user?.email)
-    
+
+    // Un link de invitación (?invite=xxx) siempre gana, tenga o no el
+    // navegador una sesión activa — antes esto solo se chequeaba en el
+    // `else` de "sin usuario", así que si quien abría el link ya tenía
+    // OTRA cuenta logueada en ese navegador (típico: el propio admin
+    // probando el link recién generado, o un dispositivo compartido con
+    // una sesión vieja), entraba directo a esa sesión existente y la
+    // pantalla de "crear tu cuenta" nunca se mostraba — el link "abría"
+    // pero no pasaba nada. aceptarInvitacion()+loginUser() ya se ocupan
+    // de crear la cuenta nueva y cambiar la sesión a esa cuenta.
+    const inviteId = new URLSearchParams(window.location.search).get('invite')
+    if (inviteId) {
+      const { renderAcceptInvite } = await import('./pages/acceptInvite.js')
+      renderAcceptInvite(root, inviteId)
+      return
+    }
+
     if (user) {
       currentUser = user
 
@@ -70,12 +86,6 @@ async function init() {
       const { renderApp } = await import('./pages/app.js')
       renderApp(root, currentUser, currentProfile)
     } else {
-      const inviteId = new URLSearchParams(window.location.search).get('invite')
-      if (inviteId) {
-        const { renderAcceptInvite } = await import('./pages/acceptInvite.js')
-        renderAcceptInvite(root, inviteId)
-        return
-      }
       const { renderLogin } = await import('./pages/login.js')
       renderLogin(root, () => {})
     }

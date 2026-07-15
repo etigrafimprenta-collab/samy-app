@@ -334,9 +334,17 @@ service cloud.firestore {
           get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedLeaderId == request.auth.uid);
 
       // REGLA OBLIGATORIA 4: dirigente (y roles operativos) solo puede
-      // crear/editar/borrar SUS PROPIOS registros.
-      allow create: if hasCandidateRole(candidateId, ['dirigente', 'mesario', 'coordinator', 'campaign_admin']) &&
-        request.resource.data.uid == request.auth.uid;
+      // crear/editar/borrar SUS PROPIOS registros. Bug real encontrado en
+      // vivo: a diferencia de read/update/delete de este mismo match, a
+      // este create le faltaba isSuperAdmin() — un superadmin viendo un
+      // candidato (sin roster propio en ese candidateId, por diseño) no
+      // podía guardar un votante buscado, aunque sí podía leer/editar/
+      // borrar. request.resource.data.uid sigue siendo el uid real del
+      // superadmin (lo pone saveRecord() con user.uid), así que no hace
+      // falta relajar esa parte de la condición.
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'coordinator', 'campaign_admin']) &&
+          request.resource.data.uid == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||

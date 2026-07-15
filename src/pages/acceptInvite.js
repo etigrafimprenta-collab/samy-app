@@ -92,6 +92,14 @@ export async function renderAcceptInvite(root, inviteId) {
     try {
       const aceptarInvitacion = httpsCallable(functionsInstance, 'aceptarInvitacion')
       await aceptarInvitacion({ inviteId, nombre, email, password: pass })
+      // Sacar ?invite= de la URL ANTES de loguear: main.js ahora revisa
+      // ese param en cada onAuthChange (fix de la sesión-existente-bloquea-
+      // la-invitación) sin importar si hay usuario o no, así que si se
+      // deja el param puesto, el login que sigue dispara onAuthChange de
+      // nuevo, encuentra el mismo inviteId ya usado y muestra "invitación
+      // no válida" en vez de entrar al panel — justo después de crear la
+      // cuenta con éxito.
+      window.history.replaceState(null, '', window.location.pathname)
       await loginUser(email, pass)
       // onAuthChange (main.js) toma el control desde acá y entra al panel.
     } catch (err) {

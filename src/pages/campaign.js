@@ -1076,6 +1076,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         <p style="font-size:.82rem; color:#666; margin:0 0 12px;">Generá un link para que la persona cree su propia cuenta con el rol que elijas acá — no hace falta que le generes una contraseña vos. Vale por 7 días y un solo uso.</p>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <select id="sel-invite-role" style="flex:1; min-width:180px; padding:8px; border:1px solid #ccc; border-radius:4px;">
+            <option value="">-- Elegí un rol --</option>
             ${Object.entries(ROLE_LABELS).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
           </select>
           <button id="btn-generar-invitacion" style="padding:8px 16px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Generar link</button>
@@ -1088,6 +1089,15 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     document.getElementById('btn-generar-invitacion').addEventListener('click', async () => {
       const rol = document.getElementById('sel-invite-role').value
       const resultEl = document.getElementById('invitacion-resultado')
+      // Sin esto, el <select> podía quedar en lo que sea que haya elegido
+      // la última persona que generó un link en esta pestaña (o en el
+      // primer valor de la lista si nadie tocó nada) y se generaba una
+      // invitación con un rol distinto al que se pensaba elegir, sin
+      // ningún aviso — bug real reportado en vivo.
+      if (!rol) {
+        resultEl.innerHTML = `<div class="alert alert-error">❌ Elegí un rol antes de generar el link.</div>`
+        return
+      }
       resultEl.textContent = 'Generando...'
       try {
         const crearInvitacion = httpsCallable(functionsInstance, 'crearInvitacion')
