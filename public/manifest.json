@@ -1,7 +1,7 @@
 {
-  "name": "Electoral Samy Fidabel - Lista 6, Opción 1",
-  "short_name": "Samy Fidabel",
-  "description": "Herramienta de gestión de votantes para campaña municipal - Fernando de la Mora",
+  "name": "SIGEV - Sistema Integral de Gestión Electoral y Votaciones",
+  "short_name": "SIGEV",
+  "description": "Plataforma de gestión de campañas electorales y votantes",
   "icons": [
     {
       "src": "/icon-192.png",
