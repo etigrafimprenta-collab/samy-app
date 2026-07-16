@@ -5,7 +5,7 @@
 // cada candidato.
 import { logoutUser } from '../lib/firebase.js'
 import { listAllCandidates, setStoredActiveCandidateId } from '../lib/candidateContext.js'
-import { getCandidateCounts, getSharedVotersCount, importSharedVotersBatch, updateSharedVotersBatch, setPadronMeta } from '../lib/firebaseCandidate.js'
+import { getCandidateCounts, getSharedVotersCount, importSharedVotersBatch, updateSharedVotersBatch, setPadronMeta, findHeaderRowIndex } from '../lib/firebaseCandidate.js'
 import { MODULES } from '../lib/rbacCatalog.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { httpsCallable } from 'firebase/functions'
@@ -104,7 +104,23 @@ export async function renderSuperAdmin(root, user) {
       const XLSX = await import('xlsx')
       const buf = await file.arrayBuffer()
       const wb = XLSX.read(buf, { type: 'array' })
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
+      const sheet = wb.Sheets[wb.SheetNames[0]]
+
+      // Algunos padrones reales traen una fila de título antes de la fila
+      // de encabezados de verdad (ej. "PRE PADRON DPTO CENTRAL 2023.") —
+      // sheet_to_json siempre toma la fila 1 como encabezados, así que sin
+      // esto el título quedaba como si fuera el nombre de una columna y
+      // los encabezados reales (CEDULA, NOMBRE, etc.) quedaban leídos como
+      // datos, no como columnas. Se escanean las primeras filas del
+      // archivo (como array crudo, sin asumir headers) buscando en cuál
+      // aparece una columna de cédula reconocible, y se usa esa como fila
+      // de encabezados real.
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 })
+      const headerRowIndex = findHeaderRowIndex(rawRows)
+      if (headerRowIndex === -1) {
+        throw new Error('No se encontró una fila de encabezados con una columna de cédula reconocible entre las primeras filas del archivo. Revisá que el archivo tenga una columna llamada CEDULA, Cédula, CI o C.I.')
+      }
+      const rows = XLSX.utils.sheet_to_json(sheet, { range: headerRowIndex })
       msg.textContent = `Procesando ${rows.length} filas (modo: ${modo === 'actualizar' ? 'actualizar' : 'solo agregar'})...`
 
       if (modo === 'actualizar') {

@@ -235,6 +235,33 @@ function pick(normRow, ...aliases) {
 // exacto con ninguno de los dos formatos históricos.
 const CEDULA_ALIASES = ['CEDULA', 'Cédula', 'CI', 'C.I.', 'Nro Cedula', 'Numero de Cedula']
 
+// Bug real encontrado en vivo (segunda vuelta, después de arreglar el
+// matching de mayúsculas/tildes): un padrón de 106.498 filas seguía
+// fallando porque la fila 1 del Excel NO son los encabezados reales, es
+// una fila de título ("PRE PADRON DPTO CENTRAL 2023.", típico de
+// exportaciones oficiales) — sheet_to_json siempre toma la fila 1 como
+// encabezados, así que el título quedaba como si fuera el nombre de una
+// columna y la fila con CEDULA/NOMBRE/etc. de verdad quedaba como si
+// fuera la primera fila de DATOS, no de encabezados.
+//
+// `rawRows` = filas leídas como array de arrays (XLSX.utils.sheet_to_json
+// con { header: 1 }, sin asumir cuál fila es el encabezado). Devuelve el
+// índice de la primera fila (dentro de las primeras MAX_SCAN_ROWS) que
+// tenga alguna celda reconocible como columna de cédula, o -1 si ninguna
+// de las filas escaneadas califica.
+const MAX_HEADER_SCAN_ROWS = 15
+export function findHeaderRowIndex(rawRows) {
+  const limite = Math.min(rawRows.length, MAX_HEADER_SCAN_ROWS)
+  for (let i = 0; i < limite; i++) {
+    const fila = rawRows[i] || []
+    const tieneColumnaCedula = fila.some(celda => CEDULA_ALIASES.some(alias => normalizeHeader(celda) === normalizeHeader(alias)))
+    if (tieneColumnaCedula) return i
+  }
+  return -1
+}
+
+export { CEDULA_ALIASES }
+
 // Lee una fila del Excel del padrón — acepta 2 formatos a la vez:
 //   1) El formato real que usa la Justicia Electoral / el candidato hoy:
 //      CEDULA, TELEFONO, APELLIDO, NOMBRE, Local de Votacion, MESA, ORDEN,
