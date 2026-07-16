@@ -106,6 +106,32 @@ export async function renderSuperAdmin(root, user) {
       const wb = XLSX.read(buf, { type: 'array' })
       const sheet = wb.Sheets[wb.SheetNames[0]]
 
+      // Bug real encontrado en vivo: columnas como "Local de Votacion",
+      // "ORDEN" o "SECCIONAL" quedaban vacías para casi todas las filas
+      // salvo la primera de cada grupo — el archivo real tiene esas
+      // celdas COMBINADAS/FUSIONADAS (varios votantes seguidos del mismo
+      // local/sección comparten una sola celda que "abarca" sus filas). En
+      // Excel se ve como si cada fila tuviera el dato, pero por debajo
+      // solo la celda superior del grupo fusionado existe de verdad —
+      // sheet_to_json deja el resto sin esa clave, no como string vacío
+      // sino directamente ausente. Se "rellenan" todas las celdas
+      // fusionadas con el valor de su celda principal ANTES de leer las
+      // filas, para que cada fila lógica tenga su propio valor. No hace
+      // nada (`!merges` vacío) en archivos sin celdas fusionadas.
+      const merges = sheet['!merges'] || []
+      for (const rango of merges) {
+        const addrPrincipal = XLSX.utils.encode_cell({ r: rango.s.r, c: rango.s.c })
+        const celdaPrincipal = sheet[addrPrincipal]
+        if (!celdaPrincipal) continue
+        for (let r = rango.s.r; r <= rango.e.r; r++) {
+          for (let c = rango.s.c; c <= rango.e.c; c++) {
+            const addr = XLSX.utils.encode_cell({ r, c })
+            if (addr === addrPrincipal) continue
+            if (!sheet[addr]) sheet[addr] = { ...celdaPrincipal }
+          }
+        }
+      }
+
       // Algunos padrones reales traen una fila de título antes de la fila
       // de encabezados de verdad (ej. "PRE PADRON DPTO CENTRAL 2023.") —
       // sheet_to_json siempre toma la fila 1 como encabezados, así que sin
