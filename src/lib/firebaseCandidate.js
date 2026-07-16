@@ -127,19 +127,40 @@ export async function getVotersByMesa(seccional, mesa) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
+// Corre `worker(item)` sobre cada elemento de `items`, con hasta
+// `concurrency` invocaciones en simultáneo (pool de tamaño fijo, no todas
+// a la vez) — una carga de padrón de 100k+ filas hacía sus tandas de 400
+// filas una atrás de la otra (y, dentro de cada tanda, sus 14 consultas
+// de "¿esta cédula ya existe?" también una atrás de la otra), lo que la
+// hacía tardar 20-30+ minutos. Encontrado en vivo con una carga real de
+// 100.700 filas.
+async function runWithConcurrency(items, concurrency, worker) {
+  let next = 0
+  async function run() {
+    while (next < items.length) {
+      const i = next++
+      await worker(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run))
+}
+
 // Chequea existencia de cédulas en tandas de 30 (límite del operador "in")
 // en vez de descargar el padrón completo para armar un Set (auditoría IV,
 // getExistingCedulas). Devuelve el subconjunto de cédulas que YA existen.
+// Las tandas de 30 se consultan todas en simultáneo (antes: una por una)
+// — con 400 cédulas por lote eso es ~14 consultas en paralelo en vez de
+// en serie, el mayor cuello de botella de una carga grande.
 async function findExistingCedulasShared(cedulas) {
   const found = new Set()
-  const list = [...cedulas]
-  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) {
-    const chunk = list.slice(i, i + IN_CHUNK_SIZE)
-    if (chunk.length === 0) continue
+  const list = [...cedulas].filter(Boolean)
+  const chunks = []
+  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) chunks.push(list.slice(i, i + IN_CHUNK_SIZE))
+  await Promise.all(chunks.map(async (chunk) => {
     const q = query(collection(db, 'voters'), where('cedula', 'in', chunk))
     const snap = await getDocs(q)
     snap.docs.forEach(d => found.add(d.data().cedula))
-  }
+  }))
   return found
 }
 
@@ -148,14 +169,14 @@ async function findExistingCedulasShared(cedulas) {
 // valor nuevo debe pisar al viejo (ver updateSharedVotersBatch).
 async function findExistingVotersShared(cedulas) {
   const found = new Map()
-  const list = [...cedulas]
-  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) {
-    const chunk = list.slice(i, i + IN_CHUNK_SIZE)
-    if (chunk.length === 0) continue
+  const list = [...cedulas].filter(Boolean)
+  const chunks = []
+  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) chunks.push(list.slice(i, i + IN_CHUNK_SIZE))
+  await Promise.all(chunks.map(async (chunk) => {
     const q = query(collection(db, 'voters'), where('cedula', 'in', chunk))
     const snap = await getDocs(q)
     snap.docs.forEach(d => found.set(d.data().cedula, { id: d.id, data: d.data() }))
-  }
+  }))
   return found
 }
 
@@ -222,16 +243,46 @@ function parseVoterRow(row) {
 // botón de "importar padrón": todos ven y buscan sobre este mismo origen.
 export async function importSharedVotersBatch(rows, onProgress) {
   const BATCH_SIZE = 400
+  // Cuántas tandas de 400 filas se procesan en simultáneo — cada una hace
+  // su propio chequeo de duplicados + writeBatch, independiente de las
+  // demás (no comparten estado salvo `stats`, que se actualiza de forma
+  // síncrona así que no hay condición de carrera entre tandas).
+  const CONCURRENCY = 6
   const stats = { added: 0, duplicates: 0, errors: 0, total: rows.length, duplicateList: [] }
 
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const chunk = rows.slice(i, i + BATCH_SIZE)
-    const parsed = chunk.map(parseVoterRow)
-    const cedulasChunk = parsed.map(p => p.cedula)
+  // Deduplicar por cédula ANTES de repartir en tandas concurrentes: si la
+  // misma cédula aparece más de una vez en el archivo (pasa con padrones
+  // grandes reales) y las dos filas caen en tandas distintas que corren al
+  // mismo tiempo, ambas podrían chequear "¿existe?" a la vez, ver que no
+  // todavía, y crear DOS documentos para la misma persona — con las tandas
+  // en serie (como era antes) esto no pasaba porque una terminaba de
+  // escribir antes de que la siguiente empezara a chequear. Blancos
+  // (cédula vacía) no se tocan acá: no son "la misma persona repetida",
+  // se dejan pasar tal cual como ya hacía el código antes de este cambio.
+  const seen = new Set()
+  const parsed = []
+  for (const row of rows) {
+    const v = parseVoterRow(row)
+    if (v.cedula) {
+      if (seen.has(v.cedula)) {
+        stats.duplicates++
+        stats.duplicateList.push(v.cedula)
+        continue
+      }
+      seen.add(v.cedula)
+    }
+    parsed.push(v)
+  }
+
+  const chunks = []
+  for (let i = 0; i < parsed.length; i += BATCH_SIZE) chunks.push(parsed.slice(i, i + BATCH_SIZE))
+
+  await runWithConcurrency(chunks, CONCURRENCY, async (chunkParsed) => {
+    const cedulasChunk = chunkParsed.map(p => p.cedula)
     const existing = await findExistingCedulasShared(cedulasChunk)
 
     const batch = writeBatch(db)
-    parsed.forEach((v) => {
+    chunkParsed.forEach((v) => {
       if (existing.has(v.cedula)) {
         stats.duplicates++
         stats.duplicateList.push(v.cedula)
@@ -248,7 +299,7 @@ export async function importSharedVotersBatch(rows, onProgress) {
       stats.errors++
     }
     if (onProgress) onProgress(stats.added, stats.duplicates, stats.total)
-  }
+  })
   return stats
 }
 
@@ -262,17 +313,36 @@ export async function importSharedVotersBatch(rows, onProgress) {
 // huérfano si el archivo nuevo tiene menos filas por el motivo que sea.
 export async function updateSharedVotersBatch(rows, onProgress) {
   const BATCH_SIZE = 400
+  const CONCURRENCY = 6 // ver comentario en importSharedVotersBatch
   const stats = { added: 0, updated: 0, errors: 0, total: rows.length }
 
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const chunk = rows.slice(i, i + BATCH_SIZE)
-    const parsed = chunk.map(parseVoterRow)
-    const cedulasChunk = parsed.map(p => p.cedula)
+  // Mismo motivo que en importSharedVotersBatch: si la misma cédula
+  // aparece más de una vez en el archivo, se consolida en una sola fila
+  // ANTES de repartir en tandas concurrentes — si no, dos tandas corriendo
+  // al mismo tiempo podrían terminar pisándose los cambios entre sí sobre
+  // la misma persona. Acá, a diferencia del modo "solo agregar", las
+  // repeticiones se FUSIONAN (mergeVoterFields) en vez de descartarse: si
+  // una fila trae el teléfono y otra la dirección para la misma cédula,
+  // no se quiere perder ninguno de los dos datos. Filas sin cédula se
+  // descartan acá mismo (antes se descartaban más abajo, mismo resultado).
+  const byCedula = new Map()
+  for (const row of rows) {
+    const v = parseVoterRow(row)
+    if (!v.cedula) continue
+    const previo = byCedula.get(v.cedula)
+    byCedula.set(v.cedula, previo ? mergeVoterFields(v, previo) : v)
+  }
+  const parsed = [...byCedula.values()]
+
+  const chunks = []
+  for (let i = 0; i < parsed.length; i += BATCH_SIZE) chunks.push(parsed.slice(i, i + BATCH_SIZE))
+
+  await runWithConcurrency(chunks, CONCURRENCY, async (chunkParsed) => {
+    const cedulasChunk = chunkParsed.map(p => p.cedula)
     const existingVoters = await findExistingVotersShared(cedulasChunk)
 
     const batch = writeBatch(db)
-    parsed.forEach((v) => {
-      if (!v.cedula) return
+    chunkParsed.forEach((v) => {
       const match = existingVoters.get(v.cedula)
       if (match) {
         const merged = mergeVoterFields(v, match.data)
@@ -290,7 +360,7 @@ export async function updateSharedVotersBatch(rows, onProgress) {
       stats.errors++
     }
     if (onProgress) onProgress(stats.added + stats.updated, 0, stats.total)
-  }
+  })
   return stats
 }
 
