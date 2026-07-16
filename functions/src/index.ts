@@ -879,9 +879,11 @@ export const crearInvitacion = functions.https.onCall(
       createdByEmail: request.auth?.token.email || null,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
-      used: false,
-      usedBy: null,
-      usedAt: null,
+      // Multi-uso: el link sirve para cualquier cantidad de personas con
+      // este rol hasta que venza (ver validarInvitacion/aceptarInvitacion).
+      acceptedCount: 0,
+      lastUsedBy: null,
+      lastUsedAt: null,
     });
 
     await writeCandidateAuditLog(candidateId, {
@@ -909,7 +911,9 @@ export const validarInvitacion = functions.https.onCall(
     const snap = await admin.firestore().collection("invites").doc(inviteId).get();
     if (!snap.exists) return { valid: false, reason: "no_existe" };
     const invite = snap.data()!;
-    if (invite.used) return { valid: false, reason: "ya_usada" };
+    // Multi-uso: el link sirve para cualquier cantidad de personas con el
+    // mismo rol mientras no venza (7 días desde que se generó) -- antes
+    // era de un solo uso, se invalidaba apenas alguien creaba su cuenta.
     if (invite.expiresAt.toDate() < new Date()) return { valid: false, reason: "expirada" };
 
     const candidateSnap = await admin.firestore().collection("candidates").doc(invite.candidateId).get();
@@ -934,9 +938,6 @@ export const aceptarInvitacion = functions.https.onCall(
       throw new functions.https.HttpsError("not-found", "Invitación no encontrada");
     }
     const invite = inviteSnap.data()!;
-    if (invite.used) {
-      throw new functions.https.HttpsError("failed-precondition", "Esta invitación ya fue usada");
-    }
     if (invite.expiresAt.toDate() < new Date()) {
       throw new functions.https.HttpsError("failed-precondition", "Esta invitación expiró");
     }
@@ -971,10 +972,13 @@ export const aceptarInvitacion = functions.https.onCall(
       });
     await upsertUserCandidateIndex(userRecord.uid, invite.candidateId, invite.role);
 
+    // Multi-uso: ya no se marca `used:true` (eso invalidaba el link para
+    // todos los demás) -- solo se lleva la cuenta de cuántas veces se usó
+    // y quién fue la última persona, a fines informativos/auditoría.
     await inviteRef.update({
-      used: true,
-      usedBy: userRecord.uid,
-      usedAt: admin.firestore.FieldValue.serverTimestamp(),
+      acceptedCount: admin.firestore.FieldValue.increment(1),
+      lastUsedBy: userRecord.uid,
+      lastUsedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     await writeCandidateAuditLog(invite.candidateId, {

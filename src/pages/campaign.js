@@ -1073,7 +1073,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       </div>
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px; margin-bottom:16px;">
         <h2 style="margin:0 0 8px; font-size:1.05rem;">🔗 Invitar por link</h2>
-        <p style="font-size:.82rem; color:#666; margin:0 0 12px;">Generá un link para que la persona cree su propia cuenta con el rol que elijas acá — no hace falta que le generes una contraseña vos. Vale por 7 días y un solo uso.</p>
+        <p style="font-size:.82rem; color:#666; margin:0 0 12px;">Generá un link para que cualquiera que lo reciba cree su propia cuenta con el rol que elijas acá — no hace falta que le generes una contraseña vos. Sirve para varias personas (todas con ese mismo rol) durante 7 días.</p>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <select id="sel-invite-role" style="flex:1; min-width:180px; padding:8px; border:1px solid #ccc; border-radius:4px;">
             <option value="">-- Elegí un rol --</option>

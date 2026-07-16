@@ -25,9 +25,11 @@ export async function renderAcceptInvite(root, inviteId) {
   }
 
   if (!invite.valid) {
+    // El link es multi-uso (sirve para cualquier cantidad de personas con
+    // el mismo rol) -- "ya fue usado" ya no es un motivo posible, solo
+    // queda el vencimiento (7 días) o que directamente no exista.
     const motivos = {
       no_existe: 'Este link de invitación no existe.',
-      ya_usada: 'Este link de invitación ya fue usado.',
       expirada: 'Este link de invitación expiró.'
     }
     renderError(motivos[invite.reason] || 'Este link de invitación ya no es válido.')
