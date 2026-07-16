@@ -193,6 +193,48 @@ function mergeVoterFields(nuevo, viejo) {
   return out
 }
 
+// Quita tildes/diacríticos y homogeneiza mayúsculas/espacios de un
+// encabezado de columna — bug real encontrado en vivo: una carga de
+// 100.700 filas terminó "Listo. Agregados: 0 · Actualizados: 0 ·
+// Errores: 0" sin ningún aviso porque el archivo real traía la columna
+// de cédula con una mayúscula/tilde distinta a la que el código esperaba
+// EXACTO, así que ninguna fila encontraba su cédula y todo se descartaba
+// en silencio. Con esto, "Cedula", "cédula", "CÉDULA", "Cédula " (con
+// espacio) etc. calzan todas contra el mismo nombre de columna.
+function normalizeHeader(h) {
+  return String(h ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+}
+
+// Arma un lookup normalizado {ENCABEZADO_NORMALIZADO: valor} a partir de
+// una fila cruda del Excel (sheet_to_json), para no depender de la
+// mayúscula/tilde exacta de cada encabezado.
+function normalizeRowKeys(row) {
+  const out = {}
+  for (const key of Object.keys(row)) out[normalizeHeader(key)] = row[key]
+  return out
+}
+
+// Devuelve el primer valor no vacío entre los alias dados (ya
+// normalizados internamente) — reemplaza los `row['A'] ?? row['B']`
+// puntuales de antes, ahora insensible a mayúsculas/tildes/espacios.
+function pick(normRow, ...aliases) {
+  for (const alias of aliases) {
+    const v = normRow[normalizeHeader(alias)]
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v
+  }
+  return ''
+}
+
+// Alias aceptados por columna — además de los 2 formatos ya documentados
+// (Justicia Electoral / formato de ejemplo), se agregan variantes comunes
+// de cédula (CI, C.I.) que aparecen en archivos reales que no calzan
+// exacto con ninguno de los dos formatos históricos.
+const CEDULA_ALIASES = ['CEDULA', 'Cédula', 'CI', 'C.I.', 'Nro Cedula', 'Numero de Cedula']
+
 // Lee una fila del Excel del padrón — acepta 2 formatos a la vez:
 //   1) El formato real que usa la Justicia Electoral / el candidato hoy:
 //      CEDULA, TELEFONO, APELLIDO, NOMBRE, Local de Votacion, MESA, ORDEN,
@@ -202,39 +244,62 @@ function mergeVoterFields(nuevo, viejo) {
 //   2) El formato de ejemplo original (Cédula, Apellidos y Nombres,
 //      Dirección, Mesa, Orden, Seccional, F. Nacimiento, F. Afiliación) —
 //      se mantiene por compatibilidad, no se elimina.
+// El matching de encabezados es insensible a mayúsculas/tildes/espacios
+// (ver normalizeHeader) — el nombre de columna real puede diferir en
+// esos detalles sin que la fila se pierda.
 // `nombre` siempre queda como "APELLIDO NOMBRE" combinado (igual que
 // siempre) para no romper ninguna pantalla que ya lo lee así — los campos
 // nuevos (teléfono, sexo, partido2023, etc.) se agregan aparte.
 function parseVoterRow(row) {
-  const cedula = String(row['CEDULA'] ?? row['Cédula'] ?? '').replace('.0', '').trim()
-  const apellido = String(row['APELLIDO'] || '').trim()
-  const nombreSolo = String(row['NOMBRE'] || '').trim()
-  const nombre = String(row['Apellidos y Nombres'] || `${apellido} ${nombreSolo}`).trim()
+  const normRow = normalizeRowKeys(row)
+  const cedula = String(pick(normRow, ...CEDULA_ALIASES)).replace('.0', '').trim()
+  const apellido = String(pick(normRow, 'APELLIDO', 'Apellidos')).trim()
+  const nombreSolo = String(pick(normRow, 'NOMBRE', 'Nombres')).trim()
+  const nombre = String(pick(normRow, 'Apellidos y Nombres', 'Nombre completo') || `${apellido} ${nombreSolo}`).trim()
   return {
     cedula,
     nombre,
     nombre_upper: nombre.toUpperCase(),
     apellido,
     nombreSolo,
-    telefono: String(row['TELEFONO'] || '').trim(),
-    sexo: String(row['SEXO'] || '').trim(),
-    diaNacimiento: String(row['DIA'] || '').replace('.0', '').trim(),
-    mesNacimiento: String(row['MES'] || '').replace('.0', '').trim(),
-    edad: String(row['Edad'] || '').replace('.0', '').trim(),
-    direccion: String(row['DIRECCION'] || row['Dirección'] || '').trim(),
+    telefono: String(pick(normRow, 'TELEFONO', 'Celular')).trim(),
+    sexo: String(pick(normRow, 'SEXO', 'Genero')).trim(),
+    diaNacimiento: String(pick(normRow, 'DIA')).replace('.0', '').trim(),
+    mesNacimiento: String(pick(normRow, 'MES')).replace('.0', '').trim(),
+    edad: String(pick(normRow, 'Edad')).replace('.0', '').trim(),
+    direccion: String(pick(normRow, 'DIRECCION', 'Dirección')).trim(),
     // FEC_NAC trae la fecha de nacimiento completa (día/mes/año) — más
     // completa que DIA+MES solos, que no traen año. Se guarda en el mismo
     // campo que ya usaba el formato de ejemplo (F. Nacimiento).
-    nacimiento: String(row['FEC_NAC'] || row['F. Nacimiento'] || '').trim(),
-    afiliacion: String(row['F. Afiliación'] || '').trim(),
-    seccional: String(row['SECCIONAL'] ?? row['SECC'] ?? row['Seccional'] ?? '').replace('.0', '').trim(),
-    local: String(row['Local de Votacion'] || '').trim(),
-    mesa: String(row['MESA'] ?? row['Mesa'] ?? '').replace('.0', '').trim(),
-    orden: String(row['ORDEN'] ?? row['Orden'] ?? '').replace('.0', '').trim(),
+    nacimiento: String(pick(normRow, 'FEC_NAC', 'F. Nacimiento')).trim(),
+    afiliacion: String(pick(normRow, 'F. Afiliación')).trim(),
+    seccional: String(pick(normRow, 'SECCIONAL', 'SECC', 'Seccional')).replace('.0', '').trim(),
+    local: String(pick(normRow, 'Local de Votacion')).trim(),
+    mesa: String(pick(normRow, 'MESA', 'Mesa')).replace('.0', '').trim(),
+    orden: String(pick(normRow, 'ORDEN', 'Orden')).replace('.0', '').trim(),
     // partido2023 = afinidad política declarada en 2023, votoAnterior2021 =
     // si votó en 2021 — se guardan tal cual vienen en el Excel, sin normalizar.
-    partido2023: String(row['PARTIDO2023'] || '').trim(),
-    votoAnterior2021: String(row['G_2021'] || '').trim()
+    partido2023: String(pick(normRow, 'PARTIDO2023')).trim(),
+    votoAnterior2021: String(pick(normRow, 'G_2021')).trim()
+  }
+}
+
+// Chequeo defensivo antes de escribir nada: si NINGUNA fila trajo una
+// cédula reconocible, el archivo casi seguro tiene la columna de cédula
+// con un nombre que no está en CEDULA_ALIASES — cortar acá con un error
+// claro (mostrando los encabezados reales del archivo) en vez de
+// procesar igual y terminar en "Listo. Agregados: 0 · Errores: 0" sin
+// explicar por qué. Ver bug real de la nota en parseVoterRow.
+function assertCedulaColumnFound(rows, parsed) {
+  if (rows.length === 0) return
+  const conCedula = parsed.filter(p => p.cedula).length
+  if (conCedula === 0) {
+    const headers = rows[0] ? Object.keys(rows[0]) : []
+    throw new Error(
+      `No se encontró la columna de cédula en ninguna de las ${rows.length} filas del archivo. ` +
+      `Se esperaba alguna de estas columnas: ${CEDULA_ALIASES.join(', ')}. ` +
+      `Columnas encontradas en el archivo: ${headers.join(', ') || '(el archivo no tiene encabezados)'}.`
+    )
   }
 }
 
@@ -273,6 +338,7 @@ export async function importSharedVotersBatch(rows, onProgress) {
     }
     parsed.push(v)
   }
+  assertCedulaColumnFound(rows, parsed)
 
   const chunks = []
   for (let i = 0; i < parsed.length; i += BATCH_SIZE) chunks.push(parsed.slice(i, i + BATCH_SIZE))
@@ -333,6 +399,7 @@ export async function updateSharedVotersBatch(rows, onProgress) {
     byCedula.set(v.cedula, previo ? mergeVoterFields(v, previo) : v)
   }
   const parsed = [...byCedula.values()]
+  assertCedulaColumnFound(rows, parsed)
 
   const chunks = []
   for (let i = 0; i < parsed.length; i += BATCH_SIZE) chunks.push(parsed.slice(i, i + BATCH_SIZE))

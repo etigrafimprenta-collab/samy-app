@@ -95,26 +95,35 @@ export async function renderSuperAdmin(root, user) {
     if (!file) return
     const modo = document.querySelector('input[name="modo-padron"]:checked').value
     const msg = document.getElementById('import-padron-msg')
-    msg.textContent = 'Leyendo archivo...'
-    const XLSX = await import('xlsx')
-    const buf = await file.arrayBuffer()
-    const wb = XLSX.read(buf, { type: 'array' })
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
-    msg.textContent = `Procesando ${rows.length} filas (modo: ${modo === 'actualizar' ? 'actualizar' : 'solo agregar'})...`
+    // Sin try/catch acá, un error (ej. no reconocer la columna de cédula)
+    // dejaba la pantalla trabada en "Procesando..." para siempre, sin
+    // ningún aviso — bug real encontrado en vivo con una carga de 100.700
+    // filas que terminó en silencio con todo en cero.
+    try {
+      msg.textContent = 'Leyendo archivo...'
+      const XLSX = await import('xlsx')
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(buf, { type: 'array' })
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]])
+      msg.textContent = `Procesando ${rows.length} filas (modo: ${modo === 'actualizar' ? 'actualizar' : 'solo agregar'})...`
 
-    if (modo === 'actualizar') {
-      const stats = await updateSharedVotersBatch(rows, (hechos, _dup, total) => {
-        msg.textContent = `Procesando... ${hechos}/${total}`
-      })
-      msg.innerHTML = `✅ Listo. Agregados: ${stats.added} · Actualizados: ${stats.updated} · Errores: ${stats.errors}`
-    } else {
-      const stats = await importSharedVotersBatch(rows, (added, dup, total) => {
-        msg.textContent = `Importando... ${added + dup}/${total} (agregados: ${added}, duplicados: ${dup})`
-      })
-      msg.innerHTML = `✅ Listo. Agregados: ${stats.added} · Duplicados (sin tocar): ${stats.duplicates} · Errores: ${stats.errors}`
+      if (modo === 'actualizar') {
+        const stats = await updateSharedVotersBatch(rows, (hechos, _dup, total) => {
+          msg.textContent = `Procesando... ${hechos}/${total}`
+        })
+        msg.innerHTML = `✅ Listo. Agregados: ${stats.added} · Actualizados: ${stats.updated} · Errores: ${stats.errors}`
+      } else {
+        const stats = await importSharedVotersBatch(rows, (added, dup, total) => {
+          msg.textContent = `Importando... ${added + dup}/${total} (agregados: ${added}, duplicados: ${dup})`
+        })
+        msg.innerHTML = `✅ Listo. Agregados: ${stats.added} · Duplicados (sin tocar): ${stats.duplicates} · Errores: ${stats.errors}`
+      }
+      await setPadronMeta(file.name, user.uid).catch(() => {})
+    } catch (err) {
+      msg.innerHTML = `<div class="alert alert-error">❌ ${escapeHtml(err.message)}</div>`
+    } finally {
+      e.target.value = ''
     }
-    await setPadronMeta(file.name, user.uid).catch(() => {})
-    e.target.value = ''
   })
 
   const listEl = document.getElementById('candidatos-list')
