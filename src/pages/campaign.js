@@ -581,19 +581,29 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         resultEl.innerHTML = '<div style="color:#999;">Sin resultados.</div>'
         return
       }
+      // Antes solo mostraba Nombre/Cédula/Local/Mesa (bug real: hacía
+      // parecer que un votante "solo tenía nombre y cédula" cuando en
+      // realidad sí tenía teléfono/sexo/dirección/etc. guardados, pero la
+      // tabla nunca los mostraba). Ahora muestra todos los campos del
+      // padrón en tarjetas (mismo patrón .roster-card que el resto de la
+      // app usa para listas en mobile).
       resultEl.innerHTML = `
-        <table style="width:100%; border-collapse:collapse;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Local</th><th>Mesa</th>${puedeGuardar ? '<th></th>' : ''}</tr></thead>
-          <tbody>
-            ${ultimosResultados.map((v, idx) => `<tr style="border-bottom:1px solid #eee;">
-              <td style="padding:6px;">${escapeHtml(v.nombre)}</td>
-              <td>${escapeHtml(v.cedula)}</td>
-              <td>${escapeHtml(v.local)}</td>
-              <td>${escapeHtml(v.mesa)}</td>
-              ${puedeGuardar ? `<td><button class="btn-guardar-votante" data-idx="${idx}" style="background:#4caf50; color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">💾 Guardar</button></td>` : ''}
-            </tr>`).join('')}
-          </tbody>
-        </table>
+        <div class="roster-card-grid">
+          ${ultimosResultados.map((v, idx) => `
+            <div class="roster-card">
+              <div class="roster-card-name">${escapeHtml(v.nombre)}</div>
+              <div class="roster-card-fields">
+                <div class="roster-card-field"><strong>Cédula:</strong> ${escapeHtml(v.cedula)}</div>
+                <div class="roster-card-field"><strong>Teléfono:</strong> ${escapeHtml(v.telefono) || '—'}</div>
+                <div class="roster-card-field"><strong>Local:</strong> ${escapeHtml(v.local) || '—'}</div>
+                <div class="roster-card-field"><strong>Mesa:</strong> ${escapeHtml(v.mesa) || '—'} <strong>Orden:</strong> ${escapeHtml(v.orden) || '—'}</div>
+                <div class="roster-card-field"><strong>Seccional:</strong> ${escapeHtml(v.seccional) || '—'}</div>
+                <div class="roster-card-field"><strong>Dirección:</strong> ${escapeHtml(v.direccion) || '—'}</div>
+              </div>
+              ${puedeGuardar ? `<div class="roster-card-actions"><button class="btn-guardar-votante btn-compact" data-idx="${idx}" style="background:#4caf50; color:white;">💾 Guardar</button></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
       `
       if (puedeGuardar) {
         resultEl.querySelectorAll('.btn-guardar-votante').forEach(btn => {
