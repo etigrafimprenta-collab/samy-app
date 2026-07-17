@@ -64,6 +64,24 @@ service cloud.firestore {
     match /voters/{voterId} {
       allow read: if isAuth();
       allow write: if isAdmin() || isSuperAdmin();
+
+      // Mejora de privacidad (telefono deja de vivir en el doc principal):
+      // firestore.rules no puede ocultar UN campo dentro de un documento
+      // permitido — solo el documento entero. Por eso el teléfono se separó
+      // a esta subcolección, con su propia regla, mucho más restrictiva que
+      // la de arriba. Lectura directa (cliente) solo para superadmin;
+      // cualquier otro rol obtiene el teléfono (cuando corresponde, según
+      // dueño/asignación) únicamente a través de la Cloud Function
+      // `buscarTelefonosPadron`, que usa Admin SDK y por lo tanto no pasa
+      // por esta regla. Escritura: mismo criterio que el doc principal de
+      // voters (isAdmin()/isSuperAdmin() — el import/actualización del
+      // padrón desde Superadmin escribe el teléfono acá directo, client-
+      // side); `actualizarTelefonoVotante` (Cloud Function) también escribe
+      // acá, pero con Admin SDK, que bypassa esta regla igual.
+      match /private/{docId} {
+        allow read: if isSuperAdmin();
+        allow write: if isAdmin() || isSuperAdmin();
+      }
     }
 
     // ── Saved Records ─────────────────────────────────────

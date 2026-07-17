@@ -820,18 +820,30 @@ export const actualizarTelefonoVotante = functions.https.onCall(
       return { success: true, updated: false };
     }
 
+    // El teléfono vive en una subcolección privada (voters/{id}/private/data),
+    // NUNCA en el doc principal de voters — ese doc es de lectura abierta a
+    // cualquier autenticado (isAuth()) y firestore.rules no puede ocultar un
+    // campo dentro de un documento permitido, solo el documento entero. Ver
+    // reglas de /voters/{voterId}/private/{docId}: solo superadmin lee ahí
+    // directo; cualquier otro acceso pasa por buscarTelefonosPadron, que
+    // resuelve la excepción de dueño/asignado antes de exponerlo.
     const voterDoc = snap.docs[0];
-    const telefonoAnterior = voterDoc.data()?.telefono || "";
+    const privateRef = voterDoc.ref.collection("private").doc("data");
+    const privateSnap = await privateRef.get();
+    const telefonoAnterior = privateSnap.data()?.telefono || "";
     if (telefonoAnterior === String(telefono)) {
       return { success: true, updated: false };
     }
 
-    await voterDoc.ref.update({
-      telefono: String(telefono),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastPhoneUpdateBy: callerUid,
-      lastPhoneUpdateCandidateId: candidateId,
-    });
+    await privateRef.set(
+      {
+        telefono: String(telefono),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastPhoneUpdateBy: callerUid,
+        lastPhoneUpdateCandidateId: candidateId,
+      },
+      { merge: true }
+    );
 
     await writeCandidateAuditLog(candidateId, {
       actorUid: callerUid,
@@ -844,6 +856,148 @@ export const actualizarTelefonoVotante = functions.https.onCall(
     });
 
     return { success: true, updated: true };
+  }
+);
+
+// Roles que pueden usar la pestaña "Buscar votante" (ver TAB_ROLES.votantes
+// en campaign.js) — la única lista que importa acá, porque operador/chofer
+// ni siquiera ven esa pestaña.
+const VOTER_SEARCH_ROLES = ["campaign_admin", "coordinator", "dirigente", "mesario"];
+
+// Determina si el caller puede ver el teléfono de un savedRecords puntual,
+// replicando EXACTAMENTE el mismo criterio que ya usa firestore.rules para
+// `allow read` de /candidates/{candidateId}/savedRecords/{recordId} (sección
+// "Mantener las reglas actuales de acceso según roles y propiedad") — nunca
+// se relaja ni se endurece ese criterio acá, solo se reusa para decidir si
+// el teléfono entra en la respuesta de búsqueda del padrón compartido.
+async function callerCanSeeSavedRecordPhone(
+  candidateId: string,
+  callerUid: string,
+  role: string,
+  savedRecordDoc: FirebaseFirestore.QueryDocumentSnapshot
+): Promise<boolean> {
+  if (role === "campaign_admin" || role === "coordinator") return true;
+
+  const data = savedRecordDoc.data();
+  if (data?.uid === callerUid) return true;
+
+  if (role === "dirigente" || role === "mesario") {
+    const edcSnap = await admin
+      .firestore()
+      .collection("candidates")
+      .doc(candidateId)
+      .collection("electionDayControl")
+      .doc(savedRecordDoc.id)
+      .get();
+    if (!edcSnap.exists) return false;
+    const edcData = edcSnap.data();
+    if (role === "dirigente" && edcData?.assignedLeaderId === callerUid) return true;
+    if (role === "mesario" && edcData?.assignedTableUserId === callerUid) return true;
+  }
+
+  return false;
+}
+
+// Única fuente autorizada de teléfonos para la búsqueda de "Buscar votante"
+// (campaign.js::renderVotantes). Nunca se devuelve el teléfono del padrón
+// compartido salvo a superadmin — para cualquier otro rol, el teléfono
+// devuelto es siempre el de SU PROPIO savedRecords (o el de un registro
+// formalmente asignado a su gestión), nunca el que pudo cargar el dirigente
+// de OTRO candidato sobre la misma cédula. Objetivo (pedido de privacidad):
+// evitar que el padrón compartido se convierta en guía telefónica cruzando
+// candidatos.
+export const buscarTelefonosPadron = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cedulas } = request.data ?? {};
+    if (!candidateId || !Array.isArray(cedulas) || cedulas.length === 0) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "Faltan candidateId o cedulas"
+      );
+    }
+    if (cedulas.length > 50) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "Máximo 50 cédulas por consulta"
+      );
+    }
+    if (!request.auth) {
+      throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
+    }
+
+    const callerUid = request.auth.uid;
+    const platformDoc = await admin
+      .firestore()
+      .collection("platformUsers")
+      .doc(callerUid)
+      .get();
+    const isSuperAdmin = platformDoc.data()?.globalRole === "superadmin";
+
+    let role: string | null = null;
+    if (!isSuperAdmin) {
+      const memberDoc = await admin
+        .firestore()
+        .collection("candidates")
+        .doc(candidateId)
+        .collection("users")
+        .doc(callerUid)
+        .get();
+      role = memberDoc.exists ? memberDoc.data()?.role ?? null : null;
+      if (!role || !VOTER_SEARCH_ROLES.includes(role)) {
+        throw new functions.https.HttpsError(
+          "permission-denied",
+          "No tenés permiso para buscar en el padrón de este candidato"
+        );
+      }
+    }
+
+    const uniqueCedulas = [...new Set(cedulas.map((c: any) => String(c)))];
+    const telefonos: Record<string, string | null> = {};
+
+    await Promise.all(
+      uniqueCedulas.map(async (cedula) => {
+        telefonos[cedula] = null;
+
+        if (isSuperAdmin) {
+          const votersSnap = await admin
+            .firestore()
+            .collection("voters")
+            .where("cedula", "==", cedula)
+            .limit(1)
+            .get();
+          if (votersSnap.empty) return;
+          const privateSnap = await votersSnap.docs[0].ref
+            .collection("private")
+            .doc("data")
+            .get();
+          telefonos[cedula] = privateSnap.data()?.telefono || null;
+          return;
+        }
+
+        const savedSnap = await admin
+          .firestore()
+          .collection("candidates")
+          .doc(candidateId)
+          .collection("savedRecords")
+          .where("cedula", "==", cedula)
+          .limit(1)
+          .get();
+        if (savedSnap.empty) return;
+
+        const savedDoc = savedSnap.docs[0];
+        const puedeVer = await callerCanSeeSavedRecordPhone(
+          candidateId,
+          callerUid,
+          role as string,
+          savedDoc
+        );
+        if (puedeVer) {
+          telefonos[cedula] = savedDoc.data()?.telefono || null;
+        }
+      })
+    );
+
+    return { telefonos };
   }
 );
 

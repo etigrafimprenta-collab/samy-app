@@ -574,12 +574,23 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       const resultEl = document.getElementById('resultado-votantes')
       if (!termino) return
       resultEl.textContent = 'Buscando...'
-      const { searchVoterByCedula, searchVotersByName } = await import('../lib/firebaseCandidate.js')
+      const { searchVoterByCedula, searchVotersByName, getTelefonosPadron } = await import('../lib/firebaseCandidate.js')
       const esCedula = /^\d+$/.test(termino)
       ultimosResultados = esCedula ? await searchVoterByCedula(termino) : await searchVotersByName(termino)
       if (ultimosResultados.length === 0) {
         resultEl.innerHTML = '<div style="color:#999;">Sin resultados.</div>'
         return
+      }
+      // El teléfono del padrón compartido ya no viaja en el doc de voters
+      // (privacidad: ver getTelefonosPadron) — se pide aparte, y el backend
+      // solo lo entrega si el votante es propio/asignado del usuario o si
+      // es superadmin. Si no corresponde mostrarlo, telefono queda ''.
+      try {
+        const telefonos = await getTelefonosPadron(candidateId, ultimosResultados.map(v => v.cedula))
+        ultimosResultados.forEach(v => { v.telefono = telefonos[v.cedula] || '' })
+      } catch (err) {
+        console.warn('No se pudieron resolver los teléfonos del padrón:', err.message)
+        ultimosResultados.forEach(v => { v.telefono = '' })
       }
       // Antes solo mostraba Nombre/Cédula/Local/Mesa (bug real: hacía
       // parecer que un votante "solo tenía nombre y cédula" cuando en

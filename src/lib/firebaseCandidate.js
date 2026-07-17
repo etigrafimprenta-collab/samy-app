@@ -113,6 +113,22 @@ export async function searchVotersByName(termino) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
+// El teléfono del padrón compartido NO viene en los docs de arriba (mejora
+// de privacidad: vive en una subcolección que solo superadmin puede leer
+// directo). Esta función pide, para un lote de cédulas encontradas en la
+// búsqueda, cuáles teléfonos le corresponde ver al usuario actual — la
+// Cloud Function decide caso por caso (dueño de su propio savedRecords,
+// asignado formalmente, o superadmin) para no filtrar el teléfono cargado
+// por el dirigente de OTRO candidato sobre la misma cédula. Devuelve un
+// mapa { cedula: telefono|null }, nunca lanza si simplemente no hay nada
+// que mostrar (null es una respuesta válida, no un error).
+export async function getTelefonosPadron(candidateId, cedulas) {
+  if (!cedulas || cedulas.length === 0) return {}
+  const fn = httpsCallable(functionsInstance, 'buscarTelefonosPadron')
+  const result = await fn({ candidateId, cedulas })
+  return result.data?.telefonos || {}
+}
+
 // Reemplaza al viejo patrón de "traer todo voters y filtrar en el cliente"
 // (auditoría IV.1) — esta es la única forma correcta de traer los
 // votantes de una mesa.
@@ -167,6 +183,14 @@ async function findExistingCedulasShared(cedulas) {
 // Igual que findExistingCedulasShared pero devuelve cédula -> {id, data},
 // para poder actualizar el doc correcto Y decidir campo por campo si el
 // valor nuevo debe pisar al viejo (ver updateSharedVotersBatch).
+//
+// El teléfono ya NO vive en el doc principal (privacidad — ver
+// firestore.rules /voters/{id}/private/data), así que se trae aparte de la
+// subcolección privada y se inyecta en `data.telefono` para que
+// mergeVoterFields siga funcionando sin enterarse del cambio. Solo
+// superadmin llega a esta función (ver importSharedVotersBatch/
+// updateSharedVotersBatch), así que esa lectura extra está permitida por
+// la regla de /private.
 async function findExistingVotersShared(cedulas) {
   const found = new Map()
   const list = [...cedulas].filter(Boolean)
@@ -175,7 +199,13 @@ async function findExistingVotersShared(cedulas) {
   await Promise.all(chunks.map(async (chunk) => {
     const q = query(collection(db, 'voters'), where('cedula', 'in', chunk))
     const snap = await getDocs(q)
-    snap.docs.forEach(d => found.set(d.data().cedula, { id: d.id, data: d.data() }))
+    await Promise.all(snap.docs.map(async (d) => {
+      const privateSnap = await getDoc(doc(db, 'voters', d.id, 'private', 'data'))
+      found.set(d.data().cedula, {
+        id: d.id,
+        data: { ...d.data(), telefono: privateSnap.exists() ? (privateSnap.data().telefono || '') : '' }
+      })
+    }))
   }))
   return found
 }
@@ -381,8 +411,13 @@ export async function importSharedVotersBatch(rows, onProgress) {
         stats.duplicateList.push(v.cedula)
         return
       }
+      // telefono NUNCA va al doc principal (privacidad — ver
+      // firestore.rules /voters/{id}/private/data): ese doc es de lectura
+      // abierta a cualquier autenticado, el teléfono va aparte.
+      const { telefono, ...vSinTelefono } = v
       const ref = doc(collection(db, 'voters'))
-      batch.set(ref, { ...v, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+      batch.set(ref, { ...vSinTelefono, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+      if (telefono) batch.set(doc(db, 'voters', ref.id, 'private', 'data'), { telefono })
       stats.added++
     })
 
@@ -439,11 +474,20 @@ export async function updateSharedVotersBatch(rows, onProgress) {
     chunkParsed.forEach((v) => {
       const match = existingVoters.get(v.cedula)
       if (match) {
+        // match.data.telefono ya viene resuelto desde la subcolección
+        // privada (ver findExistingVotersShared) — mergeVoterFields decide
+        // si el archivo nuevo lo pisa o se conserva el que ya había, sin
+        // enterarse de dónde vive cada uno.
         const merged = mergeVoterFields(v, match.data)
-        batch.set(doc(db, 'voters', match.id), { ...merged, updatedAt: serverTimestamp() }, { merge: true })
+        const { telefono: telefonoMerged, ...mergedSinTelefono } = merged
+        batch.set(doc(db, 'voters', match.id), { ...mergedSinTelefono, updatedAt: serverTimestamp() }, { merge: true })
+        if (telefonoMerged) batch.set(doc(db, 'voters', match.id, 'private', 'data'), { telefono: telefonoMerged }, { merge: true })
         stats.updated++
       } else {
-        batch.set(doc(collection(db, 'voters')), { ...v, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+        const { telefono, ...vSinTelefono } = v
+        const ref = doc(collection(db, 'voters'))
+        batch.set(ref, { ...vSinTelefono, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+        if (telefono) batch.set(doc(db, 'voters', ref.id, 'private', 'data'), { telefono })
         stats.added++
       }
     })
