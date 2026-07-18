@@ -11,6 +11,7 @@ import {
 import { httpsCallable } from 'firebase/functions'
 import { db, functionsInstance } from './firebase.js'
 import { PERMISSIONS, SYSTEM_ROLE_NAMES } from './rbacCatalog.js'
+import { getGrantedScopes } from './rbac.js'
 
 function candidatePath(candidateId, ...rest) {
   return ['candidates', candidateId, ...rest]
@@ -57,6 +58,10 @@ export async function updateRolePermissions(candidateId, roleId, permissions, ac
     previousData: before.exists() ? before.data().permissions : null,
     newData: permissions, performedBy: actorUid
   })
+  // Todo usuario que ya tenga este rol asignado necesita su
+  // effectivePermissionKeys recalculado con los permisos nuevos — si no,
+  // firestore.rules seguiría validando contra el mapa viejo.
+  await recomputeEffectivePermissionsForUsersWithRole(candidateId, roleId)
 }
 
 export async function duplicateRole(candidateId, roleId, actorUid) {
@@ -84,6 +89,10 @@ export async function setRoleActive(candidateId, roleId, isActive, actorUid) {
     action: isActive ? 'role_enabled' : 'role_disabled', roleId, targetUserId: null,
     previousData: { isActive: !isActive }, newData: { isActive }, performedBy: actorUid
   })
+  // getGrantedScopes ya filtra roles con isActive!==false, así que
+  // desactivar un rol le quita sus permisos de effectivePermissionKeys a
+  // todos los que lo tenían — igual que ya hace con el menú (can()).
+  await recomputeEffectivePermissionsForUsersWithRole(candidateId, roleId)
 }
 
 export async function logRoleAudit(candidateId, { action, roleId, targetUserId, previousData, newData, performedBy, performedByRole = '', reason = '' }) {
@@ -245,17 +254,63 @@ export async function seedSystemRoles(candidateId, actorUid) {
 
 export { buildSystemRolePermissions }
 
+// ── Fuente única de permisos efectivos (auditoría RBAC) ──────────────
+// Reusa getGrantedScopes (rbac.js) — la MISMA función que ya usa el menú
+// (can()) — para no duplicar la lógica de acumulación/denegación de
+// permisos entre roles en un segundo lugar.
+//
+// Solo se denormalizan acá los permisos de alcance AMPLIO (all_candidate/
+// all_platform): son los únicos que Firestore Rules puede validar de forma
+// genérica para cualquier rol (incluido uno personalizado), porque no
+// dependen de resource.data de cada doc — ver hasEffectivePermission() en
+// firestore.rules. Un alcance angosto (own/assigned/team/zone/table)
+// necesita conocer el recurso puntual para decidir, y una regla no puede
+// probar eso para una query list()/count() sin filtro (mismo problema ya
+// documentado en PROJECT_CONTEXT_MASTER.md §4) — esos permisos siguen
+// siendo "solo menú" hasta que se resuelvan vía Cloud Function específica
+// por módulo (fuera de alcance de esta etapa).
+export function computeEffectivePermissionKeys(roleDocs) {
+  return PERMISSIONS
+    .map(p => p.key)
+    .filter(key => {
+      const scopes = getGrantedScopes(roleDocs, key)
+      return scopes.includes('all_candidate') || scopes.includes('all_platform')
+    })
+}
+
+// Cuando cambian los permisos de UN rol (o se activa/desactiva), hay que
+// recalcular effectivePermissionKeys de TODOS los usuarios que lo tengan
+// en su roleIds — si no, un usuario que ya tenía ese rol asignado seguiría
+// con los permisos viejos denormalizados hasta la próxima vez que alguien
+// le reasigne roles a mano.
+async function recomputeEffectivePermissionsForUsersWithRole(candidateId, roleId) {
+  const usersRef = collection(db, ...candidatePath(candidateId, 'users'))
+  const snap = await getDocs(query(usersRef, where('roleIds', 'array-contains', roleId)))
+  if (snap.empty) return
+  const todosLosRoles = await getRoles(candidateId)
+  await Promise.all(snap.docs.map(async (userDoc) => {
+    const roleIdsUsuario = userDoc.data().roleIds || []
+    const misRoleDocs = todosLosRoles.filter(r => roleIdsUsuario.includes(r.id))
+    await updateDoc(userDoc.ref, {
+      effectivePermissionKeys: computeEffectivePermissionKeys(misRoleDocs),
+      updatedAt: serverTimestamp()
+    })
+  }))
+}
+
 // ── Asignación de roles a usuarios (Etapa 5) ─────────────────────────
-// El campo legacy `users.role` (string) sigue siendo lo único que el
-// menú/reglas viejas leen hoy. Esta función agrega roleIds/primaryRoleId/
-// alcance como campos NUEVOS y ADITIVOS — y si el rol principal elegido
-// es un rol de sistema (tiene legacyRoleKey), sincroniza `role` llamando
-// a la Cloud Function de siempre (cambiarRolUsuarioCandidato), que ya
-// valida auto-elevación y deja auditoría en auditLogs. Si el rol
-// principal es personalizado, NO hay forma de sincronizar `role` — se
-// devuelve una advertencia explícita en vez de fallar en silencio, para
-// que quien lo usa sepa que ese usuario no va a ver nada nuevo en el
-// menú hasta que el menú mismo se migre (próxima etapa).
+// El campo legacy `users.role` (string) sigue siendo lo que el
+// menú/reglas viejas leen para roles de SISTEMA. Esta función agrega
+// roleIds/primaryRoleId/alcance/effectivePermissionKeys como campos
+// NUEVOS y ADITIVOS — y si el rol principal elegido es un rol de sistema
+// (tiene legacyRoleKey), sincroniza `role` llamando a la Cloud Function de
+// siempre (cambiarRolUsuarioCandidato), que ya valida auto-elevación y
+// deja auditoría en auditLogs. Si el rol principal es personalizado, NO
+// hay forma de sincronizar `role` — se devuelve una advertencia explícita
+// en vez de fallar en silencio, para que quien lo usa sepa que ese
+// usuario solo va a tener enforcement real en Firestore para los permisos
+// de alcance amplio (all_candidate/all_platform) de ese rol — los de
+// alcance angosto siguen siendo solo menú (ver computeEffectivePermissionKeys).
 export async function assignUserRoles(candidateId, targetUid, data, actorUid, actorRole) {
   if (targetUid === actorUid) {
     throw new Error('No podés asignarte roles a vos mismo — pedile a otro administrador que lo haga.')
@@ -269,6 +324,8 @@ export async function assignUserRoles(candidateId, targetUid, data, actorUid, ac
 
   const rolesDisponibles = await getRoles(candidateId)
   const rolPrincipal = rolesDisponibles.find(r => r.id === primaryRoleId)
+  const misRoleDocs = rolesDisponibles.filter(r => roleIds.includes(r.id))
+  const effectivePermissionKeys = computeEffectivePermissionKeys(misRoleDocs)
 
   let legacySincronizado = false
   if (rolPrincipal?.legacyRoleKey && rolPrincipal.legacyRoleKey !== beforeData.role) {
@@ -279,20 +336,29 @@ export async function assignUserRoles(candidateId, targetUid, data, actorUid, ac
 
   await updateDoc(targetRef, {
     roleIds, primaryRoleId, zoneIds, pollingPlaceIds, tableIds, leaderId, teamId,
+    effectivePermissionKeys,
     updatedAt: serverTimestamp()
   })
 
   await logRoleAudit(candidateId, {
     action: 'user_role_assigned', roleId: primaryRoleId, targetUserId: targetUid,
     previousData: { roleIds: beforeData.roleIds || null, primaryRoleId: beforeData.primaryRoleId || null },
-    newData: { roleIds, primaryRoleId, zoneIds, pollingPlaceIds, tableIds, leaderId, teamId },
+    newData: { roleIds, primaryRoleId, zoneIds, pollingPlaceIds, tableIds, leaderId, teamId, effectivePermissionKeys },
     performedBy: actorUid, performedByRole: actorRole
   })
+
+  const tienePermisoAlcanceAngosto = misRoleDocs.some(r =>
+    Object.entries(r.permissions || {}).some(([, entry]) =>
+      entry?.allowed && entry.scope && !['all_candidate', 'all_platform'].includes(entry.scope)
+    )
+  )
 
   return {
     legacySincronizado,
     advertencia: !rolPrincipal?.legacyRoleKey
-      ? 'El rol principal es personalizado — el menú actual (que todavía depende del campo "role" viejo) no va a reflejar este cambio hasta que se migre el menú a permisos dinámicos.'
-      : null
+      ? 'El rol principal es personalizado — Firestore ya valida de verdad los permisos de este rol con alcance "todo el candidato"/"toda la plataforma", pero los de alcance más acotado (propios/asignados/equipo/zona/mesa) todavía son solo de menú: la pestaña puede aparecer pero quedarse sin datos hasta que ese módulo se migre a una Cloud Function dedicada.'
+      : (tienePermisoAlcanceAngosto
+        ? 'Uno de los roles asignados tiene permisos de alcance acotado (propios/asignados/equipo/zona/mesa) — esos todavía no tienen enforcement real en Firestore para roles personalizados; solo los de alcance "todo el candidato"/"toda la plataforma" ya funcionan de punta a punta.'
+        : null)
   }
 }

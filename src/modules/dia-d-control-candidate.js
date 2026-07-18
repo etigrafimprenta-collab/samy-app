@@ -102,10 +102,21 @@ function headerHtml(subtitle) {
   `
 }
 
-export async function renderDiaDControlCandidate(container, candidateId, user, myRole) {
-  if (myRole === 'chofer') return renderChoferView(container, candidateId, user)
-  if (myRole === 'dirigente') return renderDirigenteView(container, candidateId, user)
-  if (myRole === 'mesario') return renderMesarioView(container, candidateId, user)
+// Auditoría RBAC: antes solo miraba `myRole` (legacy) para elegir la vista
+// operativa — un usuario con un rol de sistema ADICIONAL asignado por
+// roleIds (ej. alguien con myRole='viewer' que además tiene "dirigente"
+// sumado) ya veía esta pestaña (el menú usa can()), pero caía siempre acá
+// a renderAdminView, que en firestore.rules exige campaign_admin/
+// coordinator — pantalla colgada en vez de su vista operativa real.
+// `misRoles` trae los DOCUMENTOS de rol resueltos desde roleIds; solo los
+// de sistema tienen `legacyRoleKey` (los personalizados no tienen una
+// vista operativa propia acá todavía — ver limitación de roles
+// personalizados en la auditoría RBAC).
+export async function renderDiaDControlCandidate(container, candidateId, user, myRole, misRoles = []) {
+  const rolesEfectivos = new Set([myRole, ...misRoles.map(r => r.legacyRoleKey).filter(Boolean)])
+  if (rolesEfectivos.has('chofer')) return renderChoferView(container, candidateId, user)
+  if (rolesEfectivos.has('dirigente')) return renderDirigenteView(container, candidateId, user)
+  if (rolesEfectivos.has('mesario')) return renderMesarioView(container, candidateId, user)
   return renderAdminView(container, candidateId, user)
 }
 

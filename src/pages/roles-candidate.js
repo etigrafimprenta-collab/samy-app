@@ -153,7 +153,7 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
             <input id="rp-nombre" placeholder="Nombre del rol" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <input id="rp-descripcion" placeholder="Descripción" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           </div>
-        ` : role.isSystemRole ? `<p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px;">Este es un rol del sistema (equivalente al rol legacy "${escapeHtml(role.legacyRoleKey)}"). Podés ajustar sus permisos acá, pero recordá que el sistema viejo (menú, botones, reglas de Firestore) todavía no lee estos valores — este editor es para preparar la migración, no cambia el comportamiento real todavía.</p>` : ''}
+        ` : role.isSystemRole ? `<p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px;">Este es un rol del sistema (equivalente al rol legacy "${escapeHtml(role.legacyRoleKey)}"). El menú y las reglas de Firestore ya reconocen este rol por su nombre legacy (funciona igual de siempre). Los permisos con alcance "todo el candidato"/"toda la plataforma" que edites acá también ya se validan de verdad en Firestore para cualquiera que tenga este rol asignado; los de alcance más acotado (propios/asignados/equipo/zona/mesa) siguen siendo solo informativos por ahora.</p>` : ''}
 
         <div id="rp-modulos" style="max-height:420px; overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:10px;"></div>
 
@@ -251,8 +251,11 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
       <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
         💡 Esto guarda <code>roleIds</code>/alcance como campos nuevos, en paralelo al <code>role</code> legacy. Si el rol principal que elegís es uno de sistema, se sincroniza automáticamente el <code>role</code> viejo — así el menú actual sigue funcionando.
       </p>
+      <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
+        ✅ <strong>Roles de sistema adicionales por roleIds ya son seguros de asignar</strong> (ej. sumarle "auditor" a un dirigente). El menú, las reglas de Firestore y ahora también las Cloud Functions reconocen roleIds además del <code>role</code> legacy — ninguna pestaña debería quedar cargando sin datos por esto.
+      </p>
       <p style="font-size:.8rem; color:#c62828; background:#ffebee; border-left:4px solid #c62828; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ⚠️ <strong>Importante — todavía no asignar roles adicionales a usuarios reales.</strong> El menú ya lee <code>roleIds</code> (modo compatibilidad, Etapa 6), pero las reglas de Firestore (Etapa 8, pendiente) todavía validan acceso a los datos por el <code>role</code> legacy únicamente. Si a alguien le agregás un rol extra que le abre una pestaña nueva en el menú, esa pestaña le va a quedar cargando indefinidamente (sin datos, sin crash) porque Firestore le va a seguir negando la lectura. Usar esta pantalla solo contra <code>candidato-test</code> hasta que se migren las reglas.
+        ⚠️ <strong>Roles personalizados: enforcement parcial.</strong> Firestore ya valida de verdad los permisos de un rol personalizado cuyo alcance sea "todo el candidato"/"toda la plataforma". Los permisos con alcance más acotado (propios/asignados/equipo/zona/mesa) siguen siendo solo de menú — Firestore no puede probarlos de forma genérica para consultas sin filtro (límite real de la plataforma, no un descuido). Si asignás un rol personalizado con ese tipo de permiso, esa pestaña puede quedar cargando sin datos. Probar primero contra <code>candidato-test</code>.
       </p>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:.83rem;">

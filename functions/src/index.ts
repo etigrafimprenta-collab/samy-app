@@ -73,6 +73,15 @@ async function requireSuperAdmin(auth: Auth) {
 
 // Superadmin siempre pasa. Si no, exige que el caller tenga uno de los
 // roles candidate-scoped indicados en /candidates/{candidateId}/users/{uid}.
+// LIMITACIÓN CORREGIDA (auditoría RBAC): hasta acá, esta función solo
+// miraba `role` (legacy) — firestore.rules ya reconoce roleIds vía
+// hasCandidateRole() desde Etapa 8 parcial, pero ninguna Cloud Function lo
+// hacía, así que un usuario con un rol de SISTEMA adicional asignado por
+// roleIds (ej. "auditor" sumado a un dirigente) ya tenía acceso correcto
+// vía reglas de Firestore, pero seguía recibiendo permission-denied en
+// cualquier acción que pasara por una Cloud Function. Se agrega el mismo
+// chequeo OR que ya usa hasCandidateRole en firestore.rules — nunca resta
+// acceso, solo lo amplía para quien ya lo tenía por roleIds.
 async function requireCandidateRole(
   auth: Auth,
   candidateId: string,
@@ -99,7 +108,10 @@ async function requireCandidateRole(
     .collection("users")
     .doc(auth.uid)
     .get();
-  if (!memberDoc.exists || !roles.includes(memberDoc.data()?.role)) {
+  const memberData = memberDoc.data();
+  const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
+  const tieneRol = roles.includes(memberData?.role) || roleIds.some((r) => roles.includes(r));
+  if (!memberDoc.exists || !tieneRol) {
     throw new functions.https.HttpsError(
       "permission-denied",
       "No tenés permiso para esta acción en este candidato"
@@ -870,18 +882,24 @@ const VOTER_SEARCH_ROLES = ["campaign_admin", "coordinator", "dirigente", "mesar
 // "Mantener las reglas actuales de acceso según roles y propiedad") — nunca
 // se relaja ni se endurece ese criterio acá, solo se reusa para decidir si
 // el teléfono entra en la respuesta de búsqueda del padrón compartido.
+//
+// `roles` es el conjunto EFECTIVO del caller (role legacy + roleIds, no solo
+// el rol principal) — auditoría RBAC: antes solo miraba `role`, así que un
+// usuario con un rol de sistema ADICIONAL por roleIds (ej. dirigente que
+// también es coordinator) no obtenía la visibilidad ampliada que ya le
+// reconocía firestore.rules para todo lo demás.
 async function callerCanSeeSavedRecordPhone(
   candidateId: string,
   callerUid: string,
-  role: string,
+  roles: string[],
   savedRecordDoc: FirebaseFirestore.QueryDocumentSnapshot
 ): Promise<boolean> {
-  if (role === "campaign_admin" || role === "coordinator") return true;
+  if (roles.includes("campaign_admin") || roles.includes("coordinator")) return true;
 
   const data = savedRecordDoc.data();
   if (data?.uid === callerUid) return true;
 
-  if (role === "dirigente" || role === "mesario") {
+  if (roles.includes("dirigente") || roles.includes("mesario")) {
     const edcSnap = await admin
       .firestore()
       .collection("candidates")
@@ -891,8 +909,8 @@ async function callerCanSeeSavedRecordPhone(
       .get();
     if (!edcSnap.exists) return false;
     const edcData = edcSnap.data();
-    if (role === "dirigente" && edcData?.assignedLeaderId === callerUid) return true;
-    if (role === "mesario" && edcData?.assignedTableUserId === callerUid) return true;
+    if (roles.includes("dirigente") && edcData?.assignedLeaderId === callerUid) return true;
+    if (roles.includes("mesario") && edcData?.assignedTableUserId === callerUid) return true;
   }
 
   return false;
@@ -933,7 +951,7 @@ export const buscarTelefonosPadron = functions.https.onCall(
       .get();
     const isSuperAdmin = platformDoc.data()?.globalRole === "superadmin";
 
-    let role: string | null = null;
+    let rolesEfectivos: string[] = []
     if (!isSuperAdmin) {
       const memberDoc = await admin
         .firestore()
@@ -942,8 +960,10 @@ export const buscarTelefonosPadron = functions.https.onCall(
         .collection("users")
         .doc(callerUid)
         .get();
-      role = memberDoc.exists ? memberDoc.data()?.role ?? null : null;
-      if (!role || !VOTER_SEARCH_ROLES.includes(role)) {
+      const memberData = memberDoc.exists ? memberDoc.data() : null;
+      const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
+      rolesEfectivos = [memberData?.role, ...roleIds].filter(Boolean) as string[];
+      if (!rolesEfectivos.some((r) => VOTER_SEARCH_ROLES.includes(r))) {
         throw new functions.https.HttpsError(
           "permission-denied",
           "No tenés permiso para buscar en el padrón de este candidato"
@@ -988,7 +1008,7 @@ export const buscarTelefonosPadron = functions.https.onCall(
         const puedeVer = await callerCanSeeSavedRecordPhone(
           candidateId,
           callerUid,
-          role as string,
+          rolesEfectivos,
           savedDoc
         );
         if (puedeVer) {
