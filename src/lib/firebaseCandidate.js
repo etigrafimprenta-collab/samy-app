@@ -29,6 +29,7 @@ import {
 } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { db, functionsInstance } from './firebase.js'
+import { getGrantedScopes } from './rbac.js'
 
 const DEFAULT_PAGE_SIZE = 50
 const IN_CHUNK_SIZE = 30 // límite de Firestore para el operador "in"
@@ -553,10 +554,21 @@ export async function saveRecord(candidateId, uid, voter, {
     }
   }
 
+  // teamId se denormaliza del perfil de quien guarda (auditoría RBAC —
+  // scopes restringidos): es lo que permite que el scope "Equipo" de un
+  // rol personalizado filtre savedRecords con un simple where('teamId','
+  // ==',...), sin tener que resolver equipos en cada lectura. Registros
+  // guardados ANTES de este cambio quedan sin este campo — no se migran
+  // retroactivamente porque nunca se supo antes a qué equipo pertenecían;
+  // simplemente no matchean ningún filtro por equipo, no rompen nada.
+  const creadorDoc = await getDoc(doc(db, ...candidatePath(candidateId, 'users', uid)))
+  const teamId = creadorDoc.exists() ? (creadorDoc.data().teamId || null) : null
+
   await addDoc(collection(db, ...candidatePath(candidateId, 'savedRecords')), {
     voterId: voter.id || null,
     uid,
     createdBy: uid,
+    teamId,
     cedula: voter.cedula,
     nombre: voter.nombre,
     // Mayúsculas para prefix-search (mismo criterio que voters.nombre_upper
@@ -695,9 +707,20 @@ export async function listRecordsPage(candidateId, { cursor = null, pageSize = D
 // combinación adicional exigiría su propio índice compuesto, y no hace
 // falta en Etapa 1. `by` es el nombre del campo tal cual se guarda en
 // savedRecords ('uid' para dirigente, 'local', 'seccional' o 'mesa').
+// `value` también acepta un array (usa 'in', hasta 30 — límite de
+// Firestore) — lo usa getSavedRecordsByScope para zoneIds/pollingPlaceIds/
+// tableIds, que son listas (un usuario puede tener más de una zona/local/
+// mesa asignada).
 export async function listRecordsPageFiltered(candidateId, { by = null, value = null, cursor = null, pageSize = DEFAULT_PAGE_SIZE } = {}) {
   const clauses = []
-  if (by && value != null) clauses.push(where(by, '==', by === 'mesa' ? String(value) : value))
+  if (by && value != null) {
+    if (Array.isArray(value)) {
+      const valores = value.slice(0, IN_CHUNK_SIZE).map(v => by === 'mesa' ? String(v) : v)
+      clauses.push(where(by, 'in', valores))
+    } else {
+      clauses.push(where(by, '==', by === 'mesa' ? String(value) : value))
+    }
+  }
   clauses.push(orderBy('savedAt', 'desc'))
   if (cursor) clauses.push(startAfter(cursor))
   clauses.push(limit(pageSize))
@@ -1178,6 +1201,62 @@ export async function getRecordsByIds(candidateId, ids) {
     unique.map(id => getDoc(doc(db, ...candidatePath(candidateId, 'savedRecords', id))))
   )
   return docs.filter(d => d.exists()).map(d => ({ id: d.id, ...d.data() }))
+}
+
+// ── Fuente única de consulta por scope para savedRecords (auditoría RBAC
+// — scopes restringidos) ────────────────────────────────────────────
+// Arma la consulta CORRECTA según el alcance efectivo del usuario para un
+// permiso puntual — nunca trae de más para filtrar después en memoria. Si
+// el usuario tiene varios alcances otorgados para el mismo permiso, se
+// prioriza el más amplio (mismo orden que SCOPE_RANK en rbacCatalog.js);
+// mezclar resultados de varios alcances a la vez queda fuera de esta
+// función a propósito — un usuario real casi nunca tiene más de un
+// alcance activo por permiso, y sumar eso complicaría la paginación sin
+// un caso de uso real que lo pida.
+//
+// `actorUserDoc` es el doc ya cargado de candidates/{id}/users/{uid} del
+// que llama (para no volver a pedirlo acá) — necesita zoneIds/
+// pollingPlaceIds/tableIds/teamId.
+export async function getSavedRecordsByScope(candidateId, actorUid, actorUserDoc, misRoles, permissionKey, { pageSize = DEFAULT_PAGE_SIZE, cursor = null } = {}) {
+  const scopes = getGrantedScopes(misRoles, permissionKey)
+
+  if (scopes.includes('all_candidate') || scopes.includes('all_platform')) {
+    return listRecordsPageFiltered(candidateId, { cursor, pageSize })
+  }
+  if (scopes.includes('team') && actorUserDoc?.teamId) {
+    return listRecordsPageFiltered(candidateId, { by: 'teamId', value: actorUserDoc.teamId, cursor, pageSize })
+  }
+  if (scopes.includes('zone') && actorUserDoc?.zoneIds?.length) {
+    return listRecordsPageFiltered(candidateId, { by: 'seccional', value: actorUserDoc.zoneIds, cursor, pageSize })
+  }
+  if (scopes.includes('polling_place') && actorUserDoc?.pollingPlaceIds?.length) {
+    return listRecordsPageFiltered(candidateId, { by: 'local', value: actorUserDoc.pollingPlaceIds, cursor, pageSize })
+  }
+  if (scopes.includes('table') && actorUserDoc?.tableIds?.length) {
+    return listRecordsPageFiltered(candidateId, { by: 'mesa', value: actorUserDoc.tableIds, cursor, pageSize })
+  }
+  if (scopes.includes('own')) {
+    return listRecordsPageFiltered(candidateId, { by: 'uid', value: actorUid, cursor, pageSize })
+  }
+  if (scopes.includes('assigned')) {
+    // 'assigned' no vive en el propio savedRecords (electionDayControl,
+    // otra colección) — no es list-provable, así que se resuelve en 2
+    // pasos: 1) 2 queries doc-independientes a electionDayControl
+    // (where('assignedLeaderId'/'assignedTableUserId','==',uid), cada una
+    // por su cuenta ya es un patrón probado en el resto del código), 2)
+    // get() puntual por id (getRecordsByIds). Sin cursor real — la lista
+    // de asignados de una persona es acotada por diseño (no es el padrón
+    // completo), no el volumen que justifica paginar con cursores.
+    const edcRef = collection(db, ...candidatePath(candidateId, 'electionDayControl'))
+    const [porLider, porMesa] = await Promise.all([
+      getDocs(query(edcRef, where('assignedLeaderId', '==', actorUid))),
+      getDocs(query(edcRef, where('assignedTableUserId', '==', actorUid)))
+    ])
+    const ids = [...new Set([...porLider.docs, ...porMesa.docs].map(d => d.id))]
+    const records = await getRecordsByIds(candidateId, ids)
+    return { records, lastDoc: null, hasMore: false }
+  }
+  return { records: [], lastDoc: null, hasMore: false }
 }
 
 // electionStatus y callAssignments usan voterId como id de documento (ver

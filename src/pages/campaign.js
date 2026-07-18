@@ -15,6 +15,7 @@ import {
   getSharedVotersCount,
   getPadronMeta,
   getAllRecords,
+  getSavedRecordsByScope,
   getAllCandidateUsers,
   getDuplicateCedulas,
   getUserRecords,
@@ -28,7 +29,7 @@ import {
   getRecordByCedula
 } from '../lib/firebaseCandidate.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
-import { can } from '../lib/rbac.js'
+import { can, getGrantedScopes } from '../lib/rbac.js'
 import { ROLE_LABELS } from '../lib/roleLabels.js'
 // Los paneles ricos (Día D admin/control, choferes) se importan
 // dinámicamente en cada tab — no todo campaign_admin necesita bajarlos
@@ -1500,6 +1501,20 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   // volumen de un candidato individual es chico (a diferencia de Samy).
   async function renderRegistros(content) {
     content.innerHTML = '<div style="color:#999;">Cargando...</div>'
+    // Auditoría RBAC (scopes restringidos): un rol personalizado con
+    // records.view de alcance angosto (propios/asignados/equipo/zona/
+    // local/mesa) NO tiene por qué poder traer TODO el candidato — el
+    // getAllRecords de abajo solo es correcto para quien ya tiene alcance
+    // amplio (rol legacy de TAB_ROLES, o all_candidate/all_platform vía
+    // rol personalizado). Para cualquier otro caso se arma una consulta
+    // ya acotada (getSavedRecordsByScope), nunca "traer todo y filtrar".
+    const scopesRecordsView = getGrantedScopes(misRoles, 'records.view')
+    const tieneAlcanceAmplio = TAB_ROLES.registros.includes(myRole) ||
+      scopesRecordsView.includes('all_candidate') || scopesRecordsView.includes('all_platform')
+    if (!tieneAlcanceAmplio) {
+      return renderRegistrosPorScope(content, scopesRecordsView)
+    }
+
     // Solo campaign_admin: firestore.rules únicamente permite actualizar
     // savedRecords ajenos a campaign_admin (y al propio dirigente dueño) —
     // coordinator/viewer/auditor ven Registros pero no pueden escribir acá,
@@ -1817,6 +1832,73 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         setTimeout(() => { printWindow.focus(); printWindow.print() }, 300)
       })
     })
+  }
+
+  // Vista de "Registros" para un rol personalizado con records.view de
+  // alcance ANGOSTO (propios/asignados/equipo/zona/local/mesa) — auditoría
+  // RBAC. A diferencia de renderRegistros (arriba, alcance amplio,
+  // getAllRecords + filtrado en memoria), acá la consulta ya nace acotada
+  // (getSavedRecordsByScope) y se pagina con cursor — nunca trae más de lo
+  // que ese scope autoriza. No tiene los filtros combinables de la vista
+  // admin (no hacen falta: el propio scope YA es el filtro).
+  async function renderRegistrosPorScope(content, scopes) {
+    let registros = []
+    let cursor = null
+    let hasMore = false
+
+    const etiquetaScope = scopes.includes('team') ? 'de tu equipo'
+      : scopes.includes('zone') ? 'de tu zona'
+      : scopes.includes('polling_place') ? 'de tu local'
+      : scopes.includes('table') ? 'de tu mesa'
+      : scopes.includes('assigned') ? 'asignados a vos'
+      : scopes.includes('own') ? 'propios'
+      : ''
+
+    content.innerHTML = `
+      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px;">
+        <h2 style="margin:0 0 12px; font-size:1.05rem;">📋 Registros ${etiquetaScope}</h2>
+        <div id="rps-lista"><div style="color:#999;">Cargando...</div></div>
+        <div style="text-align:center; margin-top:12px;"><button id="rps-btn-mas" style="display:none; background:#eee; border:none; padding:8px 16px; border-radius:6px; cursor:pointer;">Cargar más</button></div>
+      </div>
+    `
+
+    async function cargar(reset) {
+      if (reset) { registros = []; cursor = null }
+      try {
+        const resultado = await getSavedRecordsByScope(candidateId, user.uid, candidateUserDoc, misRoles, 'records.view', { cursor, pageSize: 50 })
+        registros = reset ? resultado.records : [...registros, ...resultado.records]
+        cursor = resultado.lastDoc
+        hasMore = resultado.hasMore
+        pintar()
+      } catch (err) {
+        document.getElementById('rps-lista').innerHTML = `<div style="color:#c62828;">Error: ${escapeHtml(err.message)}</div>`
+      }
+    }
+
+    function pintar() {
+      const listaEl = document.getElementById('rps-lista')
+      if (registros.length === 0) {
+        listaEl.innerHTML = '<div style="color:#999; padding:16px; text-align:center;">Sin registros en tu alcance todavía.</div>'
+      } else {
+        listaEl.innerHTML = `
+          <div style="font-size:.82rem; color:#666; margin-bottom:8px;"><strong>${registros.length}</strong> registro${registros.length === 1 ? '' : 's'}</div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
+              <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Teléfono</th><th>Local</th><th>Mesa</th></tr></thead>
+              <tbody>${registros.map(r => `<tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">${escapeHtml(r.nombre)}</td><td>${escapeHtml(r.cedula)}</td><td>${escapeHtml(r.telefono) || '—'}</td>
+                <td>${escapeHtml(r.local) || '—'}</td><td>${escapeHtml(r.mesa) || '—'}</td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </div>
+        `
+      }
+      const btnMas = document.getElementById('rps-btn-mas')
+      btnMas.style.display = hasMore ? 'inline-block' : 'none'
+      btnMas.onclick = () => cargar(false)
+    }
+
+    await cargar(true)
   }
 
   // Port de admin.js:renderAuditoria — detección de cédulas duplicadas

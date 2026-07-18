@@ -153,7 +153,7 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
             <input id="rp-nombre" placeholder="Nombre del rol" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
             <input id="rp-descripcion" placeholder="Descripción" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           </div>
-        ` : role.isSystemRole ? `<p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px;">Este es un rol del sistema (equivalente al rol legacy "${escapeHtml(role.legacyRoleKey)}"). El menú y las reglas de Firestore ya reconocen este rol por su nombre legacy (funciona igual de siempre). Los permisos con alcance "todo el candidato"/"toda la plataforma" que edites acá también ya se validan de verdad en Firestore para cualquiera que tenga este rol asignado; los de alcance más acotado (propios/asignados/equipo/zona/mesa) siguen siendo solo informativos por ahora.</p>` : ''}
+        ` : role.isSystemRole ? `<p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px;">Este es un rol del sistema (equivalente al rol legacy "${escapeHtml(role.legacyRoleKey)}"). El menú y las reglas de Firestore ya reconocen este rol por su nombre legacy (funciona igual de siempre). Los permisos de "Buscar votante"/"Registros" con cualquier alcance (propios/asignados/equipo/zona/local/mesa/todo el candidato) ya se validan de verdad en Firestore; el resto de los módulos solo tiene enforcement real para alcance "todo el candidato"/"toda la plataforma".</p>` : ''}
 
         <div id="rp-modulos" style="max-height:420px; overflow-y:auto; border:1px solid #eee; border-radius:6px; padding:10px;"></div>
 
@@ -254,8 +254,11 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
       <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
         ✅ <strong>Roles de sistema adicionales por roleIds ya son seguros de asignar</strong> (ej. sumarle "auditor" a un dirigente). El menú, las reglas de Firestore y ahora también las Cloud Functions reconocen roleIds además del <code>role</code> legacy — ninguna pestaña debería quedar cargando sin datos por esto.
       </p>
+      <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
+        ✅ <strong>"Buscar votante" y "Registros" ya validan todos los alcances</strong> (propios/asignados/equipo/zona/local/mesa/todo el candidato) de verdad en Firestore, incluso para roles personalizados — asigná zona/local/mesa/equipo desde el formulario de abajo, el filtro se arma solo.
+      </p>
       <p style="font-size:.8rem; color:#c62828; background:#ffebee; border-left:4px solid #c62828; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ⚠️ <strong>Roles personalizados: enforcement parcial.</strong> Firestore ya valida de verdad los permisos de un rol personalizado cuyo alcance sea "todo el candidato"/"toda la plataforma". Los permisos con alcance más acotado (propios/asignados/equipo/zona/mesa) siguen siendo solo de menú — Firestore no puede probarlos de forma genérica para consultas sin filtro (límite real de la plataforma, no un descuido). Si asignás un rol personalizado con ese tipo de permiso, esa pestaña puede quedar cargando sin datos. Probar primero contra <code>candidato-test</code>.
+        ⚠️ <strong>Otros módulos: enforcement parcial.</strong> Fuera de "Buscar votante"/"Registros", Firestore solo valida de verdad los permisos de un rol personalizado cuyo alcance sea "todo el candidato"/"toda la plataforma". Un alcance más acotado (propios/asignados/equipo/zona/local/mesa) en choferes/mesarios/Centro de Contacto/Finanzas/etc. sigue siendo solo de menú — esos módulos ya tenían su propio mecanismo de "asignado" antes de esta migración. Probar primero contra <code>candidato-test</code>.
       </p>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:.83rem;">

@@ -217,20 +217,76 @@ service cloud.firestore {
     //      cuánto código se escriba (mismo problema ya documentado en
     //      PROJECT_CONTEXT_MASTER.md §4, encontrado 2 veces en producción).
     //
-    // Solución adoptada (decisión explícita, no un atajo): computeEffectivePermissionKeys
+    // Solución adoptada (decisión explícita, no un atajo): computeScopedPermissions
     // (src/lib/rolesCandidate.js) precalcula, CADA VEZ que cambian los roles
-    // de un usuario o los permisos de un rol, el subconjunto de permisos
-    // cuyo alcance otorgado es 'all_candidate'/'all_platform' — los ÚNICOS
-    // que no dependen de resource.data — y lo denormaliza en
-    // candidates/{id}/users/{uid}.effectivePermissionKeys. Acá solo se lee
-    // ese array ya resuelto (mismo get() que ya paga candidateUserDoc(), sin
-    // costo adicional), nunca se evalúan roles ni permisos en la regla.
-    // Permisos de alcance angosto (own/assigned/team/zone/table) de un rol
-    // personalizado NO están acá — siguen siendo solo menú hasta que ese
-    // módulo puntual se resuelva vía Cloud Function (fuera de esta etapa).
+    // de un usuario o los permisos de un rol, para CADA permiso otorgado, la
+    // lista COMPLETA de alcances (own/assigned/team/zone/polling_place/
+    // table/all_candidate/all_platform) — y lo denormaliza en
+    // candidates/{id}/users/{uid}.scopedPermissions (mapa permiso→[alcances]).
+    // Acá solo se lee ese mapa ya resuelto (mismo get() que ya paga
+    // candidateUserDoc(), sin costo adicional) — nunca se evalúan roles ni
+    // permisos en la regla.
+    //
+    // hasEffectivePermission(): alcance amplio (all_candidate/all_platform)
+    // — no depende de resource.data, sirve para get() Y list()/count() sin
+    // filtro, para cualquier colección.
+    //
+    // hasScopedPermission(): ¿el usuario tiene ESTE alcance puntual
+    // otorgado para este permiso? Por sí sola NO alcanza — cada regla de
+    // colección todavía tiene que comparar el campo correspondiente del
+    // recurso (resource.data.seccional/local/mesa/teamId/uid) contra el
+    // perfil del usuario, y la CONSULTA del cliente tiene que traer el
+    // where() que hace que esa comparación sea "list-provable" (ver
+    // canAccessSavedRecordByScope más abajo, y getSavedRecordsByScope en
+    // firebaseCandidate.js, que arma esa consulta).
     function hasEffectivePermission(candidateId, permissionKey) {
+      return belongsToCandidate(candidateId) && (
+        hasScopedPermission(candidateId, permissionKey, 'all_candidate') ||
+        hasScopedPermission(candidateId, permissionKey, 'all_platform')
+      );
+    }
+
+    function hasScopedPermission(candidateId, permissionKey, scope) {
       return belongsToCandidate(candidateId) &&
-        candidateUserDoc(candidateId).get('effectivePermissionKeys', []).hasAny([permissionKey]);
+        scope in candidateUserDoc(candidateId).get('scopedPermissions', {}).get(permissionKey, []);
+    }
+
+    // ── Scopes restringidos para savedRecords (auditoría RBAC) ──────────
+    // Un rol personalizado con alcance own/team/zone/polling_place/table
+    // para 'records.view'/'records.edit' ya se hace cumplir de verdad acá,
+    // comparando el campo correspondiente del propio savedRecords contra
+    // el perfil del usuario (zoneIds/pollingPlaceIds/tableIds/teamId en
+    // candidates/{id}/users/{uid}). 'assigned' se resuelve aparte (ver
+    // isAssignedToSavedRecord) porque el dato vive en electionDayControl,
+    // otra colección — no es list-provable, get()/getRecordsByIds()
+    // puntual únicamente (ver firebaseCandidate.js).
+    function canAccessSavedRecordByScope(candidateId, permissionKey, data) {
+      return belongsToCandidate(candidateId) && (
+        (hasScopedPermission(candidateId, permissionKey, 'own') && data.uid == request.auth.uid) ||
+        (hasScopedPermission(candidateId, permissionKey, 'team') &&
+          data.teamId != null && data.teamId == candidateUserDoc(candidateId).get('teamId', null)) ||
+        (hasScopedPermission(candidateId, permissionKey, 'zone') &&
+          data.seccional in candidateUserDoc(candidateId).get('zoneIds', [])) ||
+        (hasScopedPermission(candidateId, permissionKey, 'polling_place') &&
+          data.local in candidateUserDoc(candidateId).get('pollingPlaceIds', [])) ||
+        (hasScopedPermission(candidateId, permissionKey, 'table') &&
+          data.mesa in candidateUserDoc(candidateId).get('tableIds', []))
+      );
+    }
+
+    // 'assigned' vive en electionDayControl (assignedLeaderId/
+    // assignedTableUserId), no en el propio savedRecords — get() puntual,
+    // nunca válido para list() sin filtro (ver nota arriba). El cliente ya
+    // resuelve esto con 2 queries a electionDayControl (doc-independientes,
+    // where('assignedLeaderId'/'assignedTableUserId','==',uid)) + get()
+    // puntual por id (getRecordsByIds, patrón ya existente en el código).
+    function isAssignedToSavedRecord(candidateId, permissionKey, recordId) {
+      return hasScopedPermission(candidateId, permissionKey, 'assigned') &&
+        exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
+        (
+          get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedLeaderId == request.auth.uid ||
+          get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedTableUserId == request.auth.uid
+        );
     }
 
     // Un mesario solo puede tocar votos de la mesa que tiene asignada,
@@ -362,6 +418,13 @@ service cloud.firestore {
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor', 'viewer']) ||
         hasEffectivePermission(candidateId, 'records.view') ||
         (belongsToCandidate(candidateId) && resource.data.uid == request.auth.uid) ||
+        // Scopes restringidos (auditoría RBAC) para un rol personalizado:
+        // team/zone/polling_place/table comparan el propio savedRecords
+        // contra el perfil del usuario — 'own' ya cubierto arriba (regla
+        // preexistente, cualquiera puede leer lo suyo). 'assigned' aparte,
+        // no depende de resource.data del propio doc.
+        canAccessSavedRecordByScope(candidateId, 'records.view', resource.data) ||
+        isAssignedToSavedRecord(candidateId, 'records.view', recordId) ||
         (hasCandidateRole(candidateId, ['operador']) &&
           exists(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(recordId)) &&
           get(/databases/$(database)/documents/candidates/$(candidateId)/callAssignments/$(recordId)).data.assignedUserId == request.auth.uid) ||
@@ -404,11 +467,19 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'coordinator', 'campaign_admin']) &&
           request.resource.data.uid == request.auth.uid) ||
         (hasEffectivePermission(candidateId, 'search_voter.create') &&
+          request.resource.data.uid == request.auth.uid) ||
+        // Scope angosto de search_voter.create (zona/local/mesa/equipo):
+        // restringe QUÉ votante del padrón puede guardar como contacto
+        // (según el seccional/local/mesa/teamId que traiga el registro
+        // nuevo), no solo que se autoasigne como dueño.
+        (canAccessSavedRecordByScope(candidateId, 'search_voter.create', request.resource.data) &&
           request.resource.data.uid == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
         hasEffectivePermission(candidateId, 'records.edit') ||
+        canAccessSavedRecordByScope(candidateId, 'records.edit', resource.data) ||
+        isAssignedToSavedRecord(candidateId, 'records.edit', recordId) ||
         (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid) ||
         // coordinator ya puede crear/editar callAssignments (ver abajo);
         // esto solo le deja espejar ese mismo dato en el propio
@@ -879,7 +950,15 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId)) ||
-        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
+        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId)) ||
+        // Scope 'assigned' de records.view (auditoría RBAC): un rol
+        // personalizado sin role legacy dirigente/mesario también necesita
+        // poder consultar electionDayControl por assignedLeaderId O
+        // assignedTableUserId (getSavedRecordsByScope consulta ambos) —
+        // sin esto, solo funcionaba por coincidencia si el usuario
+        // TAMBIÉN tenía el role legacy correspondiente.
+        (hasScopedPermission(candidateId, 'records.view', 'assigned') &&
+          (resource.data.assignedLeaderId == request.auth.uid || resource.data.assignedTableUserId == request.auth.uid));
 
       // Creación lazy: la primera vez que cualquier rol operativo toca un
       // voterId se crea el doc, siempre y cuando se cree apuntándose a sí

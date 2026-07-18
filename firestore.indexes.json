@@ -65,6 +65,14 @@
       ]
     },
     {
+      "collectionGroup": "savedRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "teamId", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "callAssignments",
       "queryScope": "COLLECTION",
       "fields": [
