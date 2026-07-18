@@ -368,12 +368,22 @@ service cloud.firestore {
       // Lo que NO funciona nunca (probado en vivo, ver /userCandidateIndex
       // más abajo) es una query collectionGroup sobre "users" cruzando
       // candidateId — por eso esa búsqueda ya no se hace acá.
+      // Auditoría RBAC (unificación): Dirigentes y Operadores (rbacCatalog.js)
+      // no son colecciones propias — son un filtro de UI sobre ESTA MISMA
+      // colección (users). leaders.*/operators.* se cablean acá, como
+      // ramas adicionales a users.*, para que un rol personalizado con
+      // esos permisos no dependa de tener ADEMÁS users.* (desalineación
+      // encontrada en la auditoría: el catálogo los presenta como
+      // independientes, pero físicamente gobiernan el mismo documento).
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'users.view') ||
+        hasEffectivePermission(candidateId, 'leaders.view') ||
+        hasEffectivePermission(candidateId, 'operators.view') ||
         isOwner(uid);
 
-      allow create: if (isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']) || hasEffectivePermission(candidateId, 'users.create')) &&
+      allow create: if (isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']) ||
+          hasEffectivePermission(candidateId, 'users.create') || hasEffectivePermission(candidateId, 'operators.create')) &&
         request.resource.data.role in ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'operador', 'chofer', 'viewer', 'auditor'] &&
         !('password' in request.resource.data.keys());
 
@@ -396,12 +406,20 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid)) ||
         (hasEffectivePermission(candidateId, 'users.edit_role') && !isOwner(uid)) ||
         (hasEffectivePermission(candidateId, 'roles.assign_users') && !isOwner(uid)) ||
+        (hasEffectivePermission(candidateId, 'leaders.edit_role') && !isOwner(uid)) ||
+        // operators.manage_payment: acotado a los 2 campos que en verdad
+        // administra (montoEntregado/cadenciaPago, ver operador-candidate.js)
+        // — no una puerta de edición general del doc como users.edit_role.
+        (hasEffectivePermission(candidateId, 'operators.manage_payment') && !isOwner(uid) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['montoEntregado', 'cadenciaPago', 'updatedAt'])) ||
         (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'roleIds', 'primaryRoleId']))
       );
 
       allow delete: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin']) && !isOwner(uid)) ||
-        (hasEffectivePermission(candidateId, 'users.disable') && !isOwner(uid));
+        (hasEffectivePermission(candidateId, 'users.disable') && !isOwner(uid)) ||
+        (hasEffectivePermission(candidateId, 'leaders.delete') && !isOwner(uid)) ||
+        (hasEffectivePermission(candidateId, 'operators.delete') && !isOwner(uid));
     }
 
     // NOTA: no existe /candidates/{candidateId}/voters — el padrón es
@@ -601,23 +619,33 @@ service cloud.firestore {
     // se puede expresar 100% acá sin otro get() — se refuerza en la capa
     // de app (finanzas-candidate.js) que loguea la excepción si ocurre.
     match /candidates/{candidateId}/financeObligations/{obligationId} {
-      // Auditoría RBAC: solo se cablea LECTURA (finance.view) para roles
-      // personalizados — las escrituras tienen una máquina de estados
-      // delicada (draft/pending/approved/paid) que ya está expresada campo
-      // por campo; ampliarla con un permiso genérico relajaría esas
-      // transiciones sin querer. Queda para una revisión aparte, no
-      // apurada dentro de esta migración.
+      // Auditoría RBAC (unificación): las escrituras tienen una máquina de
+      // estados delicada (draft/pending/approved/paid) — se preserva
+      // EXACTAMENTE la misma restricción de estados que ya rige para
+      // finance_operator/cashier, solo agregando la contraparte
+      // hasEffectivePermission para que un rol personalizado con el
+      // permiso equivalente (alcance all_candidate/all_platform, único
+      // que Firestore puede validar de forma genérica) tenga el mismo
+      // poder que el rol legacy correspondiente — nunca más.
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']) ||
         hasEffectivePermission(candidateId, 'finance.view');
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator']) &&
+          request.resource.data.createdBy == request.auth.uid) ||
+        (hasEffectivePermission(candidateId, 'finance.create_obligation') &&
           request.resource.data.createdBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.approve') ||
+        hasEffectivePermission(candidateId, 'finance.reject') ||
         (hasCandidateRole(candidateId, ['finance_operator']) &&
+          resource.data.createdBy == request.auth.uid &&
+          resource.data.status in ['draft', 'pending'] &&
+          request.resource.data.status in ['draft', 'pending']) ||
+        (hasEffectivePermission(candidateId, 'finance.edit_obligation') &&
           resource.data.createdBy == request.auth.uid &&
           resource.data.status in ['draft', 'pending'] &&
           request.resource.data.status in ['draft', 'pending']) ||
@@ -627,6 +655,9 @@ service cloud.firestore {
         // a solo esos 2 campos y a los 3 estados que ese cálculo puede
         // producir, para que no sea una puerta de edición general.
         (hasCandidateRole(candidateId, ['cashier']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+          request.resource.data.status in ['approved', 'partially_paid', 'paid']) ||
+        (hasEffectivePermission(candidateId, 'finance.pay') &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
           request.resource.data.status in ['approved', 'partially_paid', 'paid']);
 
@@ -665,14 +696,24 @@ service cloud.firestore {
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'cashier']) &&
+          request.resource.data.createdBy == request.auth.uid) ||
+        ((hasEffectivePermission(candidateId, 'finance.approve') || hasEffectivePermission(candidateId, 'finance.pay')) &&
           request.resource.data.createdBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.approve') ||
+        hasEffectivePermission(candidateId, 'finance.reject') ||
+        hasEffectivePermission(candidateId, 'finance.reverse_payment') ||
         (hasCandidateRole(candidateId, ['cashier']) &&
           resource.data.status == 'approved' &&
           request.resource.data.status == 'paid') ||
+        (hasEffectivePermission(candidateId, 'finance.pay') &&
+          resource.data.status == 'approved' &&
+          request.resource.data.status == 'paid') ||
         (hasCandidateRole(candidateId, ['finance_operator']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['receiptUrl', 'notes', 'updatedAt'])) ||
+        (hasEffectivePermission(candidateId, 'finance.upload_receipt') &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['receiptUrl', 'notes', 'updatedAt']));
 
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
@@ -689,6 +730,8 @@ service cloud.firestore {
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier']) &&
+          request.resource.data.uploadedBy == request.auth.uid) ||
+        (hasEffectivePermission(candidateId, 'finance.upload_receipt') &&
           request.resource.data.uploadedBy == request.auth.uid);
 
       allow update: if false;
@@ -707,11 +750,17 @@ service cloud.firestore {
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator']) &&
+          request.resource.data.createdBy == request.auth.uid) ||
+        (hasEffectivePermission(candidateId, 'finance.create_obligation') &&
           request.resource.data.createdBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.approve') ||
         (hasCandidateRole(candidateId, ['cashier']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentIds', 'status', 'paidBy', 'paidAt', 'updatedAt']) &&
+          request.resource.data.status in ['paid', 'partially_paid']) ||
+        (hasEffectivePermission(candidateId, 'finance.pay') &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentIds', 'status', 'paidBy', 'paidAt', 'updatedAt']) &&
           request.resource.data.status in ['paid', 'partially_paid']);
 
@@ -723,7 +772,8 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier', 'auditor']) ||
         hasEffectivePermission(candidateId, 'finance.view_cash');
-      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+      allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.manage_cash');
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }
 
@@ -738,9 +788,12 @@ service cloud.firestore {
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'cashier']) &&
+          request.resource.data.createdBy == request.auth.uid) ||
+        (hasEffectivePermission(candidateId, 'finance.manage_cash') &&
           request.resource.data.createdBy == request.auth.uid);
 
-      allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']);
+      allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.manage_cash');
     }
 
     // ── /candidates/{candidateId}/financeAlerts/{alertId} ──────────────
@@ -817,9 +870,14 @@ service cloud.firestore {
 
     // ── /candidates/{candidateId}/callAssignments/{voterId} ────────────
     match /candidates/{candidateId}/callAssignments/{voterId} {
+      // Auditoría RBAC (unificación de scopes): scope 'assigned' para un
+      // rol personalizado equivale exactamente a lo que ya tenía
+      // hasCandidateRole(['operador']) — mismo campo (assignedUserId),
+      // mismo criterio, solo expresado para el motor de permisos nuevo.
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'contact_center.view') ||
+        (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
@@ -831,6 +889,9 @@ service cloud.firestore {
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.assign_voters') ||
+        (hasScopedPermission(candidateId, 'contact_center.update_status', 'assigned') &&
+          resource.data.assignedUserId == request.auth.uid &&
+          request.resource.data.assignedUserId == resource.data.assignedUserId) ||
         (hasCandidateRole(candidateId, ['operador']) &&
           resource.data.assignedUserId == request.auth.uid &&
           request.resource.data.assignedUserId == resource.data.assignedUserId);
@@ -841,16 +902,21 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'contact_center.view') ||
+        (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.update_status') ||
+        (hasScopedPermission(candidateId, 'contact_center.update_status', 'assigned') && request.resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.update_status') ||
+        (hasScopedPermission(candidateId, 'contact_center.update_status', 'assigned') &&
+          resource.data.assignedUserId == request.auth.uid &&
+          request.resource.data.assignedUserId == resource.data.assignedUserId) ||
         (hasCandidateRole(candidateId, ['operador']) &&
           resource.data.assignedUserId == request.auth.uid &&
           request.resource.data.assignedUserId == resource.data.assignedUserId);
@@ -863,11 +929,15 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'contact_center.view') ||
+        (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         (hasEffectivePermission(candidateId, 'contact_center.call') &&
+          request.resource.data.operatorUserId == request.auth.uid) ||
+        (hasScopedPermission(candidateId, 'contact_center.call', 'assigned') &&
+          request.resource.data.assignedUserId == request.auth.uid &&
           request.resource.data.operatorUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) &&
           request.resource.data.assignedUserId == request.auth.uid &&
@@ -883,15 +953,18 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'contact_center.view') ||
+        (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.create_followup') ||
+        (hasScopedPermission(candidateId, 'contact_center.create_followup', 'assigned') && request.resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        (hasScopedPermission(candidateId, 'contact_center.create_followup', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
@@ -903,6 +976,7 @@ service cloud.firestore {
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'contact_center.view') ||
         hasEffectivePermission(candidateId, 'election_day_control.view_operations') ||
+        (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
       // chofer/dirigente/mesario reportan incidencias desde su propia
@@ -958,7 +1032,16 @@ service cloud.firestore {
         // sin esto, solo funcionaba por coincidencia si el usuario
         // TAMBIÉN tenía el role legacy correspondiente.
         (hasScopedPermission(candidateId, 'records.view', 'assigned') &&
-          (resource.data.assignedLeaderId == request.auth.uid || resource.data.assignedTableUserId == request.auth.uid));
+          (resource.data.assignedLeaderId == request.auth.uid || resource.data.assignedTableUserId == request.auth.uid)) ||
+        // Unificación RBAC: mismo criterio, ahora para el permiso PROPIO
+        // de este módulo (election_day_control.view_operations) — antes
+        // solo existía atado a records.view (efecto colateral de la
+        // migración de savedRecords). Reasignar (assign_driver/leader/
+        // table_member) sigue sin cablear, ver nota arriba.
+        (hasScopedPermission(candidateId, 'election_day_control.view_operations', 'assigned') &&
+          (resource.data.assignedLeaderId == request.auth.uid ||
+            resource.data.assignedTableUserId == request.auth.uid ||
+            isDriverOwner(candidateId, resource.data.assignedDriverId)));
 
       // Creación lazy: la primera vez que cualquier rol operativo toca un
       // voterId se crea el doc, siempre y cuando se cree apuntándose a sí

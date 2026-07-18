@@ -22,6 +22,7 @@ import { escapeHtml } from '../lib/escapeHtml.js'
 import { exportGenericToExcel } from '../lib/excel.js'
 import { exportGenericToPdf } from '../lib/pdf.js'
 import { shareTextViaWhatsApp } from '../lib/whatsapp.js'
+import { can } from '../lib/rbac.js'
 import {
   getSharedVotersCount,
   getCandidateCounts,
@@ -46,8 +47,8 @@ const TABS = [
   // coordinator en firestore.rules (solo campaign_admin/auditor, mismo
   // criterio que TAB_ROLES.auditoria en campaign.js) — sin este filtro,
   // coordinator vería el tab y se colgaría con permission-denied.
-  { id: 'finanzas', label: '💰 Finanzas', ready: true, roles: ['campaign_admin', 'auditor'] },
-  { id: 'auditoria', label: '⚠️ Auditoría', ready: true, roles: ['campaign_admin', 'auditor'] },
+  { id: 'finanzas', label: '💰 Finanzas', ready: true, roles: ['campaign_admin', 'auditor'], permission: 'finance.view' },
+  { id: 'auditoria', label: '⚠️ Auditoría', ready: true, roles: ['campaign_admin', 'auditor'], permission: 'audit.view' },
   { id: 'guardados', label: '💾 Reportes Guardados', ready: true }
 ]
 
@@ -61,9 +62,12 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
   let tab = 'resumen-general'
   let presetPendiente = null // seteado por "Abrir" en Reportes Guardados, consumido una vez por pintarTab
   // Tabs sin `roles` = visibles para cualquiera con acceso al módulo
-  // (comportamiento de siempre); con `roles`, solo si myRole está en la
-  // lista — hoy solo Finanzas/Auditoría lo usan (ver comentario en TABS).
-  const visibleTabs = TABS.filter(t => !t.roles || t.roles.includes(myRole))
+  // (comportamiento de siempre); con `roles`, el legacy Y el permiso RBAC
+  // nuevo se ACUMULAN (OR) — antes solo miraba myRole, así que un rol
+  // personalizado con finance.view/audit.view otorgado (y sin ningún role
+  // legacy campaign_admin/auditor) nunca veía estos 2 tabs, aunque
+  // Firestore ya le permitiera leer los datos. Auditoría RBAC (unificación).
+  const visibleTabs = TABS.filter(t => !t.roles || t.roles.includes(myRole) || (t.permission && can(misRoles, t.permission)))
 
   function render() {
     container.innerHTML = `
