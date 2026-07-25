@@ -947,6 +947,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     // el chofer no desmarca transporte, porque puede seguir necesitándolo
     // aunque todavía no tenga chofer asignado).
     function modalEditarMiRegistro(r) {
+      // Arranca con la ubicación ya guardada en el registro — si el
+      // usuario no toca ni el botón de geolocalización ni el link de
+      // Maps, esto se reescribe tal cual al guardar (equivale a "no
+      // modificar" el campo, no hace falta trackear un flag aparte).
+      let ubicacion = { latitude: r.latitude ?? null, longitude: r.longitude ?? null, googleMapsUrl: r.googleMapsUrl || '' }
+
       const modal = document.createElement('div')
       modal.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.6); display:flex; justify-content:center; align-items:center; z-index:9999; padding:20px; overflow-y:auto;'
       modal.innerHTML = `
@@ -978,6 +984,17 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <label style="font-weight:700; display:block; margin-bottom:4px; font-size:.85rem;">Ayuda — Editar Monto (Gs.):</label>
           <input id="inp-edit-monto-ayuda" type="number" min="0" step="1000" value="${Number(r.montoAyuda) || 0}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
 
+          <div style="border:1px solid #eee; border-radius:6px; padding:10px; margin-bottom:16px;">
+            <div style="font-weight:600; font-size:.85rem; margin-bottom:8px;">📍 Ubicación (opcional)</div>
+            <div id="edit-ubicacion-actual" style="font-size:.78rem; margin-bottom:8px; ${r.googleMapsUrl ? 'color:#1976d2;' : 'color:#999;'}">
+              ${r.googleMapsUrl ? `Ubicación actual: <a href="${escapeHtml(r.googleMapsUrl)}" target="_blank" rel="noopener">ver en Maps</a>` : 'Sin ubicación registrada.'}
+            </div>
+            <button type="button" id="btn-edit-ubicacion-actual" style="width:100%; padding:8px; background:#1976d2; color:white; border:none; border-radius:4px; cursor:pointer; font-size:.82rem; font-weight:600; margin-bottom:8px;">📍 Usar mi ubicación actual</button>
+            <div id="edit-ubicacion-estado" style="font-size:.78rem; color:#666; margin-bottom:8px;"></div>
+            <input id="inp-edit-maps-link" placeholder="O pegá un link de Google Maps" value="${escapeHtml(r.googleMapsUrl || '')}" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box; font-size:.85rem; margin-bottom:8px;">
+            <button type="button" id="btn-edit-quitar-ubicacion" style="width:100%; padding:6px; background:#c62828; color:white; border:none; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">🗑️ Quitar ubicación</button>
+          </div>
+
           <div id="edit-registro-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
           <div style="display:flex; gap:8px;">
             <button id="btn-confirmar-edit" style="flex:1; background:#4caf50; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
@@ -987,6 +1004,50 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       `
       document.body.appendChild(modal)
       modal.querySelector('#btn-cancelar-edit').addEventListener('click', () => modal.remove())
+
+      modal.querySelector('#btn-edit-ubicacion-actual').addEventListener('click', () => {
+        const estadoEl = modal.querySelector('#edit-ubicacion-estado')
+        if (!navigator.geolocation) {
+          estadoEl.textContent = 'Este navegador no soporta geolocalización. Pegá un link de Google Maps abajo.'
+          return
+        }
+        estadoEl.textContent = 'Obteniendo ubicación...'
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const { latitude, longitude } = pos.coords
+            ubicacion = {
+              latitude,
+              longitude,
+              googleMapsUrl: `https://www.google.com/maps?q=${latitude},${longitude}`
+            }
+            modal.querySelector('#inp-edit-maps-link').value = ubicacion.googleMapsUrl
+            estadoEl.textContent = `✅ Ubicación capturada (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`
+          },
+          (err) => {
+            estadoEl.textContent = 'No se pudo obtener la ubicación (' + err.message + '). Pegá un link de Google Maps abajo.'
+          },
+          { enableHighAccuracy: true, timeout: 10000 }
+        )
+      })
+
+      // Mismo criterio que al crear el registro: el link pegado a mano
+      // gana, y si trae coordenadas reconocibles (.../@lat,lng... o
+      // ...q=lat,lng...) las extraemos también.
+      modal.querySelector('#inp-edit-maps-link').addEventListener('input', (e) => {
+        const url = e.target.value.trim()
+        const match = url.match(/(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/)
+        ubicacion = {
+          latitude: match ? parseFloat(match[1]) : null,
+          longitude: match ? parseFloat(match[2]) : null,
+          googleMapsUrl: url
+        }
+      })
+
+      modal.querySelector('#btn-edit-quitar-ubicacion').addEventListener('click', () => {
+        ubicacion = { latitude: null, longitude: null, googleMapsUrl: '' }
+        modal.querySelector('#inp-edit-maps-link').value = ''
+        modal.querySelector('#edit-ubicacion-estado').textContent = '🗑️ Ubicación quitada.'
+      })
 
       modal.querySelector('#btn-confirmar-edit').addEventListener('click', async () => {
         const msg = modal.querySelector('#edit-registro-msg')
@@ -1001,6 +1062,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
             wantsToBeMesario: modal.querySelector('#chk-edit-mesario').checked,
             montoAyuda,
             needsAssistance: montoAyuda > 0,
+            latitude: ubicacion.latitude,
+            longitude: ubicacion.longitude,
+            googleMapsUrl: ubicacion.googleMapsUrl,
             // Asignar chofer implica que sí o sí pidió transporte — evita
             // el toggle "Transporte" duplicado con "Chofer asignado".
             ...(nuevoChofer ? { requiresPickup: true } : {})
