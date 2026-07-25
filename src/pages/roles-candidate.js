@@ -248,21 +248,6 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
       </div>
 
       <h3 style="margin:0 0 10px; font-size:.9rem;">Asignación por usuario (roleIds — RBAC nuevo)</h3>
-      <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        💡 Esto guarda <code>roleIds</code>/alcance como campos nuevos, en paralelo al <code>role</code> legacy. Si el rol principal que elegís es uno de sistema, se sincroniza automáticamente el <code>role</code> viejo — así el menú actual sigue funcionando.
-      </p>
-      <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ✅ <strong>Roles de sistema adicionales por roleIds ya son seguros de asignar</strong> (ej. sumarle "auditor" a un dirigente). El menú, las reglas de Firestore y ahora también las Cloud Functions reconocen roleIds además del <code>role</code> legacy — ninguna pestaña debería quedar cargando sin datos por esto.
-      </p>
-      <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ✅ <strong>"Buscar votante" y "Registros" ya validan todos los alcances</strong> (propios/asignados/equipo/zona/local/mesa/todo el candidato) de verdad en Firestore, incluso para roles personalizados — asigná zona/local/mesa/equipo desde el formulario de abajo, el filtro se arma solo.
-      </p>
-      <p style="font-size:.8rem; color:#2e7d32; background:#e8f5e9; border-left:4px solid #2e7d32; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ✅ <strong>Centro de Contacto y Día D Control ya validan el alcance "Asignados"</strong> de verdad en Firestore (callAssignments/electionStatus/calls/followUps/incidents y electionDayControl) — igual que Buscar votante/Registros. Finanzas ya valida "Todo el candidato"/"Toda la plataforma" también en aprobar/rechazar/pagar/revertir/gestionar caja (antes solo en la lectura). Dirigentes/Operadores ya reconocen sus propios permisos (<code>leaders.*</code>/<code>operators.*</code>) sobre el mismo documento de usuario.
-      </p>
-      <p style="font-size:.8rem; color:#c62828; background:#ffebee; border-left:4px solid #c62828; padding:8px 10px; border-radius:4px; margin:0 0 14px;">
-        ⚠️ <strong>Lo que sigue siendo solo de menú (deliberado, no un olvido).</strong> Un alcance más acotado que "asignados" (propios/equipo/zona/local/mesa) fuera de "Buscar votante"/"Registros" — Centro de Contacto/Finanzas/Día D no tienen un caso de uso real para esos alcances más finos. Choferes/Mesarios: ya son de lectura abierta a todo el candidato por diseño, sin scopes angostos. Reasignar chofer/dirigente/mesario en Día D Control (la operación más sensible en vivo el día de la elección) y la vista admin de Día D siguen sin cablear para roles personalizados. Probar primero contra <code>candidato-test</code>.
-      </p>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:.83rem;">
           <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Usuario</th><th>Rol legacy</th><th>roleIds asignados</th><th>Acciones</th></tr></thead>
@@ -348,7 +333,12 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
 
       msg.textContent = 'Guardando...'
       try {
-        const resultado = await assignUserRoles(candidateId, targetUser.id, {
+        // La `advertencia` que devuelve assignUserRoles (texto técnico
+        // sobre alcance de enforcement en Firestore) ya no se muestra acá
+        // — la lógica que la calcula sigue intacta (rolesCandidate.js),
+        // solo se dejó de renderizar en la UI. El guardado en sí nunca
+        // depende de esa advertencia.
+        await assignUserRoles(candidateId, targetUser.id, {
           roleIds, primaryRoleId,
           zoneIds: zona ? [zona] : [],
           pollingPlaceIds: local ? [local] : [],
@@ -357,13 +347,8 @@ export async function renderRolesCandidate(container, candidateId, user, myRole)
         }, user.uid, myRole)
 
         await cargarDatos()
-        if (resultado.advertencia) {
-          alert('✅ Guardado.\n\n⚠️ ' + resultado.advertencia)
-        } else {
-          msg.innerHTML = '<span style="color:#2e7d32;">✅ Guardado — rol legacy sincronizado automáticamente.</span>'
-        }
-        modal.remove()
-        pintarTab()
+        msg.innerHTML = '<span style="color:#2e7d32;">✅ Guardado.</span>'
+        setTimeout(() => { modal.remove(); pintarTab() }, 700)
       } catch (err) {
         msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
       }
