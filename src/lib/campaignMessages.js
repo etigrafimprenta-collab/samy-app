@@ -39,14 +39,18 @@ export function formatElectionDate(electionDate) {
 
 // candidate: doc de /candidates/{candidateId} (name, electionDate, lista, opcion).
 // record: registro guardado (nombre, local, mesa, orden).
+//
+// WhatsApp usa *asterisco simple* para negrita (no ** de markdown). Van en
+// negrita el nombre del destinatario y todos los valores que van entre
+// comillas: nombre del candidato, lista y opción.
 export function buildRecordatorioVotoMessage(candidate, record) {
   const fechaFormateada = formatElectionDate(candidate?.electionDate)
   const tieneListaYOpcion = Boolean(candidate?.lista && candidate?.opcion)
 
   return (
-    `Hola ${record.nombre}, te escribimos desde el equipo de campaña de "${candidate?.name}". ` +
+    `Hola *${record.nombre}*, te escribimos desde el equipo de campaña de "*${candidate?.name}*". ` +
     `Tu lugar de votación es ${record.local || 'N/A'}, mesa ${record.mesa || 'N/A'}, orden ${record.orden || 'N/A'}. ` +
     `¡Contamos con tu voto${fechaFormateada ? ` el ${fechaFormateada}` : ''}!` +
-    (tieneListaYOpcion ? ` Vota Lista "${candidate.lista}" Opción "${candidate.opcion}"` : '')
+    (tieneListaYOpcion ? ` Vota Lista "*${candidate.lista}*" Opción "*${candidate.opcion}*"` : '')
   )
 }
