@@ -30,6 +30,20 @@ test('mensaje completo: candidato con fecha, lista y opción configuradas', () =
   assert.match(msg, /Vota Lista "\*1\*" Opción "\*A\*"/)
 })
 
+test('candidato con eslogan: se agrega junto al nombre, dentro de las mismas comillas/negrita', () => {
+  const candidate = { name: 'Víctor Isasi', slogan: 'Tu Amigo, Tu Concejal', lista: '1', opcion: '9' }
+  const msg = buildRecordatorioVotoMessage(candidate, record)
+
+  assert.match(msg, /equipo de campaña de "\*Víctor Isasi – Tu Amigo, Tu Concejal\*"/)
+})
+
+test('candidato sin eslogan: se muestra solo el nombre, como antes de agregar el campo', () => {
+  const candidate = { name: 'Víctor Isasi' }
+  const msg = buildRecordatorioVotoMessage(candidate, record)
+
+  assert.match(msg, /equipo de campaña de "\*Víctor Isasi\*"/)
+})
+
 test('negrita estilo WhatsApp (*texto*, no **markdown**) en nombre y valores entre comillas', () => {
   const candidate = { name: 'Víctor Isasi', lista: '1', opcion: 'A' }
   const msg = buildRecordatorioVotoMessage(candidate, record)

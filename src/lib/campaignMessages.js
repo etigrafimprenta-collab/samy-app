@@ -8,6 +8,9 @@
 // Parámetros de Configuración usados (todos opcionales — ver
 // updateCandidateBranding() en firebaseCandidate.js y el form
 // "Configuración de la campaña" en campaign.js):
+//   - candidate.slogan ("eslogan"): texto libre que acompaña al nombre
+//     del candidato (p.ej. "Tu Amigo, Tu Concejal"). Si falta, se muestra
+//     solo el nombre, como antes de este campo.
 //   - candidate.electionDate ("fecha_eleccion"): fecha de la elección,
 //     guardada como string ISO (yyyy-mm-dd) desde un <input type="date">.
 //     Si falta, la línea "el <fecha>" simplemente no se agrega al mensaje.
@@ -16,9 +19,9 @@
 //     lista y opcion solo se agregan al mensaje cuando AMBOS están
 //     presentes (así era el comportamiento original).
 //
-// Ninguno de estos tres valores está hardcodeado acá: si el candidato no
-// los cargó en Configuración, el mensaje sale igual que antes de este
-// upgrade (retrocompatibilidad con campañas ya existentes).
+// Ninguno de estos valores está hardcodeado acá: si el candidato no los
+// cargó en Configuración, el mensaje sale igual que antes de este upgrade
+// (retrocompatibilidad con campañas ya existentes).
 
 // Formatea una fecha ISO (yyyy-mm-dd) como "15 de noviembre" en español.
 // Si el valor no es una fecha ISO parseable (por ejemplo texto libre
@@ -42,13 +45,16 @@ export function formatElectionDate(electionDate) {
 //
 // WhatsApp usa *asterisco simple* para negrita (no ** de markdown). Van en
 // negrita el nombre del destinatario y todos los valores que van entre
-// comillas: nombre del candidato, lista y opción.
+// comillas: nombre del candidato (+ eslogan, si hay), lista y opción.
 export function buildRecordatorioVotoMessage(candidate, record) {
   const fechaFormateada = formatElectionDate(candidate?.electionDate)
   const tieneListaYOpcion = Boolean(candidate?.lista && candidate?.opcion)
+  const nombreCandidato = candidate?.slogan
+    ? `${candidate.name} – ${candidate.slogan}`
+    : candidate?.name
 
   return (
-    `Hola *${record.nombre}*, te escribimos desde el equipo de campaña de "*${candidate?.name}*". ` +
+    `Hola *${record.nombre}*, te escribimos desde el equipo de campaña de "*${nombreCandidato}*". ` +
     `Tu lugar de votación es ${record.local || 'N/A'}, mesa ${record.mesa || 'N/A'}, orden ${record.orden || 'N/A'}. ` +
     `¡Contamos con tu voto${fechaFormateada ? ` el ${fechaFormateada}` : ''}!` +
     (tieneListaYOpcion ? ` Vota Lista "*${candidate.lista}*" Opción "*${candidate.opcion}*"` : '')

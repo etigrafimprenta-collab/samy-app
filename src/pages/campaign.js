@@ -264,7 +264,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     } else if (tab === 'roles') {
       import('./roles-candidate.js').then(({ renderRolesCandidate }) => renderRolesCandidate(content, candidateId, user, myRole))
     } else if (tab === 'reportes') {
-      import('./reportes-candidate.js').then(({ renderReportesCandidate }) => renderReportesCandidate(content, candidateId, user, myRole, misRoles))
+      import('./reportes-candidate.js').then(({ renderReportesCandidate }) => renderReportesCandidate(content, candidateId, user, myRole, misRoles, candidate))
     }
   }
 
@@ -454,6 +454,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         <h2 style="margin:0 0 12px; font-size:1.05rem;">🛠️ Configuración de la campaña</h2>
         <form id="form-branding" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px;">
           <input name="name" value="${escapeHtml(candidate.name)}" placeholder="Nombre del candidato" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
+          <input name="slogan" value="${escapeHtml(candidate.slogan || '')}" placeholder="Eslogan (opcional)" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <input name="electionName" value="${escapeHtml(candidate.electionName || '')}" placeholder="Nombre de la elección" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <input name="electionDate" type="date" value="${candidate.electionDate ? String(candidate.electionDate).slice(0, 10) : ''}" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
           <input name="lista" value="${escapeHtml(candidate.lista || '')}" placeholder="Número de Lista" style="padding:8px; border:1px solid #ccc; border-radius:4px;">
@@ -462,7 +463,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <button type="submit" style="padding:10px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Guardar</button>
         </form>
         <div id="branding-msg" style="margin-top:8px; font-size:.85rem;"></div>
-        <p style="font-size:.78rem; color:#666; margin-top:16px;">La Fecha de la elección, la Lista y la Opción se usan para armar el mensaje de WhatsApp de recordatorio de votación ("¡Contamos con tu voto el &lt;fecha&gt;! Vota Lista X Opción Y") en las pestañas Mis registros y Registros. Cualquiera de los tres puede quedar vacío: el mensaje simplemente omite esa parte.</p>
+        <p style="font-size:.78rem; color:#666; margin-top:16px;">El Eslogan, la Fecha de la elección, la Lista y la Opción se usan para armar el mensaje de WhatsApp de recordatorio de votación (nombre del candidato + eslogan en negrita, "¡Contamos con tu voto el &lt;fecha&gt;! Vota Lista X Opción Y") en las pestañas Mis registros y Registros. Cualquiera de los cuatro puede quedar vacío: el mensaje simplemente omite esa parte.</p>
       </div>
     `
 
@@ -527,6 +528,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       try {
         const cambios = {
           name: fd.get('name').trim(),
+          slogan: fd.get('slogan').trim(),
           electionName: fd.get('electionName').trim(),
           electionDate: fd.get('electionDate') || null,
           lista: fd.get('lista').trim(),
@@ -1941,11 +1943,23 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <div style="font-size:.82rem; color:#666; margin-bottom:8px;"><strong>${registros.length}</strong> registro${registros.length === 1 ? '' : 's'}</div>
           <div style="overflow-x:auto;">
             <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-              <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Teléfono</th><th>Local</th><th>Mesa</th></tr></thead>
-              <tbody>${registros.map(r => `<tr style="border-bottom:1px solid #eee;">
+              <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Teléfono</th><th>Local</th><th>Mesa</th><th>WhatsApp</th></tr></thead>
+              <tbody>${registros.map(r => {
+                const telLimpio = normalizarTelefonoPY(r.telefono)
+                const msgSaludo = encodeURIComponent(buildRecordatorioVotoMessage(candidate, r))
+                return `<tr style="border-bottom:1px solid #eee;">
                 <td style="padding:6px;">${escapeHtml(r.nombre)}</td><td>${escapeHtml(r.cedula)}</td><td>${escapeHtml(r.telefono) || '—'}</td>
                 <td>${escapeHtml(r.local) || '—'}</td><td>${escapeHtml(r.mesa) || '—'}</td>
-              </tr>`).join('')}</tbody>
+                <td>
+                  ${telLimpio ? `
+                    <div style="display:flex; gap:4px;">
+                      <a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">Blanco</a>
+                      <a href="https://wa.me/${telLimpio}?text=${msgSaludo}" target="_blank" rel="noopener" style="text-decoration:none; background:#128c7e; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">Mesa</a>
+                    </div>
+                  ` : '<span style="color:#999; font-size:.75rem;">sin tel.</span>'}
+                </td>
+              </tr>`
+              }).join('')}</tbody>
             </table>
           </div>
         `

@@ -356,7 +356,7 @@ service cloud.firestore {
       allow update: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin']) &&
           request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['name', 'logoUrl', 'primaryColor', 'electionName', 'electionDate', 'lista', 'opcion', 'updatedAt']));
+            .hasOnly(['name', 'logoUrl', 'primaryColor', 'electionName', 'electionDate', 'lista', 'opcion', 'slogan', 'updatedAt']));
       allow delete: if isSuperAdmin();
     }
 

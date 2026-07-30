@@ -45,7 +45,7 @@ export async function getCandidate(candidateId) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null
 }
 
-export async function updateCandidateBranding(candidateId, { name, logoUrl, primaryColor, electionName, electionDate, lista, opcion }) {
+export async function updateCandidateBranding(candidateId, { name, logoUrl, primaryColor, electionName, electionDate, lista, opcion, slogan }) {
   await updateDoc(doc(db, ...candidatePath(candidateId)), {
     ...(name !== undefined && { name }),
     ...(logoUrl !== undefined && { logoUrl }),
@@ -54,6 +54,7 @@ export async function updateCandidateBranding(candidateId, { name, logoUrl, prim
     ...(electionDate !== undefined && { electionDate }),
     ...(lista !== undefined && { lista }),
     ...(opcion !== undefined && { opcion }),
+    ...(slogan !== undefined && { slogan }),
     updatedAt: serverTimestamp()
   })
 }

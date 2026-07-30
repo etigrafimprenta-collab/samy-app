@@ -7,6 +7,13 @@ import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
 import { exportGenericToExcel } from '../lib/excel.js'
 import { listRecordsPageFiltered, listCandidateUsersPage, createReportPreset } from '../lib/firebaseCandidate.js'
+import { buildRecordatorioVotoMessage } from '../lib/campaignMessages.js'
+
+function normalizarTelefonoPY(tel) {
+  if (!tel) return ''
+  const digits = String(tel).replace(/\D/g, '')
+  return '595' + digits.replace(/^0/, '')
+}
 
 const EJES = [
   { id: '', label: 'Sin filtro (más recientes)' },
@@ -30,7 +37,7 @@ async function cargarRoster(candidateId) {
   return equipo
 }
 
-export async function renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset = null) {
+export async function renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset = null, candidate = null) {
   let eje = preset?.eje || ''
   let valor = preset?.valor || ''
   // Solo se puede guardar un filtro recién aplicado con "Filtrar" (o
@@ -146,12 +153,24 @@ export async function renderReporteRegistros(body, candidateId, user, myRole, mi
       <div style="font-size:.82rem; color:#666; margin-bottom:8px;"><strong>${items.length}</strong> registro${items.length === 1 ? '' : 's'} cargado${items.length === 1 ? '' : 's'}${textoDireccion ? ' (filtrado por dirección)' : ''}</div>
       <div style="overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; font-size:.85rem;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Teléfono</th><th>Dirección</th><th>Local</th><th>Mesa</th><th>Dirigente</th></tr></thead>
-          <tbody>${items.map(r => `<tr style="border-bottom:1px solid #eee;">
+          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Nombre</th><th>Cédula</th><th>Teléfono</th><th>Dirección</th><th>Local</th><th>Mesa</th><th>Dirigente</th><th>WhatsApp</th></tr></thead>
+          <tbody>${items.map(r => {
+            const telLimpio = normalizarTelefonoPY(r.telefono)
+            const msgSaludo = encodeURIComponent(buildRecordatorioVotoMessage(candidate, r))
+            return `<tr style="border-bottom:1px solid #eee;">
             <td style="padding:6px;">${escapeHtml(r.nombre)}</td><td>${escapeHtml(r.cedula)}</td><td>${escapeHtml(r.telefono) || '—'}</td>
             <td>${escapeHtml(r.direccion) || '—'}</td><td>${escapeHtml(r.local) || '—'}</td><td>${escapeHtml(r.mesa) || '—'}</td>
             <td>${escapeHtml(nombreUsuario(r.uid))}</td>
-          </tr>`).join('')}</tbody>
+            <td>
+              ${telLimpio ? `
+                <div style="display:flex; gap:4px;">
+                  <a href="https://wa.me/${telLimpio}" target="_blank" rel="noopener" style="text-decoration:none; background:#25d366; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">Blanco</a>
+                  <a href="https://wa.me/${telLimpio}?text=${msgSaludo}" target="_blank" rel="noopener" style="text-decoration:none; background:#128c7e; color:white; padding:4px 8px; border-radius:4px; font-size:.72rem; font-weight:600;">Mesa</a>
+                </div>
+              ` : '<span style="color:#999; font-size:.75rem;">sin tel.</span>'}
+            </td>
+          </tr>`
+          }).join('')}</tbody>
         </table>
       </div>
     `

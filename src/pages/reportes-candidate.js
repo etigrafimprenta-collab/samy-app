@@ -58,7 +58,7 @@ const statCard = (label, value, color, key) => `
     <div class="stat-label">${label}</div>
   </button>`
 
-export async function renderReportesCandidate(container, candidateId, user, myRole, misRoles = []) {
+export async function renderReportesCandidate(container, candidateId, user, myRole, misRoles = [], candidate = null) {
   let tab = 'resumen-general'
   let presetPendiente = null // seteado por "Abrir" en Reportes Guardados, consumido una vez por pintarTab
   // Tabs sin `roles` = visibles para cualquiera con acceso al módulo
@@ -118,7 +118,7 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       const preset = presetPendiente
       presetPendiente = null
       const { renderReporteRegistros } = await import('./reportes-registros-candidate.js')
-      return renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset)
+      return renderReporteRegistros(body, candidateId, user, myRole, misRoles, preset, candidate)
     }
     if (tab === 'equipo') {
       body.innerHTML = 'Cargando...'
