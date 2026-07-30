@@ -29,6 +29,7 @@ import {
   getRecordByCedula
 } from '../lib/firebaseCandidate.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
+import { buildRecordatorioVotoMessage } from '../lib/campaignMessages.js'
 import { can, getGrantedScopes } from '../lib/rbac.js'
 import { ROLE_LABELS } from '../lib/roleLabels.js'
 // Los paneles ricos (Día D admin/control, choferes) se importan
@@ -461,7 +462,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           <button type="submit" style="padding:10px; background:${candidate.primaryColor || '#1f4b7a'}; color:white; border:none; border-radius:4px; font-weight:700; cursor:pointer;">Guardar</button>
         </form>
         <div id="branding-msg" style="margin-top:8px; font-size:.85rem;"></div>
-        <p style="font-size:.78rem; color:#666; margin-top:16px;">La Lista y la Opción se usan para armar el mensaje de WhatsApp de "Vota Lista X Opción Y" en la pestaña Mis registros.</p>
+        <p style="font-size:.78rem; color:#666; margin-top:16px;">La Fecha de la elección, la Lista y la Opción se usan para armar el mensaje de WhatsApp de recordatorio de votación ("¡Contamos con tu voto el &lt;fecha&gt;! Vota Lista X Opción Y") en las pestañas Mis registros y Registros. Cualquiera de los tres puede quedar vacío: el mensaje simplemente omite esa parte.</p>
       </div>
     `
 
@@ -882,11 +883,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                   ? '<span style="color:#2e7d32; font-weight:700;">Sí</span>'
                   : '<span style="color:#999;">No</span>'
                 const telLimpio = normalizarTelefonoPY(r.telefono)
-                const msgSaludo = encodeURIComponent(
-                  `Hola ${r.nombre}, te escribimos desde el equipo de campaña de "${candidate.name}". ` +
-                  `Tu lugar de votación es ${r.local || 'N/A'}, mesa ${r.mesa || 'N/A'}, orden ${r.orden || 'N/A'}. ¡Contamos con tu voto!` +
-                  (candidate.lista && candidate.opcion ? ` Vota Lista "${candidate.lista}" Opción "${candidate.opcion}"` : '')
-                )
+                const msgSaludo = encodeURIComponent(buildRecordatorioVotoMessage(candidate, r))
                 return `<tr style="border-bottom:1px solid #eee; ${hayFiltro ? 'background:#fffacd;' : ''}">
                 <td style="padding:6px; font-family:monospace; font-size:.78rem;">${escapeHtml(r.cedula)}</td>
                 <td style="padding:6px;"><strong>${escapeHtml(r.nombre)}</strong></td>
@@ -1694,11 +1691,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                   ? '<span style="color:#2e7d32; font-weight:700;">Sí</span>'
                   : '<span style="color:#999;">No</span>'
                 const telLimpio = normalizarTelefonoPY(r.telefono)
-                const msgSaludo = encodeURIComponent(
-                  `Hola ${r.nombre}, te escribimos desde el equipo de campaña de "${candidate.name}". ` +
-                  `Tu lugar de votación es ${r.local || 'N/A'}, mesa ${r.mesa || 'N/A'}, orden ${r.orden || 'N/A'}. ¡Contamos con tu voto!` +
-                  (candidate.lista && candidate.opcion ? ` Vota Lista "${candidate.lista}" Opción "${candidate.opcion}"` : '')
-                )
+                const msgSaludo = encodeURIComponent(buildRecordatorioVotoMessage(candidate, r))
                 return `<tr style="border-bottom:1px solid #eee; ${hayFiltro ? 'background:#fffacd;' : ''}" data-idx="${i}">
                 <td style="padding:6px; font-family:monospace; font-size:.78rem;">${escapeHtml(r.cedula)}</td>
                 <td style="padding:6px;"><strong>${escapeHtml(r.nombre)}</strong></td>
