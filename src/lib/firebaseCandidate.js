@@ -810,6 +810,19 @@ export async function getAllCandidateUsers(candidateId) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
+// Crea un operador de Centro de Contacto evitando cuentas duplicadas —
+// a diferencia de crearUsuarioCandidato (que sigue usando Usuarios/
+// Dirigentes sin cambios), esta Cloud Function vincula el rol a una
+// identidad ya existente si el email/CI ya está registrado, y si es
+// persona nueva crea la cuenta SIN revelar contraseña (passwordAssigned:
+// false) — se asigna después desde la tarjeta ("🔐 Asignar contraseña").
+// Ver functions/src/index.ts::crearOperadorCandidato.
+export async function crearOperador(candidateId, { nombre, email, cedula, telefono }) {
+  const fn = httpsCallable(functionsInstance, 'crearOperadorCandidato')
+  const res = await fn({ candidateId, nombre, email, cedula, telefono })
+  return res.data
+}
+
 export async function updateCandidateUserMesaLocal(candidateId, uid, data) {
   await updateDoc(doc(db, ...candidatePath(candidateId, 'users', uid)), {
     seccional: data.seccional || null,

@@ -13,7 +13,8 @@ import {
   updateCandidateUserPago,
   deleteCandidateUser,
   getRecordByCedula,
-  searchVoterByCedula
+  searchVoterByCedula,
+  crearOperador
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
@@ -23,11 +24,6 @@ const CADENCIA_LABELS = {
   semanal: 'Semanal',
   quincenal: 'Quincenal',
   mensual: 'Mensual'
-}
-
-function cryptoRandomPassword() {
-  const bytes = crypto.getRandomValues(new Uint8Array(9))
-  return btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, '').slice(0, 12)
 }
 
 export function renderOperadorCandidate(container, candidateId) {
@@ -95,7 +91,14 @@ export function renderOperadorCandidate(container, candidateId) {
 
     tablaEl.innerHTML = `
       <div class="roster-card-grid">
-        ${filtrados.map((o, i) => `
+        ${filtrados.map((o, i) => {
+          // Ausencia del campo (todo operador creado antes de este cambio)
+          // cuenta como "ya tiene acceso" — son cuentas reales que ya están
+          // operando, creadas con contraseña desde el día 1. Solo los
+          // operadores creados por el flujo nuevo (crearOperador) arrancan
+          // en passwordAssigned:false. Ver diagnóstico del plan.
+          const tieneAcceso = o.passwordAssigned !== false
+          return `
           <div class="roster-card" data-idx="${i}">
             <div class="roster-card-name">${escapeHtml(o.nombre) || '—'}</div>
             <div class="roster-card-fields">
@@ -107,19 +110,28 @@ export function renderOperadorCandidate(container, candidateId) {
             </div>
             <div class="roster-card-actions">
               <button class="btn-editar-pago btn-compact" data-idx="${i}" style="background:#ff9800; color:white;">✏️ Pago</button>
-              <button class="btn-editar-operador btn-compact" data-idx="${i}" style="background:#2196f3; color:white;">✏️ Editar rol</button>
+              ${tieneAcceso
+                ? `<button class="btn-acceso-existente btn-compact" data-idx="${i}" style="background:#9e9e9e; color:white;">🔐 Acceso existente</button>`
+                : `<button class="btn-asignar-password btn-compact" data-idx="${i}" style="background:#2196f3; color:white;">🔐 Asignar contraseña</button>`}
               <button class="btn-eliminar-operador btn-compact" data-idx="${i}" style="background:#d32f2f; color:white;">🗑️ Eliminar</button>
             </div>
           </div>
-        `).join('')}
+        `
+        }).join('')}
       </div>
     `
 
     tablaEl.querySelectorAll('.btn-editar-pago').forEach(btn => {
       btn.addEventListener('click', () => mostrarModalPago(filtrados[Number(btn.dataset.idx)]))
     })
-    tablaEl.querySelectorAll('.btn-editar-operador').forEach(btn => {
-      btn.addEventListener('click', () => mostrarModalCambiarRol(filtrados[Number(btn.dataset.idx)]))
+    tablaEl.querySelectorAll('.btn-asignar-password').forEach(btn => {
+      btn.addEventListener('click', () => mostrarModalAsignarPassword(filtrados[Number(btn.dataset.idx)]))
+    })
+    tablaEl.querySelectorAll('.btn-acceso-existente').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const o = filtrados[Number(btn.dataset.idx)]
+        alert(`🔐 ${o.nombre || o.email} ya posee acceso al sistema. Debe utilizar la misma contraseña con la que actualmente ingresa al sistema.`)
+      })
     })
     tablaEl.querySelectorAll('.btn-eliminar-operador').forEach(btn => {
       btn.addEventListener('click', () => eliminarOperador(filtrados[Number(btn.dataset.idx)]))
@@ -209,11 +221,14 @@ export function renderOperadorCandidate(container, candidateId) {
 
       msg.textContent = 'Creando...'
       try {
-        const crearUsuarioCandidato = httpsCallable(functionsInstance, 'crearUsuarioCandidato')
-        const password = cryptoRandomPassword()
-        const result = await crearUsuarioCandidato({ candidateId, nombre, email, rol: 'operador', cedula, telefono, password })
-        msg.innerHTML = `✅ ${escapeHtml(result.data.mensaje)}<br>Contraseña: <strong>${escapeHtml(password)}</strong> (copiala ahora)`
-        setTimeout(() => { modal.remove(); cargarDatos() }, 2500)
+        // crearOperador (Cloud Function crearOperadorCandidato) revisa si
+        // esta CI/email ya pertenecen a alguien del sistema antes de crear
+        // nada — si existe, vincula el rol a esa cuenta en vez de duplicar.
+        // No genera/muestra contraseña acá: si es cuenta nueva, se asigna
+        // después desde "🔐 Asignar contraseña" en la tarjeta.
+        const result = await crearOperador(candidateId, { nombre, email, cedula, telefono })
+        msg.innerHTML = `✅ ${escapeHtml(result.mensaje)}`
+        setTimeout(() => { modal.remove(); cargarDatos() }, 2000)
       } catch (err) {
         msg.innerHTML = `❌ ${escapeHtml(err.message)}`
       }
@@ -260,16 +275,20 @@ export function renderOperadorCandidate(container, candidateId) {
     modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
   }
 
-  function mostrarModalCambiarRol(operador) {
-    const OTHER_ROLES = { campaign_admin: 'Administrador de campaña', coordinator: 'Coordinador', dirigente: 'Dirigente', mesario: 'Mesario', chofer: 'Chofer', viewer: 'Visualizador', auditor: 'Auditor' }
+  // Solo aparece cuando o.passwordAssigned === false (cuenta recién creada
+  // por crearOperador, contraseña interna sin divulgar a nadie todavía).
+  // Reusa resetearPasswordUsuarioCandidato (mismo patrón que
+  // modalCambiarPassword en campaign.js:1483-1508) — esa Cloud Function ya
+  // marca passwordAssigned:true al terminar, así que después de esto la
+  // tarjeta pasa sola a "🔐 Acceso existente" en el próximo cargarDatos().
+  function mostrarModalAsignarPassword(operador) {
     const modal = document.createElement('div')
     modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; overflow-y: auto; padding: 20px;'
     modal.innerHTML = `
       <div style="background: white; border-radius: 8px; max-width: 420px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.3); padding: 24px;">
-        <h3 style="margin:0 0 16px;">Nuevo rol para ${escapeHtml(operador.nombre || operador.email)}</h3>
-        <select id="sel-nuevo-rol" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px;">
-          ${Object.entries(OTHER_ROLES).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
-        </select>
+        <h3 style="margin:0 0 16px;">🔐 Asignar contraseña a ${escapeHtml(operador.nombre || operador.email)}</h3>
+        <input id="inp-nueva-pass" placeholder="Dejar vacío para generar una segura" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
+        <div id="asignar-pass-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
         <div style="display:flex; gap:8px;">
           <button id="btn-confirmar" style="flex:1; background:#2196f3; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
           <button id="btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
@@ -279,14 +298,19 @@ export function renderOperadorCandidate(container, candidateId) {
     document.body.appendChild(modal)
     modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
     modal.querySelector('#btn-confirmar').addEventListener('click', async () => {
-      const newRole = modal.querySelector('#sel-nuevo-rol').value
+      const newPassword = modal.querySelector('#inp-nueva-pass').value.trim()
+      const msg = modal.querySelector('#asignar-pass-msg')
       try {
-        const cambiarRol = httpsCallable(functionsInstance, 'cambiarRolUsuarioCandidato')
-        await cambiarRol({ candidateId, uid: operador.id, newRole })
-        modal.remove()
-        cargarDatos()
+        const resetPass = httpsCallable(functionsInstance, 'resetearPasswordUsuarioCandidato')
+        const result = await resetPass({ candidateId, uid: operador.id, newPassword: newPassword || undefined })
+        if (result.data?.generatedPassword) {
+          msg.innerHTML = `✅ Contraseña generada: <strong>${escapeHtml(result.data.generatedPassword)}</strong><br>Copiala ahora, no se vuelve a mostrar.`
+        } else {
+          msg.innerHTML = '✅ Contraseña asignada.'
+        }
+        setTimeout(() => { modal.remove(); cargarDatos() }, 2500)
       } catch (err) {
-        alert('Error: ' + err.message)
+        msg.innerHTML = `❌ ${escapeHtml(err.message)}`
       }
     })
   }

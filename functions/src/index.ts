@@ -520,6 +520,182 @@ export const crearUsuarioCandidato = functions.https.onCall(
   }
 );
 
+// Crea un operador de Centro de Contacto evitando cuentas duplicadas —
+// función separada de crearUsuarioCandidato (que siguen usando Usuarios y
+// Dirigentes sin cambios) a propósito: mismo criterio que el resto del
+// proyecto de preferir una función nueva y acotada antes que ampliar una
+// compartida y arriesgar los otros módulos que ya la usan.
+//
+// 2 diferencias con crearUsuarioCandidato:
+// 1. Si el email ya tiene cuenta de Firebase Auth (global al proyecto, no
+//    por candidato — así ya funciona hoy el multi-candidato) NO tira
+//    error: vincula el rol "operador" a esa identidad existente en este
+//    candidato, sin tocar su contraseña.
+// 2. Si es una persona nueva, crea la cuenta con una contraseña interna
+//    aleatoria que NO se revela a nadie (`passwordAssigned:false`) — el
+//    admin la asigna después desde la tarjeta ("🔐 Asignar contraseña"),
+//    en vez de mostrarla una sola vez en el momento de creación.
+export const crearOperadorCandidato = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, nombre, email, cedula, telefono } = request.data ?? {};
+
+    if (!candidateId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
+    }
+    const callerUid = await requireCandidateRole(request.auth, candidateId, [
+      "campaign_admin",
+    ]);
+    if (!nombre || !email) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan campos requeridos");
+    }
+
+    // 1. Dedup por CI: si esta cédula ya está registrada con OTRO email,
+    // no hay forma de vincularla automáticamente (Firebase Auth identifica
+    // cuentas por email, no por CI) — se bloquea y se avisa para que el
+    // admin decida a mano en vez de arriesgar una cuenta duplicada
+    // silenciosa. No se menciona en qué candidato está la otra cuenta
+    // (aislamiento entre candidatos del mismo proyecto).
+    if (cedula) {
+      const ciSnap = await admin
+        .firestore()
+        .collectionGroup("users")
+        .where("cedula", "==", cedula)
+        .get();
+      const otroEmail = ciSnap.docs.find((d) => d.data().email && d.data().email !== email);
+      if (otroEmail) {
+        throw new functions.https.HttpsError(
+          "already-exists",
+          `Esta CI ya tiene una cuenta registrada con el email ${otroEmail.data().email} — ` +
+            "usá ese mismo email si es la misma persona, o confirmá que se trata de alguien distinto."
+        );
+      }
+    }
+
+    // 2. Dedup por email: ¿ya existe una cuenta de Firebase Auth con este
+    // email (en cualquier candidato)?
+    let existingUser: admin.auth.UserRecord | null = null;
+    try {
+      existingUser = await admin.auth().getUserByEmail(email);
+    } catch (error: any) {
+      if (error.code !== "auth/user-not-found") {
+        throw new functions.https.HttpsError("internal", error.message);
+      }
+    }
+
+    if (existingUser) {
+      const targetRef = admin
+        .firestore()
+        .collection("candidates")
+        .doc(candidateId)
+        .collection("users")
+        .doc(existingUser.uid);
+      const targetSnap = await targetRef.get();
+      if (targetSnap.exists) {
+        throw new functions.https.HttpsError(
+          "already-exists",
+          `Esta persona ya es "${targetSnap.data()?.role}" en este candidato — para convertirla ` +
+            "en operador/a hay que cambiarle el rol desde Usuarios, no crear un perfil nuevo."
+        );
+      }
+
+      // Vincular: nueva membresía en ESTE candidato sobre el mismo uid, sin
+      // tocar la cuenta de Auth para nada — conserva la contraseña que ya
+      // usa en otro lado.
+      await targetRef.set({
+        uid: existingUser.uid,
+        email,
+        nombre,
+        role: "operador",
+        cedula: cedula || null,
+        telefono: telefono || null,
+        status: "activo",
+        passwordAssigned: true,
+        linkedExistingAccount: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: callerUid,
+      });
+      await upsertUserCandidateIndex(existingUser.uid, candidateId, "operador");
+
+      await writeCandidateAuditLog(candidateId, {
+        actorUid: callerUid,
+        actorEmail: request.auth?.token.email || null,
+        action: "crear_operador_vinculado",
+        entityType: "users",
+        entityId: existingUser.uid,
+        before: null,
+        after: { email, nombre, role: "operador", linkedExistingAccount: true },
+      });
+
+      return {
+        uid: existingUser.uid,
+        email,
+        vinculado: true,
+        mensaje: `${nombre} ya tenía una cuenta en el sistema — se vinculó como operador/a sin crear una cuenta nueva.`,
+      };
+    }
+
+    // 3. Persona nueva de verdad: crear cuenta con contraseña interna
+    // aleatoria que nadie conoce — el admin la asigna después desde la
+    // tarjeta ("🔐 Asignar contraseña" → resetearPasswordUsuarioCandidato).
+    try {
+      const passwordInternaSinDivulgar = crypto.randomBytes(18).toString("base64url");
+      const userRecord = await admin.auth().createUser({
+        email,
+        password: passwordInternaSinDivulgar,
+        displayName: nombre,
+      });
+
+      await admin
+        .firestore()
+        .collection("candidates")
+        .doc(candidateId)
+        .collection("users")
+        .doc(userRecord.uid)
+        .set({
+          uid: userRecord.uid,
+          email,
+          nombre,
+          role: "operador",
+          cedula: cedula || null,
+          telefono: telefono || null,
+          status: "activo",
+          passwordAssigned: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdBy: callerUid,
+        });
+      await upsertUserCandidateIndex(userRecord.uid, candidateId, "operador");
+
+      await writeCandidateAuditLog(candidateId, {
+        actorUid: callerUid,
+        actorEmail: request.auth?.token.email || null,
+        action: "crear_operador",
+        entityType: "users",
+        entityId: userRecord.uid,
+        before: null,
+        after: { email, nombre, role: "operador" },
+      });
+
+      return {
+        uid: userRecord.uid,
+        email: userRecord.email,
+        vinculado: false,
+        mensaje: `Operador ${nombre} creado — falta asignarle una contraseña desde su tarjeta.`,
+      };
+    } catch (error: any) {
+      if (error.code === "auth/email-already-exists") {
+        // Carrera con el getUserByEmail() de arriba: alguien más creó la
+        // cuenta en el medio. Ventana muy chica, pero se cubre en vez de
+        // devolver un error interno genérico.
+        throw new functions.https.HttpsError(
+          "already-exists",
+          `El email ${email} ya está registrado — reintentá, es posible que ya se haya vinculado.`
+        );
+      }
+      throw new functions.https.HttpsError("internal", error.message);
+    }
+  }
+);
+
 // REGLA OBLIGATORIA 1: nadie cambia su propio rol, tampoco acá.
 export const cambiarRolUsuarioCandidato = functions.https.onCall(
   async (request: functions.https.CallableRequest<any>) => {
@@ -587,13 +763,13 @@ export const resetearPasswordUsuarioCandidato = functions.https.onCall(
       "campaign_admin",
     ]);
 
-    const targetSnap = await admin
+    const targetRef = admin
       .firestore()
       .collection("candidates")
       .doc(candidateId)
       .collection("users")
-      .doc(uid)
-      .get();
+      .doc(uid);
+    const targetSnap = await targetRef.get();
     if (!targetSnap.exists) {
       throw new functions.https.HttpsError("not-found", "Usuario no encontrado");
     }
@@ -604,6 +780,13 @@ export const resetearPasswordUsuarioCandidato = functions.https.onCall(
       : String(newPassword);
 
     await admin.auth().updateUser(uid, { password });
+    // A partir de acá esta cuenta tiene una contraseña utilizable, sin
+    // importar si antes tenía `passwordAssigned:false` (recién creada,
+    // sin asignar todavía — ver crearOperadorCandidato) o no tenía el
+    // campo (cualquier usuario creado antes de que este campo existiera,
+    // que YA tenía contraseña desde su creación). Es correcto marcarlo acá
+    // sin importar desde qué módulo se llamó esta función.
+    await targetRef.set({ passwordAssigned: true }, { merge: true });
 
     await writeCandidateAuditLog(candidateId, {
       actorUid: callerUid,
