@@ -8,3 +8,7 @@ typings/
 # Node.js dependency directory
 node_modules/
 *.local
+
+# Logs del emulador (firebase emulators:exec, usado por npm test)
+firebase-debug.log
+firestore-debug.log
