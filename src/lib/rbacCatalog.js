@@ -86,6 +86,17 @@ export const PERMISSIONS = [
   { key: 'drivers.edit', module: 'drivers', name: 'Editar chofer' },
   { key: 'drivers.delete', module: 'drivers', name: 'Borrar chofer' },
 
+  // driver_zones (pestaña "Zonas de búsqueda", dentro del módulo drivers —
+  // no es una pestaña propia de campaign.js, así que no tiene su propio
+  // módulo en MODULES arriba, igual criterio que el resto de sub-tabs de
+  // Choferes que no están en TAB_ROLES).
+  { key: 'driver_zones.view', module: 'drivers', name: 'Ver zonas de búsqueda' },
+  { key: 'driver_zones.create', module: 'drivers', name: 'Crear zona de búsqueda' },
+  { key: 'driver_zones.edit', module: 'drivers', name: 'Editar zona de búsqueda' },
+  { key: 'driver_zones.assign', module: 'drivers', name: 'Asignar/cambiar chofer de una zona' },
+  { key: 'driver_zones.cancel', module: 'drivers', name: 'Cancelar zona / liberar votantes' },
+  { key: 'driver_zones.export', module: 'drivers', name: 'Exportar listado de zona (Excel/PDF/WhatsApp)' },
+
   // table_members
   { key: 'table_members.view', module: 'table_members', name: 'Ver mesarios' },
   { key: 'table_members.create', module: 'table_members', name: 'Crear mesario' },
