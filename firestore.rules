@@ -568,6 +568,39 @@ service cloud.firestore {
         hasEffectivePermission(candidateId, 'table_members.delete');
     }
 
+    // ── /candidates/{candidateId}/driverZones/{zoneId} — Zonas de búsqueda
+    // (Choferes, pestaña nueva). A diferencia de drivers/mesarios (lectura
+    // abierta a belongsToCandidate), acá la lectura es más restrictiva a
+    // propósito: el pedido exige no exponer ubicación exacta salvo rol
+    // autorizado. Toda escritura pasa por Cloud Functions (Admin SDK, ver
+    // functions/src/driverZones.ts) para poder auditar en auditLogs y
+    // revalidar exclusión mutua en una transacción — el cliente NUNCA
+    // escribe acá directo (mismo criterio que auditLogs, línea ~856).
+    match /candidates/{candidateId}/driverZones/{zoneId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasEffectivePermission(candidateId, 'driver_zones.view') ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.driverId));
+      allow write: if false;
+    }
+
+    // ── /candidates/{candidateId}/driverZoneVoters/{voterId} — asignación
+    // votante↔zona↔chofer. El ID del documento ES el id de savedRecords
+    // (mismo patrón que electionDayControl/{voterId}) — es lo que garantiza
+    // que un votante nunca tenga 2 asignaciones activas: ambas escrituras
+    // concurrentes apuntan al mismo doc y se resuelven en una sola
+    // runTransaction() del lado servidor. allow write:if false porque la
+    // revalidación de "no reasignar a alguien ya asignado" solo se puede
+    // hacer de forma atómica en una Cloud Function, no en reglas declarativas
+    // que comparan un solo doc contra sí mismo.
+    match /candidates/{candidateId}/driverZoneVoters/{voterId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
+        hasEffectivePermission(candidateId, 'driver_zones.view') ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.driverId));
+      allow write: if false;
+    }
+
     // ── /candidates/{candidateId}/reportPresets/{id} — Reportes Guardados
     // (Etapa 4): presets de filtro para Reportes > Registros. Lectura con
     // los mismos roles que TAB_ROLES.reportes en campaign.js (doc-

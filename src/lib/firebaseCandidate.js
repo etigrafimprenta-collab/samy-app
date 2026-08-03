@@ -1013,6 +1013,99 @@ export async function assignVotantesToDriver(candidateId, driverId, votantes) {
   })
 }
 
+// ── Zonas de búsqueda (Choferes > pestaña "Zonas de búsqueda") ──────────
+// A diferencia del resto de Choferes (arriba, updateDoc/addDoc directos
+// del cliente), TODA escritura de zonas pasa por Cloud Functions
+// (functions/src/driverZones.ts) — firestore.rules bloquea `write` directo
+// en driverZones/driverZoneVoters (`allow write: if false`) a propósito,
+// porque la garantía de "un votante nunca queda en 2 zonas" solo es
+// demostrable con una transacción server-side. Ver diagnóstico en el plan
+// de implementación (`driver_zones.*` en rbacCatalog.js).
+const previewVotersInZoneFn = () => httpsCallable(functionsInstance, 'previewVotersInZone')
+const createZoneAndReserveFn = () => httpsCallable(functionsInstance, 'createZoneAndReserve')
+const confirmZoneAssignmentFn = () => httpsCallable(functionsInstance, 'confirmZoneAssignment')
+const releaseZoneVotersFn = () => httpsCallable(functionsInstance, 'releaseZoneVoters')
+const cancelZoneFn = () => httpsCallable(functionsInstance, 'cancelZone')
+const changeZoneDriverFn = () => httpsCallable(functionsInstance, 'changeZoneDriver')
+const updateZoneMetaFn = () => httpsCallable(functionsInstance, 'updateZoneMeta')
+
+// Solo lectura — no reserva nada. Devuelve { voters: [{voterId, nombre,
+// cedula, telefono, direccion, local, mesa, orden, distanceMeters}] }
+// ordenados por distancia, ya excluyendo votantes ocupados.
+export async function previewVotersInZone(candidateId, { latitude, longitude, radiusMeters, maxVoters }) {
+  const res = await previewVotersInZoneFn()({ candidateId, latitude, longitude, radiusMeters, maxVoters })
+  return res.data.voters
+}
+
+// Crea la zona y reserva (RESERVADO) los voterIds elegidos. Devuelve
+// { zoneId, reserved: [voterId...], lost: [voterId...] } — `lost` son los
+// que se perdieron por una carrera con otra zona creada en simultáneo
+// (la UI tiene que avisar de esto, no asumir que todo lo pedido se reservó).
+export async function createZoneAndReserve(candidateId, { name, latitude, longitude, radiusMeters, maxVoters, driverId, voterIds }) {
+  const res = await createZoneAndReserveFn()({ candidateId, name, latitude, longitude, radiusMeters, maxVoters, driverId, voterIds })
+  return res.data
+}
+
+// RESERVADO → ASIGNADO + fan-out a savedRecords.chofer_asignado y
+// electionDayControl.assignedDriverId. Devuelve { confirmed: [voterId...] }.
+export async function confirmZoneAssignment(candidateId, zoneId) {
+  const res = await confirmZoneAssignmentFn()({ candidateId, zoneId })
+  return res.data
+}
+
+// Libera votantes puntuales de una zona (vuelven a estar DISPONIBLE).
+export async function releaseZoneVoters(candidateId, zoneId, voterIds) {
+  const res = await releaseZoneVotersFn()({ candidateId, zoneId, voterIds })
+  return res.data
+}
+
+// Cancela la zona completa y libera todos sus votantes activos.
+export async function cancelZone(candidateId, zoneId) {
+  const res = await cancelZoneFn()({ candidateId, zoneId })
+  return res.data
+}
+
+// Reasigna el chofer responsable de una zona ya confirmada.
+export async function changeZoneDriver(candidateId, zoneId, newDriverId) {
+  const res = await changeZoneDriverFn()({ candidateId, zoneId, newDriverId })
+  return res.data
+}
+
+// Edita solo name/maxVoters (no punto central ni radio — ver comentario en
+// functions/src/driverZones.ts sobre por qué eso queda fuera de "Editar").
+export async function updateDriverZoneMeta(candidateId, zoneId, { name, maxVoters }) {
+  const res = await updateZoneMetaFn()({ candidateId, zoneId, name, maxVoters })
+  return res.data
+}
+
+// Lecturas directas de Firestore (sin Cloud Function, son solo `read` en
+// firestore.rules) — mismo criterio que getDrivers(): roster a escala de
+// equipo (decenas/centenas de zonas por candidato, no de padrón), sin paginar.
+export async function getDriverZones(candidateId) {
+  const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'driverZones')))
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0))
+}
+
+export async function getDriverZoneVoters(candidateId, zoneId) {
+  const q = query(collection(db, ...candidatePath(candidateId, 'driverZoneVoters')), where('zoneId', '==', zoneId))
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// Todas las asignaciones activas (RESERVADO/ASIGNADO) del candidato, sin
+// filtrar por zona — usado para excluir votantes ya ocupados en "Votantes
+// asignados" > "Asignar votantes por CI" (punto 10 del pedido: no debe
+// aparecer de nuevo en el buscador manual) y para pintar columnas de zona/
+// distancia en esa misma tabla.
+export async function getActiveDriverZoneVoters(candidateId) {
+  const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'driverZoneVoters')))
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(v => v.assignmentStatus === 'ASIGNADO' || (v.assignmentStatus === 'RESERVADO' && (v.reservedUntil?.toMillis?.() || 0) > Date.now()))
+}
+
 // ── Mesarios (roster de capacitación/presencia) ─────────────────────────
 // Colección separada de savedRecords: acá se trackea proponente +
 // capacitaciones/presencia, tanto para gente que vino de "Buscar votante"

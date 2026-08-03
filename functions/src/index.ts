@@ -1,6 +1,7 @@
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import * as crypto from "crypto";
+import { Auth, requireCandidateRole, writeCandidateAuditLog } from "./lib";
 
 admin.initializeApp();
 
@@ -27,7 +28,9 @@ const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // parámetro llegue `undefined` y toda función falle con "unauthenticated"
 // SIEMPRE, incluso para el caller correcto — esto se encontró probando en
 // vivo contra producción (crearCandidato rechazaba al superadmin real).
-type Auth = functions.https.CallableRequest["auth"];
+// (el type Auth vive en lib.ts, importado arriba, junto con
+// requireCandidateRole/writeCandidateAuditLog — driverZones.ts los
+// necesita también y evitamos un import circular con index.ts)
 
 async function requireCallerIsAdmin(auth: Auth) {
   if (!auth) {
@@ -71,55 +74,6 @@ async function requireSuperAdmin(auth: Auth) {
   return auth.uid;
 }
 
-// Superadmin siempre pasa. Si no, exige que el caller tenga uno de los
-// roles candidate-scoped indicados en /candidates/{candidateId}/users/{uid}.
-// LIMITACIÓN CORREGIDA (auditoría RBAC): hasta acá, esta función solo
-// miraba `role` (legacy) — firestore.rules ya reconoce roleIds vía
-// hasCandidateRole() desde Etapa 8 parcial, pero ninguna Cloud Function lo
-// hacía, así que un usuario con un rol de SISTEMA adicional asignado por
-// roleIds (ej. "auditor" sumado a un dirigente) ya tenía acceso correcto
-// vía reglas de Firestore, pero seguía recibiendo permission-denied en
-// cualquier acción que pasara por una Cloud Function. Se agrega el mismo
-// chequeo OR que ya usa hasCandidateRole en firestore.rules — nunca resta
-// acceso, solo lo amplía para quien ya lo tenía por roleIds.
-async function requireCandidateRole(
-  auth: Auth,
-  candidateId: string,
-  roles: string[]
-) {
-  if (!auth) {
-    throw new functions.https.HttpsError(
-      "unauthenticated",
-      "Debes iniciar sesión"
-    );
-  }
-  const platformDoc = await admin
-    .firestore()
-    .collection("platformUsers")
-    .doc(auth.uid)
-    .get();
-  if (platformDoc.data()?.globalRole === "superadmin") {
-    return auth.uid;
-  }
-  const memberDoc = await admin
-    .firestore()
-    .collection("candidates")
-    .doc(candidateId)
-    .collection("users")
-    .doc(auth.uid)
-    .get();
-  const memberData = memberDoc.data();
-  const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
-  const tieneRol = roles.includes(memberData?.role) || roleIds.some((r) => roles.includes(r));
-  if (!memberDoc.exists || !tieneRol) {
-    throw new functions.https.HttpsError(
-      "permission-denied",
-      "No tenés permiso para esta acción en este candidato"
-    );
-  }
-  return auth.uid;
-}
-
 async function writeAuditLog(entry: {
   actorUid: string;
   actorEmail: string | null;
@@ -158,29 +112,6 @@ async function upsertUserCandidateIndex(
       },
       { merge: true }
     );
-}
-
-async function writeCandidateAuditLog(
-  candidateId: string,
-  entry: {
-    actorUid: string;
-    actorEmail: string | null;
-    action: string;
-    entityType: string;
-    entityId: string;
-    before: any;
-    after: any;
-  }
-) {
-  await admin
-    .firestore()
-    .collection("candidates")
-    .doc(candidateId)
-    .collection("auditLogs")
-    .add({
-      ...entry,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
 }
 
 export const crearNuevoUsuario = functions.https.onCall(
@@ -1351,3 +1282,10 @@ export const aceptarInvitacion = functions.https.onCall(
     return { uid: userRecord.uid, email: userRecord.email, candidateId: invite.candidateId };
   }
 );
+
+// Zonas de búsqueda (Choferes) — separado en su propio archivo por ser un
+// grupo de 6 funciones con lógica propia (Haversine, transacciones de
+// exclusión mutua). Reexportado acá para que `firebase deploy --only
+// functions` las despliegue igual que a cualquier otra función de este
+// archivo.
+export * from "./driverZones";

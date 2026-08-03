@@ -244,7 +244,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     else if (tab === 'registros') renderRegistros(content)
     else if (tab === 'auditoria') renderAuditoria(content)
     else if (tab === 'choferes') {
-      import('./chofer-candidate.js').then(({ renderChoferCandidate }) => renderChoferCandidate(content, candidateId))
+      import('./chofer-candidate.js').then(({ renderChoferCandidate }) => renderChoferCandidate(content, candidateId, user, myRole, misRoles))
     } else if (tab === 'mesarios') {
       import('./mesario-candidate.js').then(({ renderMesarioCandidate }) => renderMesarioCandidate(content, candidateId))
     } else if (tab === 'dirigentes') {
