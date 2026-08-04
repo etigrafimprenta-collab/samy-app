@@ -386,7 +386,25 @@ export const confirmZoneAssignment = functions.https.onCall(
         ids.push(doc.id);
       });
 
-      ids.forEach((voterId) => {
+      // Lee el electionDayControl existente de cada voterId ANTES de
+      // escribir nada (Firestore exige todos los reads antes que
+      // cualquier write en una transacción) — necesario para saber si hay
+      // que sembrar assignedLeaderId/assignedTableUserId como null
+      // explícito. Sin esto, un doc creado acá solo con assignedDriverId
+      // queda con esas 2 keys AUSENTES (no null) — y firestore.rules
+      // compara esos campos por punto directo en el update que hace
+      // después cualquier chofer/dirigente/mesario/operador: acceder a una
+      // key ausente ahí tira error de evaluación y deniega el update
+      // entero, aunque el campo no tenga nada que ver con quien escribe.
+      // Bug real encontrado probando en vivo con un mesario — mismo
+      // criterio de defaults que ya usa setDiaDStatus/assignDriverToVoter
+      // del lado cliente (ELECTION_DAY_CONTROL_DEFAULTS).
+      const edcRefs = ids.map((voterId) =>
+        db().collection("candidates").doc(candidateId).collection("electionDayControl").doc(voterId)
+      );
+      const edcSnaps = await Promise.all(edcRefs.map((ref) => tx.get(ref)));
+
+      ids.forEach((voterId, i) => {
         tx.update(zoneVotersCol(candidateId).doc(voterId), {
           assignmentStatus: "ASIGNADO",
           assignedBy: callerUid,
@@ -398,17 +416,30 @@ export const confirmZoneAssignment = functions.https.onCall(
           { chofer_asignado: zone.driverId, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
           { merge: true }
         );
+        const edcExists = edcSnaps[i].exists;
         tx.set(
-          db()
-            .collection("candidates")
-            .doc(candidateId)
-            .collection("electionDayControl")
-            .doc(voterId),
+          edcRefs[i],
           {
+            ...(edcExists
+              ? {}
+              : {
+                  candidateId,
+                  voterId,
+                  assignedLeaderId: null,
+                  assignedTableUserId: null,
+                  status: "driver_assigned",
+                  needsAssistance: false,
+                  incidentOpen: false,
+                  critical: false,
+                  pollingPlace: "",
+                  tableNumber: "",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                }),
             assignedDriverId: zone.driverId,
             requiresPickup: true,
             lastUpdatedBy: callerUid,
             lastUpdatedRole: "campaign_admin",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
         );

@@ -11,6 +11,7 @@ import * as admin from "firebase-admin";
 import {
   initializeTestEnvironment,
   assertFails,
+  assertSucceeds,
   RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import * as fs from "fs";
@@ -205,6 +206,77 @@ describe("confirmZoneAssignment — fan-out atómico", () => {
       .doc("voter-1")
       .get();
     expect(zv.data()?.assignmentStatus).toBe("ASIGNADO");
+  });
+
+  it("el chofer puede después actualizar el estado del votante que le confirmó la zona (bug real: faltaban assignedLeaderId/assignedTableUserId)", async () => {
+    // Encontrado probando en vivo: confirmZoneAssignment solo escribía
+    // assignedDriverId — dejaba assignedLeaderId/assignedTableUserId sin
+    // esa key (ni siquiera null). firestore.rules compara esos campos por
+    // punto directo en el update que hace el chofer desde Día D Control:
+    // acceder a una key ausente tira error de evaluación y deniega TODO
+    // el allow, no solo ese término — el chofer nunca podía marcar "en
+    // camino"/"recogido" para un votante que le llegó por una zona.
+    const { createZoneAndReserve, confirmZoneAssignment } = await loadFns();
+    const created = (await createZoneAndReserve.run({
+      data: {
+        candidateId: CANDIDATE_ID,
+        name: "Zona A",
+        latitude: -25.32,
+        longitude: -57.58,
+        radiusMeters: 1000,
+        maxVoters: 10,
+        driverId: "driver-a",
+        voterIds: ["voter-1"],
+      },
+      auth: { uid: ADMIN_UID, token: {} as any },
+    } as any)) as any;
+    await confirmZoneAssignment.run({
+      data: { candidateId: CANDIDATE_ID, zoneId: created.zoneId },
+      auth: { uid: ADMIN_UID, token: {} as any },
+    } as any);
+
+    const db = admin.firestore();
+    const edcBefore = await db
+      .collection("candidates")
+      .doc(CANDIDATE_ID)
+      .collection("electionDayControl")
+      .doc("voter-1")
+      .get();
+    // Las 3 keys tienen que existir (aunque sea con valor null) — no
+    // ausentes — para que la comparación de firestore.rules no explote.
+    expect(edcBefore.data()).toHaveProperty("assignedLeaderId");
+    expect(edcBefore.data()).toHaveProperty("assignedTableUserId");
+    expect(edcBefore.data()?.assignedLeaderId).toBeNull();
+    expect(edcBefore.data()?.assignedTableUserId).toBeNull();
+
+    // El chofer necesita su propia membresía candidate-scoped para pasar
+    // hasCandidateRole(['chofer']) — el driver ya está vinculado a
+    // DRIVER_A_UID desde el beforeEach.
+    await db.collection("candidates").doc(CANDIDATE_ID).collection("users").doc(DRIVER_A_UID).set({
+      role: "chofer",
+    });
+
+    const choferCtx = testEnv.authenticatedContext(DRIVER_A_UID);
+    const choferDb = choferCtx.firestore();
+    await assertSucceeds(
+      choferDb
+        .collection("candidates")
+        .doc(CANDIDATE_ID)
+        .collection("electionDayControl")
+        .doc("voter-1")
+        .set(
+          { status: "on_the_way", lastUpdatedBy: DRIVER_A_UID, lastUpdatedRole: "chofer" },
+          { merge: true }
+        )
+    );
+
+    const edcAfter = await db
+      .collection("candidates")
+      .doc(CANDIDATE_ID)
+      .collection("electionDayControl")
+      .doc("voter-1")
+      .get();
+    expect(edcAfter.data()?.status).toBe("on_the_way");
   });
 });
 

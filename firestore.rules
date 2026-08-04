@@ -1060,13 +1060,25 @@ service cloud.firestore {
       // datos que proteger en un doc inexistente, así que `resource == null`
       // se puede permitir para cualquiera con algún rol operativo en este
       // candidato — el contenido real sigue protegido por `allow create`.
+      // FIX 2 (bug real, encontrado en la misma sesión de pruebas que el
+      // de arriba): comparar `resource.data.assignedDriverId` (u otro
+      // campo) por punto directo TIRA ERROR DE EVALUACIÓN si esa key no
+      // existe en el doc — no es lo mismo que "es null". Eso pasaba con
+      // docs creados por confirmZoneAssignment (Zonas de búsqueda), que
+      // solo escribe assignedDriverId y deja assignedLeaderId/
+      // assignedTableUserId sin esa key — un error de evaluación en
+      // CUALQUIER término de un allow (aunque sea uno que ni aplica al
+      // caller) tira TODO el allow como denegado, no solo ese término. Se
+      // reemplaza cada acceso directo por `.get('campo', null)` (mismo
+      // idioma que ya usa este archivo para roleIds más arriba), que
+      // trata "key ausente" igual que "null" sin explotar.
       allow read: if isSuperAdmin() ||
         (resource == null && hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer', 'operador', 'auditor'])) ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'election_day_control.view_operations') ||
-        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId)) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.get('assignedLeaderId', null) == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['mesario']) && resource.data.get('assignedTableUserId', null) == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.get('assignedDriverId', null))) ||
         (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId)) ||
         // Scope 'assigned' de records.view (auditoría RBAC): un rol
         // personalizado sin role legacy dirigente/mesario también necesita
@@ -1075,25 +1087,25 @@ service cloud.firestore {
         // sin esto, solo funcionaba por coincidencia si el usuario
         // TAMBIÉN tenía el role legacy correspondiente.
         (hasScopedPermission(candidateId, 'records.view', 'assigned') &&
-          (resource.data.assignedLeaderId == request.auth.uid || resource.data.assignedTableUserId == request.auth.uid)) ||
+          (resource.data.get('assignedLeaderId', null) == request.auth.uid || resource.data.get('assignedTableUserId', null) == request.auth.uid)) ||
         // Unificación RBAC: mismo criterio, ahora para el permiso PROPIO
         // de este módulo (election_day_control.view_operations) — antes
         // solo existía atado a records.view (efecto colateral de la
         // migración de savedRecords). Reasignar (assign_driver/leader/
         // table_member) sigue sin cablear, ver nota arriba.
         (hasScopedPermission(candidateId, 'election_day_control.view_operations', 'assigned') &&
-          (resource.data.assignedLeaderId == request.auth.uid ||
-            resource.data.assignedTableUserId == request.auth.uid ||
-            isDriverOwner(candidateId, resource.data.assignedDriverId)));
+          (resource.data.get('assignedLeaderId', null) == request.auth.uid ||
+            resource.data.get('assignedTableUserId', null) == request.auth.uid ||
+            isDriverOwner(candidateId, resource.data.get('assignedDriverId', null))));
 
       // Creación lazy: la primera vez que cualquier rol operativo toca un
       // voterId se crea el doc, siempre y cuando se cree apuntándose a sí
       // mismo (nadie crea un doc "asignado a otro" salvo admin/coordinator).
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
-        (hasCandidateRole(candidateId, ['dirigente']) && request.resource.data.assignedLeaderId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['mesario']) && request.resource.data.assignedTableUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.assignedDriverId)) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && request.resource.data.get('assignedLeaderId', null) == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['mesario']) && request.resource.data.get('assignedTableUserId', null) == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.get('assignedDriverId', null))) ||
         (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
 
       // Los roles operativos pueden actualizar el estado de SU propio
@@ -1101,22 +1113,22 @@ service cloud.firestore {
       // exclusivo de campaign_admin/coordinator (REGLA: solo admin reasigna).
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
-        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid &&
-          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
-          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
-          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId) ||
-        (hasCandidateRole(candidateId, ['mesario']) && resource.data.assignedTableUserId == request.auth.uid &&
-          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId &&
-          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
-          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.assignedDriverId) &&
-          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
-          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
-          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId) ||
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.get('assignedLeaderId', null) == request.auth.uid &&
+          request.resource.data.get('assignedLeaderId', null) == resource.data.get('assignedLeaderId', null) &&
+          request.resource.data.get('assignedDriverId', null) == resource.data.get('assignedDriverId', null) &&
+          request.resource.data.get('assignedTableUserId', null) == resource.data.get('assignedTableUserId', null)) ||
+        (hasCandidateRole(candidateId, ['mesario']) && resource.data.get('assignedTableUserId', null) == request.auth.uid &&
+          request.resource.data.get('assignedTableUserId', null) == resource.data.get('assignedTableUserId', null) &&
+          request.resource.data.get('assignedDriverId', null) == resource.data.get('assignedDriverId', null) &&
+          request.resource.data.get('assignedLeaderId', null) == resource.data.get('assignedLeaderId', null)) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, resource.data.get('assignedDriverId', null)) &&
+          request.resource.data.get('assignedDriverId', null) == resource.data.get('assignedDriverId', null) &&
+          request.resource.data.get('assignedLeaderId', null) == resource.data.get('assignedLeaderId', null) &&
+          request.resource.data.get('assignedTableUserId', null) == resource.data.get('assignedTableUserId', null)) ||
         (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId) &&
-          request.resource.data.assignedDriverId == resource.data.assignedDriverId &&
-          request.resource.data.assignedLeaderId == resource.data.assignedLeaderId &&
-          request.resource.data.assignedTableUserId == resource.data.assignedTableUserId);
+          request.resource.data.get('assignedDriverId', null) == resource.data.get('assignedDriverId', null) &&
+          request.resource.data.get('assignedLeaderId', null) == resource.data.get('assignedLeaderId', null) &&
+          request.resource.data.get('assignedTableUserId', null) == resource.data.get('assignedTableUserId', null));
 
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }
