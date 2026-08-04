@@ -1051,7 +1051,17 @@ service cloud.firestore {
       // (comparan cada campo assignedXxx contra el valor previo); ampliar
       // eso con permisos personalizados queda para una revisión aparte,
       // no apurada dentro de esta migración.
+      // FIX (bug real detectado probando con un chofer real): la "creación
+      // lazy" de la que habla el comentario de arriba requiere que
+      // dirigente/mesario/chofer puedan hacer getDoc() de un voterId que
+      // TODAVÍA no tiene doc — sin esto, Firestore evalúa
+      // `resource.data.assignedXxx` sobre un `resource` null y tira error
+      // de evaluación (deniega) en vez de simplemente "no existe". No hay
+      // datos que proteger en un doc inexistente, así que `resource == null`
+      // se puede permitir para cualquiera con algún rol operativo en este
+      // candidato — el contenido real sigue protegido por `allow create`.
       allow read: if isSuperAdmin() ||
+        (resource == null && hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer', 'operador', 'auditor'])) ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor']) ||
         hasEffectivePermission(candidateId, 'election_day_control.view_operations') ||
         (hasCandidateRole(candidateId, ['dirigente']) && resource.data.assignedLeaderId == request.auth.uid) ||
