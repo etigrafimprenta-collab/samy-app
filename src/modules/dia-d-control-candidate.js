@@ -33,6 +33,7 @@ import {
   updateRecord,
   getElectionDayControl,
   getAllElectionDayControl,
+  listenAllElectionDayControl,
   getElectionDayControlByLeader,
   getElectionDayControlByTableUser,
   getElectionDayControlByDriver,
@@ -980,6 +981,20 @@ async function renderAdminView(container, candidateId, user) {
   reiniciarTimerAutomatico(settings)
 
   listenAllRecords(candidateId, debounce(async () => {
+    await cargarDatos()
+    render()
+  }, 800))
+
+  // Mismo criterio que el listener de arriba, pero sobre electionDayControl
+  // — antes solo savedRecords tenía suscripción en vivo, así que un cambio
+  // de ESTADO (en camino, recogido, etc.) que un chofer/dirigente/mesario
+  // marca desde su propia vista (que escribe directo en electionDayControl,
+  // no en savedRecords) no le llegaba al admin hasta que el timer lento de
+  // arriba corriera (cada `intervaloAlertasMinutos`) o recargara la página
+  // a mano — encontrado probando en vivo. Debounce igual a 800ms para no
+  // relanzar cargarDatos()+render() en cada doc individual si varios
+  // choferes actualizan casi al mismo tiempo.
+  listenAllElectionDayControl(candidateId, debounce(async () => {
     await cargarDatos()
     render()
   }, 800))
