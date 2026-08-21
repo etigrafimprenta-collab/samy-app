@@ -329,11 +329,18 @@ function parseVoterRow(row) {
     direccion: String(pick(normRow, 'DIRECCION', 'Dirección')).trim(),
     // FEC_NAC trae la fecha de nacimiento completa (día/mes/año) — más
     // completa que DIA+MES solos, que no traen año. Se guarda en el mismo
-    // campo que ya usaba el formato de ejemplo (F. Nacimiento).
-    nacimiento: String(pick(normRow, 'FEC_NAC', 'F. Nacimiento')).trim(),
+    // campo que ya usaba el formato de ejemplo (F. Nacimiento). FECHA_NAC
+    // (con "HA") es la variante real encontrada en el padrón de Justicia
+    // Electoral con columnas depart/distrito/zona (ver DESCRIP_LOCAL abajo).
+    nacimiento: String(pick(normRow, 'FEC_NAC', 'FECHA_NAC', 'F. Nacimiento')).trim(),
     afiliacion: String(pick(normRow, 'F. Afiliación')).trim(),
     seccional: String(pick(normRow, 'SECCIONAL', 'SECC', 'Seccional')).replace('.0', '').trim(),
-    local: String(pick(normRow, 'Local de Votacion')).trim(),
+    // Bug real encontrado en vivo: un padrón real (con columnas
+    // depart/des_dep/distrito/des_dis/zona/des_zon) nombra esta columna
+    // "DESCRIP_LOCAL" en vez de "Local de Votacion" — sin este alias,
+    // `local` quedaba SIEMPRE vacío para ese archivo (silencioso: no tira
+    // error, cada fila simplemente no encuentra la columna y sigue).
+    local: String(pick(normRow, 'Local de Votacion', 'DESCRIP_LOCAL')).trim(),
     mesa: String(pick(normRow, 'MESA', 'Mesa')).replace('.0', '').trim(),
     orden: String(pick(normRow, 'ORDEN', 'Orden')).replace('.0', '').trim(),
     // partido2023 = afinidad política declarada en 2023, votoAnterior2021 =
