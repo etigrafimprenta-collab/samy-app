@@ -980,22 +980,59 @@ async function renderAdminView(container, candidateId, user) {
   const settings = await getDiaDControlSettings(candidateId)
   reiniciarTimerAutomatico(settings)
 
-  listenAllRecords(candidateId, debounce(async () => {
-    await cargarDatos()
+  // FIX DE RENDIMIENTO (hallazgo real: "está lentísimo" reportado por
+  // usuarios): antes, CADA cambio en savedRecords o electionDayControl —
+  // algo continuo durante el Día D, con muchos mesarios/dirigentes/
+  // choferes escribiendo al mismo tiempo — disparaba (con 800ms de
+  // debounce) `cargarDatos()`, que releía las 6 colecciones COMPLETAS
+  // desde cero, incluido el padrón entero (`getAllRecords`, potencialmente
+  // decenas o cientos de miles de documentos), para CADA admin/coordinador
+  // con esta pantalla abierta. Cuanto más grande el padrón y más gente
+  // activa, más lento y más caro (lecturas de Firestore) — empeora solo.
+  //
+  // Ahora: los listeners ya traen el dato que cambió (docChanges de
+  // savedRecords, o la lista completa y actualizada de electionDayControl
+  // — ver firebaseCandidate.js) — se aplica en memoria, sin ninguna
+  // lectura adicional a Firestore. `users`/`drivers`/`incidents`/`estados`
+  // (que no cambian tan seguido) los sigue refrescando el timer periódico
+  // de `reiniciarTimerAutomatico`, sin tocar esa parte.
+  //
+  // pendingRecordChanges acumula ENTRE ejecuciones del debounce — si se
+  // usara debounce directo sobre la función que aplica los cambios, cada
+  // llamada nueva descartaría los `changes` de la llamada anterior (el
+  // debounce solo se queda con los argumentos de la última invocación),
+  // perdiendo actualizaciones intermedias si 2+ registros cambian dentro
+  // de la misma ventana de 800ms.
+  let pendingRecordChanges = []
+  const flushRecordChanges = debounce(() => {
+    pendingRecordChanges.forEach(({ type, id, data }) => {
+      const idx = records.findIndex(r => r.id === id)
+      if (type === 'removed') {
+        if (idx !== -1) records.splice(idx, 1)
+      } else if (idx !== -1) {
+        records[idx] = data
+      } else {
+        records.push(data)
+      }
+    })
+    pendingRecordChanges = []
     render()
-  }, 800))
+  }, 800)
+  listenAllRecords(candidateId, changes => {
+    pendingRecordChanges.push(...changes)
+    flushRecordChanges()
+  })
 
-  // Mismo criterio que el listener de arriba, pero sobre electionDayControl
-  // — antes solo savedRecords tenía suscripción en vivo, así que un cambio
-  // de ESTADO (en camino, recogido, etc.) que un chofer/dirigente/mesario
-  // marca desde su propia vista (que escribe directo en electionDayControl,
-  // no en savedRecords) no le llegaba al admin hasta que el timer lento de
-  // arriba corriera (cada `intervaloAlertasMinutos`) o recargara la página
-  // a mano — encontrado probando en vivo. Debounce igual a 800ms para no
-  // relanzar cargarDatos()+render() en cada doc individual si varios
-  // choferes actualizan casi al mismo tiempo.
-  listenAllElectionDayControl(candidateId, debounce(async () => {
-    await cargarDatos()
+  // electionDayControl es una colección chica en comparación con
+  // savedRecords (un doc por votante con seguimiento activo de Día D, no
+  // por votante del padrón entero) — acá listenAllElectionDayControl ya
+  // entrega la lista COMPLETA y actualizada en cada cambio (no un diff),
+  // así que no hace falta acumular entre llamadas: la última lista
+  // recibida siempre es el estado correcto completo.
+  listenAllElectionDayControl(candidateId, debounce(allControls => {
+    controls = allControls
+    controlByVoterId = {}
+    controls.forEach(c => { controlByVoterId[c.voterId] = c })
     render()
   }, 800))
 }
