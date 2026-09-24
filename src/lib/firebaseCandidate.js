@@ -2916,6 +2916,151 @@ export async function getFinancePaymentsWithoutReceiptList(candidateId, pageSize
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Cajeros DD — fondos operativos por cajero (Finanzas → 💵 Cajeros DD).
+// Toda escritura pasa por functions/src/cashierFunds.ts (Admin SDK,
+// transaccional) — acá solo wrappers httpsCallable + lecturas.
+//
+// PLAN C (colecciones propias, ver auditoría): vive en
+// cashierAccounts/cashierMovements, separadas de cashAccounts/
+// cashMovements (Caja general, funciones de arriba, sin ningún cambio).
+// Nunca se mezclan ni comparten query.
+// ═══════════════════════════════════════════════════════════════════
+
+// Idempotencia (ajuste obligatorio del pedido): se genera UNA vez por
+// acción del usuario y se conserva durante reintentos de ESA misma
+// operación — nunca se regenera en un retry/timeout, porque eso
+// destruiría la protección. Cada función de abajo acepta un
+// `operationId` opcional (si no se pasa, se genera acá una sola vez por
+// llamada — quien necesite reintentar debe guardar y reusar el mismo).
+export function generateCashierOperationId() {
+  return (crypto?.randomUUID ? crypto.randomUUID() : `op-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+}
+
+export async function crearCuentaCajero(candidateId, responsibleUserId, name, operationId) {
+  const fn = httpsCallable(functionsInstance, 'crearCuentaCajero')
+  const result = await fn({ candidateId, responsibleUserId, name, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function asignarFondosCajero(candidateId, cashAccountId, amount, reason, operationId) {
+  const fn = httpsCallable(functionsInstance, 'asignarFondosCajero')
+  const result = await fn({ candidateId, cashAccountId, amount, reason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function registrarEgresoCajero(candidateId, { cashAccountId, amount, concept, beneficiaryCI, exceptionAuthorizationId, receiptUrl }, operationId) {
+  const fn = httpsCallable(functionsInstance, 'registrarEgresoCajero')
+  const result = await fn({
+    candidateId, cashAccountId, amount, concept, beneficiaryCI, exceptionAuthorizationId, receiptUrl,
+    operationId: operationId || generateCashierOperationId()
+  })
+  return result.data
+}
+
+export async function solicitarAnulacionMovimiento(candidateId, movementId, reason, operationId) {
+  const fn = httpsCallable(functionsInstance, 'solicitarAnulacionMovimiento')
+  const result = await fn({ candidateId, movementId, reason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function resolverAnulacionMovimiento(candidateId, movementId, decision, resolution, operationId) {
+  const fn = httpsCallable(functionsInstance, 'resolverAnulacionMovimiento')
+  const result = await fn({ candidateId, movementId, decision, resolution, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function cerrarCuentaCajero(candidateId, cashAccountId, reason, operationId) {
+  const fn = httpsCallable(functionsInstance, 'cerrarCuentaCajero')
+  const result = await fn({ candidateId, cashAccountId, reason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function reabrirCuentaCajero(candidateId, cashAccountId, reason, operationId) {
+  const fn = httpsCallable(functionsInstance, 'reabrirCuentaCajero')
+  const result = await fn({ candidateId, cashAccountId, reason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function autorizarExcepcionBeneficiario(candidateId, beneficiaryCI, reason, operationId) {
+  const fn = httpsCallable(functionsInstance, 'autorizarExcepcionBeneficiario')
+  const result = await fn({ candidateId, beneficiaryCI, reason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+// ── Lecturas (client SDK directo contra cashierAccounts/cashierMovements,
+// cubiertas por firestore.rules — cashier ve solo su propia cuenta,
+// admin ve todas). Regla dura de esta sección, distinta del resto del
+// archivo: para un cashier, Firestore RECHAZA la consulta completa si no
+// incluye where('responsibleUserId','==',uid) — no es opcional, es lo
+// que hace que "leer datos de otro cajero por query directa" sea
+// estructuralmente imposible, no solo una convención de la UI. Por eso
+// cada función de acá que puede ser llamada por un cashier exige
+// `responsibleUserId` como parámetro, nunca lo omite. ────────────────
+
+export async function getCajerosDiaDAccounts(candidateId) {
+  // Solo admin/finance_admin llegan acá (ver pintarCajerosDiaDAdmin) —
+  // sin filtro, cubierto por la rama de rol independiente de dato.
+  const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'cashierAccounts')))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+export async function getCajeroDiaDAccountByResponsible(candidateId, responsibleUserId) {
+  const q = query(
+    collection(db, ...candidatePath(candidateId, 'cashierAccounts')),
+    where('responsibleUserId', '==', responsibleUserId)
+  )
+  const snap = await getDocs(q)
+  // Puede haber una cuenta cerrada vieja + una activa nueva (reinicio de
+  // cajero, ver decisión de diseño) — se prioriza la activa si existe.
+  const cuentas = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+  return cuentas.find(c => c.status === 'active') || cuentas[0] || null
+}
+
+// Asignado/Utilizado = suma de movimientos CONFIRMADOS por tipo — un
+// egreso o asignación anulada pasa a status:'voided' y queda
+// automáticamente excluido, así que estos totales ya reflejan el efecto
+// neto de cualquier anulación aprobada, sin tener que restarla a mano.
+// `responsibleUserId` es obligatorio (no opcional): tanto si llama un
+// admin (mirando la cuenta de un cajero puntual) como si llama el propio
+// cajero, siempre se conoce de antemano (viene del doc de la cuenta ya
+// cargado) — incluirlo siempre, nunca solo "cuando el caller es cashier",
+// evita tener 2 caminos de código distintos para el mismo dato.
+export async function getCajeroDiaDAccountSummary(candidateId, cashAccountId, responsibleUserId) {
+  const { getAggregateFromServer, sum, count } = await import('firebase/firestore')
+  const base = query(
+    collection(db, ...candidatePath(candidateId, 'cashierMovements')),
+    where('cashAccountId', '==', cashAccountId),
+    where('responsibleUserId', '==', responsibleUserId)
+  )
+  const sumaPorTipo = async (tipo) => {
+    const snap = await getAggregateFromServer(query(base, where('type', '==', tipo), where('status', '==', 'confirmed')), { total: sum('amount') })
+    return snap.data().total || 0
+  }
+  const [totalAssigned, totalExpensed, opsSnap] = await Promise.all([
+    sumaPorTipo('fund_assignment'),
+    sumaPorTipo('expense'),
+    getAggregateFromServer(base, { total: count() })
+  ])
+  return { totalAssigned, totalExpensed, operationsCount: opsSnap.data().total || 0 }
+}
+
+export async function getCajeroDiaDMovementsPage(candidateId, { cashAccountId, responsibleUserId, cursor = null, pageSize = 50 } = {}) {
+  const clauses = [
+    where('cashAccountId', '==', cashAccountId),
+    where('responsibleUserId', '==', responsibleUserId),
+    orderBy('createdAt', 'desc')
+  ]
+  if (cursor) clauses.push(startAfter(cursor))
+  clauses.push(limit(pageSize))
+  const snap = await getDocs(query(collection(db, ...candidatePath(candidateId, 'cashierMovements')), ...clauses))
+  return {
+    movements: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    lastDoc: snap.docs[snap.docs.length - 1] || null,
+    hasMore: snap.docs.length === pageSize
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Finanzas de Campaña — Etapa 4 (integración Día D + alertas).
 //
 // REGLA DURA del spec (sección 9): "el sistema NO debe pagar

@@ -291,11 +291,34 @@ service cloud.firestore {
 
     // Un mesario solo puede tocar votos de la mesa que tiene asignada,
     // ya sea vía (seccional+mesa) fija o vía la lista mesasAsignadas.
-    function isMesarioOfMesa(candidateId, seccional, mesa) {
+    //
+    // ALTA UNIFICADA DE MESARIO — 3 cambios aditivos:
+    // 1) `role == 'mesario'` directo no alcanzaba para alguien que tiene
+    //    otro rol primario y 'mesario' sumado por roleIds (mecanismo de
+    //    multi-rol que usa la reutilización de cuenta existente, ver
+    //    crearUsuarioCandidato) — se agrega el mismo OR que ya usa
+    //    hasCandidateRole() en el resto de este archivo. Nunca resta
+    //    acceso a nadie que ya lo tenía por `role`.
+    // 2) BUG REAL encontrado probando contra el padrón real (local
+    //    "COL.NAC. FERNANDO DE LA MORA", Mesa 1): `seccional` viene
+    //    INCONSISTENTE por votante dentro de la MISMA mesa física — de
+    //    350 votantes reales, 176 no tienen seccional cargado y el resto
+    //    se reparte en 4 valores distintos. Exigir que coincida con
+    //    seccional (aunque fuera además de local+mesa) le habría negado a
+    //    un mesario real el acceso a una porción de sus propios votantes/
+    //    votos. `local+mesa` sí identifica la mesa física sin ambigüedad,
+    //    así que CUANDO el perfil tiene `local` seteado, es la ÚNICA
+    //    fuente de verdad (ya no se exige además que coincida seccional).
+    // 3) Perfiles legado sin `local` (de antes de este cambio) siguen
+    //    funcionando exactamente igual que siempre: seccional+mesa.
+    function isMesarioOfMesa(candidateId, seccional, local, mesa) {
       return belongsToCandidate(candidateId) &&
-        candidateUserDoc(candidateId).role == 'mesario' &&
+        (candidateUserDoc(candidateId).role == 'mesario' ||
+          'mesario' in candidateUserDoc(candidateId).get('roleIds', [])) &&
         (
-          (candidateUserDoc(candidateId).seccional == seccional && candidateUserDoc(candidateId).mesa == mesa) ||
+          (candidateUserDoc(candidateId).get('local', null) != null
+            ? (candidateUserDoc(candidateId).local == local && candidateUserDoc(candidateId).mesa == mesa)
+            : (candidateUserDoc(candidateId).seccional == seccional && candidateUserDoc(candidateId).mesa == mesa)) ||
           (candidateUserDoc(candidateId).mesasAsignadas is list && mesa in candidateUserDoc(candidateId).mesasAsignadas)
         );
     }
@@ -306,6 +329,43 @@ service cloud.firestore {
     function isDriverOwner(candidateId, driverId) {
       return driverId != null &&
         get(/databases/$(database)/documents/candidates/$(candidateId)/drivers/$(driverId)).data.usuarioAsignado == request.auth.uid;
+    }
+
+    // FIX DE SEGURIDAD (auditoría RBAC, ronda 3 — chofer, antes documentado
+    // sin corregir): isDriverOwner() solo prueba que el driverId es
+    // genuinamente del chofer que llama — no prueba que ESE voterId
+    // puntual le fue puesto en su ruta. Sin esto, un chofer real (con un
+    // doc de drivers legítimo) podía crear electionDayControl para
+    // CUALQUIER elector del candidato con solo poner su propio driverId.
+    // Fuente autoritativa: cualquiera de los 2 mecanismos reales por los
+    // que un elector queda "en la ruta" de un chofer —
+    //   1) manual: savedRecords.chofer_asignado (pestaña Choferes, solo
+    //      admin/coordinator escriben ese campo — ver `allow update` de
+    //      savedRecords)
+    //   2) automático: driverZoneVoters/{voterId}.driverId (Zonas de
+    //      búsqueda, escrito únicamente por Cloud Function — ver
+    //      driverZones.ts, `allow write: if false` en esa colección)
+    // Ninguno de los 2 es editable por el propio chofer.
+    function isVoterAssignedToDriver(candidateId, voterId, driverId) {
+      return driverId != null && (
+        (exists(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)).data.get('chofer_asignado', null) == driverId) ||
+        (exists(/databases/$(database)/documents/candidates/$(candidateId)/driverZoneVoters/$(voterId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/driverZoneVoters/$(voterId)).data.get('driverId', null) == driverId)
+      );
+    }
+
+    // Variante de isVoterAssignedToDriver() que NO recibe driverId del
+    // cliente — resuelve directo si EL QUE LLAMA es el chofer de este
+    // voterId, leyendo únicamente campos server-side (savedRecords.
+    // chofer_asignado / driverZoneVoters.driverId) y cruzándolos con
+    // isDriverOwner(). Usada por incidents/electionDayMovements (donde no
+    // tiene sentido que el documento cargue un assignedDriverId propio).
+    function isDriverOfVoter(candidateId, voterId) {
+      return (exists(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)) &&
+          isDriverOwner(candidateId, get(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)).data.get('chofer_asignado', null))) ||
+        (exists(/databases/$(database)/documents/candidates/$(candidateId)/driverZoneVoters/$(voterId)) &&
+          isDriverOwner(candidateId, get(/databases/$(database)/documents/candidates/$(candidateId)/driverZoneVoters/$(voterId)).data.get('driverId', null)));
     }
 
     // Un operador solo puede tocar electionDayControl del voterId que tiene
@@ -327,6 +387,144 @@ service cloud.firestore {
     function isMesarioOfControlVoter(candidateId, savedRecordId) {
       return savedRecordId != null &&
         get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(savedRecordId)).data.assignedTableUserId == request.auth.uid;
+    }
+
+    // FIX DE SEGURIDAD (auditoría RBAC, ronda 4 — incidents/
+    // electionDayMovements): ambas colecciones son secundarias
+    // (auditoría/seguimiento, con id de documento AUTOGENERADO —
+    // addDoc(), no voterId) y confiaban únicamente en un campo
+    // autodeclarado por el cliente en la misma escritura (reportedBy/
+    // updatedBy == self) para decidir si el elector le correspondía —
+    // cualquier rol operativo podía fabricar una incidencia o un
+    // movimiento sobre CUALQUIER voterId del candidato. Este helper
+    // resuelve, por rol, si el que llama tiene una relación YA
+    // ESTABLECIDA con `voterId` (nunca con datos de la misma escritura):
+    //   - dirigente: assignedLeaderId en electionDayControl, o —si ese
+    //     doc todavía no existe, mismo caso límite que ya resuelve el
+    //     `create` de electionDayControl— savedRecords.uid (el votante
+    //     que capturó).
+    //   - mesario: assignedTableUserId en electionDayControl (siempre
+    //     existe: lo crea admin/coordinator antes de que el mesario opere).
+    //   - chofer: isDriverOfVoter() (savedRecords.chofer_asignado o
+    //     driverZoneVoters, cruzado con isDriverOwner — sin pedirle
+    //     ningún dato al cliente).
+    //   - operador: isOperatorOfVoter() (callAssignments).
+    // logDiaDMovement() SIEMPRE se llama DESPUÉS de que el propio
+    // setDiaDStatus() ya escribió electionDayControl con éxito (ver
+    // firebaseCandidate.js) — para ese momento el campo assignedXxx
+    // correspondiente YA está en el estado que este helper necesita, así
+    // que ninguna transición legítima se rompe.
+    function hasAuthoritativeLinkToVoter(candidateId, voterId) {
+      return
+        (hasCandidateRole(candidateId, ['dirigente']) &&
+          ((exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(voterId)) &&
+            get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(voterId)).data.get('assignedLeaderId', null) == request.auth.uid) ||
+           (exists(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)) &&
+            get(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)).data.uid == request.auth.uid))) ||
+        (hasCandidateRole(candidateId, ['mesario']) &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(voterId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(voterId)).data.get('assignedTableUserId', null) == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['chofer']) && isDriverOfVoter(candidateId, voterId)) ||
+        (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Helpers — Organización Electoral (Fase 1 de cimiento, aditivo)
+    //
+    // Réplica deliberada de 2 patrones ya probados en este archivo, NO un
+    // mecanismo nuevo:
+    //   1. userCandidateIndex (abajo) → acá /userOrganizationIndex/{uid},
+    //      mismo motivo: una query collectionGroup sobre "users" cruzando
+    //      organizationId no es demostrable como segura para list(), así
+    //      que la pertenencia se resuelve con UN get() al propio uid,
+    //      mantenido solo por Cloud Functions (Admin SDK).
+    //   2. canAccessSavedRecordByScope (arriba) → acá
+    //      canAccessIncidentByTerritory, mismo criterio: el scope
+    //      territorial se compara contra un campo (`territorialAssignments`)
+    //      que vive en el MISMO doc que ya se lee para resolver el rol, así
+    //      que no agrega ningún get() adicional al presupuesto de la regla.
+    //
+    // hasOrganizationRole()/isOrganizationMember() son doc-independientes
+    // (dependen solo de userOrganizationIndex del propio caller) — por lo
+    // tanto SÍ pueden avalar list()/count() sin filtro, igual que
+    // hasCandidateRole(). canAccessIncidentByTerritory() SÍ depende de
+    // resource.data — solo es válida para get() puntual o para list()/
+    // count() cuya query ya trae un where() de igualdad sobre el mismo
+    // campo (mismo patrón ya usado en canAccessSavedRecordByScope, que la
+    // limitación documentada arriba en hasCandidateRole exige respetar).
+    // ═══════════════════════════════════════════════════════════════════
+
+    function userOrgIndexDoc() {
+      return get(/databases/$(database)/documents/userOrganizationIndex/$(request.auth.uid)).data;
+    }
+
+    // `active` (default true si el campo faltara) permite a
+    // desactivarUsuarioOrganizacion (Cloud Function) revocar acceso real
+    // de un apoderado/organization_admin sin borrar su entrada del índice
+    // — mismo criterio que `status` en candidates/{id}/users, pero acá SÍ
+    // se hace cumplir en la regla porque userOrganizationIndex (a
+    // diferencia del roster de candidato) es la fuente de autorización.
+    function isOrganizationMember(organizationId) {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/userOrganizationIndex/$(request.auth.uid)) &&
+        organizationId in userOrgIndexDoc() &&
+        userOrgIndexDoc()[organizationId].get('active', true) == true;
+    }
+
+    function userOrgEntry(organizationId) {
+      return userOrgIndexDoc()[organizationId];
+    }
+
+    function hasOrganizationRole(organizationId, roles) {
+      return isOrganizationMember(organizationId) && userOrgEntry(organizationId).role in roles;
+    }
+
+    // 'all_organization' no necesita comparar territorio — otorgado,
+    // siempre pasa, igual criterio que all_candidate/all_platform en
+    // hasScopedPermission. Los demás scopes comparan el campo territorial
+    // correspondiente del recurso contra la lista asignada al usuario en
+    // userOrganizationIndex — misma estructura que canAccessSavedRecordByScope.
+    //
+    // OBLIGATORIO (hardening Fase 2.5): esta función tiene una réplica en
+    // TypeScript, membershipCanAccessTerritory() en functions/src/lib.ts
+    // (Cloud Functions no puede importar Firestore Rules — duplicación
+    // inevitable, no un descuido). Cualquier cambio ACÁ exige el mismo
+    // cambio ahí, y correr functions/test/territory.parity.test.ts (compara
+    // ambas contra la misma matriz de casos y falla si divergen).
+    //
+    // AUTORIZACIÓN FASE 3C §1/§14: 'district' es el nombre canónico nuevo,
+    // 'zone' es alias legacy — ambos comparan contra territorialAssignments.
+    // distritos, ninguno tiene más permisos que el otro (test BC). No se
+    // migra ningún documento existente.
+    //
+    // AUTORIZACIÓN FASE 3C §2: un veedor sin estadoAcreditacion=='ACREDITADO'
+    // no accede a NINGÚN territorio — PENDIENTE/OBSERVADO/REVOCADO/VENCIDO
+    // quedan todos denegados acá, sin excepción por scope.
+    function canAccessIncidentByTerritory(organizationId, data) {
+      return isOrganizationMember(organizationId) &&
+      (
+        userOrgEntry(organizationId).role != 'veedor' ||
+        userOrgEntry(organizationId).get('estadoAcreditacion', 'PENDIENTE') == 'ACREDITADO'
+      ) && (
+        userOrgEntry(organizationId).scope == 'all_organization' ||
+        (userOrgEntry(organizationId).scope in ['zone', 'district'] &&
+          data.distrito in userOrgEntry(organizationId).territorialAssignments.get('distritos', [])) ||
+        (userOrgEntry(organizationId).scope == 'department' &&
+          data.departamento in userOrgEntry(organizationId).territorialAssignments.get('departamentos', [])) ||
+        (userOrgEntry(organizationId).scope == 'polling_place' &&
+          data.local in userOrgEntry(organizationId).territorialAssignments.get('locales', [])) ||
+        (userOrgEntry(organizationId).scope == 'table' &&
+          data.mesa in userOrgEntry(organizationId).territorialAssignments.get('mesas', []))
+      ) && (
+        // affectedCandidateIds vacío en el propio recurso = incidencia de
+        // toda la organización, visible para cualquier scope territorial
+        // que ya haya calzado arriba. Si el usuario tiene su propio
+        // candidateIds[] de alcance restringido (no todas las candidaturas
+        // de la organización), la incidencia debe pisar al menos una.
+        userOrgEntry(organizationId).territorialAssignments.get('candidateIds', []).size() == 0 ||
+        data.affectedCandidateIds.size() == 0 ||
+        data.affectedCandidateIds.hasAny(userOrgEntry(organizationId).territorialAssignments.get('candidateIds', []))
+      );
     }
 
     // ── /platformUsers/{uid} — únicamente estado de superadmin ────────
@@ -389,13 +587,29 @@ service cloud.firestore {
 
       // REGLA OBLIGATORIA 1: nadie puede modificar su propio role, ni
       // siquiera un campaign_admin. Los cambios de rol van únicamente por
-      // la Cloud Function cambiarRolUsuarioCandidato. Se extiende acá
-      // mismo a roleIds/primaryRoleId (RBAC, Etapa 5) — aunque hoy ningún
-      // módulo todavía LEE esos campos para decidir acceso (siguen siendo
-      // aditivos), en cuanto empiecen a usarse de verdad (Etapa 6+) un
-      // auto-edit ahí sería una escalada de privilegios idéntica a
-      // editarse `role` directamente. Se cierra ahora para no dejar la
-      // puerta abierta y tener que acordarse de hacerlo después.
+      // la Cloud Function cambiarRolUsuarioCandidato.
+      //
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 2): la lista de campos
+      // vedados al self-edit era solo ['role','roleIds','primaryRoleId'] —
+      // dejaba afuera TODO lo demás que este mismo archivo usa para
+      // decidir autorización/scope sobre ESTE MISMO doc, encontrado
+      // grepeando cada `candidateUserDoc(candidateId).xxx` /
+      // `.get('xxx', ...)` del archivo: `scopedPermissions` (el mapa que
+      // hasEffectivePermission()/hasScopedPermission() leen — el más
+      // grave: permitía autootorgarse CUALQUIER permiso con alcance
+      // all_candidate, incluido users.create, o sea toma de control total
+      // del candidato desde cualquier rol), `teamId`, `zoneIds`,
+      // `pollingPlaceIds`, `tableIds` (los 4 que consume
+      // canAccessSavedRecordByScope) y `seccional`/`mesa`/`mesasAsignadas`
+      // (los que consume isMesarioOfMesa). `local` se agrega también por
+      // ser el campo gemelo de `pollingPlaceIds` en el resto del código,
+      // aunque hoy ninguna regla lea `candidateUserDoc(...).local`
+      // directamente (defensivo, mismo criterio que ya se usa acá con
+      // primaryRoleId). Bloquear estos campos en el self-edit no le quita
+      // nada al uso legítimo (nombre/teléfono/email/proponente siguen
+      // editables) — solo impide que un usuario se autoasigne el scope de
+      // otro.
+      //
       // Auditoría RBAC: users.edit_role/roles.assign_users de un rol
       // personalizado (alcance amplio) también pueden tocar este doc, pero
       // NUNCA el propio (!isOwner(uid) se mantiene igual que para
@@ -412,7 +626,10 @@ service cloud.firestore {
         // — no una puerta de edición general del doc como users.edit_role.
         (hasEffectivePermission(candidateId, 'operators.manage_payment') && !isOwner(uid) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['montoEntregado', 'cadenciaPago', 'updatedAt'])) ||
-        (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'roleIds', 'primaryRoleId']))
+        (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'role', 'roleIds', 'primaryRoleId', 'scopedPermissions',
+          'mesa', 'mesasAsignadas', 'tableIds', 'seccional', 'zoneIds', 'pollingPlaceIds', 'local', 'teamId'
+        ]))
       );
 
       allow delete: if isSuperAdmin() ||
@@ -464,6 +681,18 @@ service cloud.firestore {
         (hasCandidateRole(candidateId, ['mesario']) &&
           exists(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)) &&
           get(/databases/$(database)/documents/candidates/$(candidateId)/electionDayControl/$(recordId)).data.assignedTableUserId == request.auth.uid) ||
+        // Vista propia del mesario, para resaltar "nuestros" (savedRecords
+        // ya capturados por el candidato en SU mesa) — igual patrón que la
+        // rama de chofer_asignado de arriba: local+mesa son campos propios
+        // del registro, así que Firestore puede probar la condición para
+        // toda la query where('local','==',x).where('mesa','==',y) sin
+        // mirar cada doc uno por uno. Acotado a mesarios con `local`
+        // seteado (los del flujo unificado nuevo) — nunca amplía el
+        // acceso más allá de la mesa que ya tienen asignada.
+        (hasCandidateRole(candidateId, ['mesario']) &&
+          candidateUserDoc(candidateId).get('local', null) != null &&
+          resource.data.local == candidateUserDoc(candidateId).local &&
+          resource.data.mesa == candidateUserDoc(candidateId).mesa) ||
         // Un dirigente puede ser REASIGNADO a un voterId que no capturó
         // él mismo (assignedLeaderId != uid del que creó el savedRecords)
         // — sin esto solo vería sus propios registros originales, nunca
@@ -527,21 +756,21 @@ service cloud.firestore {
     match /candidates/{candidateId}/diaD/{diaDDocId}/votes/{voteId} {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'auditor', 'viewer']) ||
-        isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) ||
+        isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.get('local', null), resource.data.mesa) ||
         isMesarioOfControlVoter(candidateId, resource.data.savedRecordId) ||
         (belongsToCandidate(candidateId) && resource.data.markedBy == request.auth.uid);
 
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
-        ((isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa) ||
+        ((isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.get('local', null), request.resource.data.mesa) ||
           isMesarioOfControlVoter(candidateId, request.resource.data.savedRecordId)) &&
           request.resource.data.markedBy == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
         ((
-          (isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.mesa) &&
-            isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.mesa)) ||
+          (isMesarioOfMesa(candidateId, resource.data.seccional, resource.data.get('local', null), resource.data.mesa) &&
+            isMesarioOfMesa(candidateId, request.resource.data.seccional, request.resource.data.get('local', null), request.resource.data.mesa)) ||
           (isMesarioOfControlVoter(candidateId, resource.data.savedRecordId) &&
             isMesarioOfControlVoter(candidateId, request.resource.data.savedRecordId))
         ) && request.resource.data.markedBy == resource.data.markedBy);
@@ -829,6 +1058,74 @@ service cloud.firestore {
         hasEffectivePermission(candidateId, 'finance.manage_cash');
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Cajeros DD (Finanzas → 💵 Cajeros DD) — colecciones PROPIAS y
+    // separadas de Caja general (Plan C). Toda escritura pasa por
+    // functions/src/cashierFunds.ts (Admin SDK) — write:false acá en las
+    // 4 colecciones, sin excepción, ni para superadmin (las Cloud
+    // Functions bypasean estas reglas igual). La lectura SÍ se sirve
+    // directo del cliente, pero acotada por regla real (no por
+    // Cloud Function ni por UI) — ver matriz de autorización.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /candidates/{candidateId}/cashierAccounts/{accountId} ──────────
+    // cashier: SOLO su propia cuenta (responsibleUserId == su uid) — la
+    // condición es un campo del MISMO doc, sin get() cruzado, así que
+    // Firestore puede probarla contra una query que filtre por ese mismo
+    // campo (ver getCajeroDiaDAccountByResponsible en firebaseCandidate.js,
+    // que SIEMPRE incluye where('responsibleUserId','==',uid)).
+    // admin (campaign_admin/finance_admin) y superadmin: sin restricción,
+    // rama independiente de resource.data — admite también
+    // getCajerosDiaDAccounts() sin filtro, sin romper nada.
+    match /candidates/{candidateId}/cashierAccounts/{accountId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.cashier_funds.view_all') ||
+        (hasCandidateRole(candidateId, ['cashier']) && resource.data.responsibleUserId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // ── /candidates/{candidateId}/cashierMovements/{movementId} ────────
+    // Mismo criterio que cashierAccounts — responsibleUserId vive
+    // denormalizado en CADA movimiento (escrito una sola vez al crearlo
+    // en cashierFunds.ts, nunca se actualiza después: inmutable por
+    // construcción) para que la condición sea comparable directo contra
+    // resource.data, sin get() a la cuenta. Las queries del cliente para
+    // un cashier SIEMPRE incluyen where('responsibleUserId','==',uid)
+    // (ver getCajeroDiaDMovementsPage) — sin ese filtro, Firestore
+    // rechaza la consulta completa (no la filtra mal), así que "leer
+    // movimientos de otro cajero por query directa" ya es DENY estructural,
+    // no solo una regla que se confía en que nadie va a saltarse.
+    match /candidates/{candidateId}/cashierMovements/{movementId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.cashier_funds.view_all') ||
+        (hasCandidateRole(candidateId, ['cashier']) && resource.data.responsibleUserId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // ── /candidates/{candidateId}/cashierOperations/{operationId} ──────
+    // Idempotencia de Cajeros DD (doc-id == operationId) — puramente
+    // interno a cashierFunds.ts, ningún cliente necesita leerlo ni
+    // escribirlo directo.
+    match /candidates/{candidateId}/cashierOperations/{operationId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+
+    // ── /candidates/{candidateId}/cashierBeneficiaryExceptions/{id} ────
+    // Autorización de reasistencia de Cajeros DD — la crea y consume
+    // exclusivamente cashierFunds.ts (Admin SDK). Lectura para roles
+    // admin de Finanzas (visibilidad de qué excepciones se otorgaron) —
+    // ningún cashier necesita leer esta colección directo, la usa
+    // indirectamente pasando el exceptionId que el admin le comunica.
+    match /candidates/{candidateId}/cashierBeneficiaryExceptions/{exceptionId} {
+      allow read: if isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
+        hasEffectivePermission(candidateId, 'finance.cashier_funds.view_all');
+      allow write: if false;
+    }
+
     // ── /candidates/{candidateId}/financeAlerts/{alertId} ──────────────
     // Etapa 4. calculateFinanceAlerts() (client-computed, mismo patrón que
     // electionDayAlerts de Día D Control) las genera y las persiste;
@@ -938,11 +1235,28 @@ service cloud.firestore {
         (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 2): igual que
+      // electionDayControl, este create confiaba en
+      // request.resource.data.assignedUserId==self sin comprobar nada
+      // previo — un operador podía crear electionStatus para CUALQUIER
+      // voterId, sin haber existido nunca un callAssignments real. Se
+      // exige ahora isOperatorOfVoter(candidateId, voterId) (la misma
+      // fuente autoritativa — callAssignments, solo escribible por
+      // campaign_admin/coordinator — que ya usa correctamente
+      // electionDayControl para este mismo rol). Verificado que no rompe
+      // el flujo real: contactCenter.js solo llama a
+      // upsertElectionStatus() para operador con voterIds que YA vienen
+      // de getMyCallAssignments() (el registro ni siquiera se carga en
+      // pantalla si no está en esa lista), así que
+      // request.resource.data.assignedUserId siempre coincide con una
+      // asignación preexistente.
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.update_status') ||
-        (hasScopedPermission(candidateId, 'contact_center.update_status', 'assigned') && request.resource.data.assignedUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
+        (hasScopedPermission(candidateId, 'contact_center.update_status', 'assigned') &&
+          isOperatorOfVoter(candidateId, voterId) && request.resource.data.assignedUserId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          isOperatorOfVoter(candidateId, voterId) && request.resource.data.assignedUserId == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
@@ -989,11 +1303,23 @@ service cloud.firestore {
         (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 4): antes confiaba
+      // únicamente en request.resource.data.assignedUserId==self (mismo
+      // patrón ya corregido en electionStatus) — un operador podía crear
+      // un followUp para CUALQUIER voterId del candidato. Se exige ahora
+      // isOperatorOfVoter(candidateId, voterId) sobre el voterId real del
+      // documento (request.resource.data.voterId — acá el id del doc es
+      // autogenerado, no el voterId, a diferencia de electionDayControl/
+      // electionStatus).
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         hasEffectivePermission(candidateId, 'contact_center.create_followup') ||
-        (hasScopedPermission(candidateId, 'contact_center.create_followup', 'assigned') && request.resource.data.assignedUserId == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['operador']) && request.resource.data.assignedUserId == request.auth.uid);
+        (hasScopedPermission(candidateId, 'contact_center.create_followup', 'assigned') &&
+          isOperatorOfVoter(candidateId, request.resource.data.voterId) &&
+          request.resource.data.assignedUserId == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['operador']) &&
+          isOperatorOfVoter(candidateId, request.resource.data.voterId) &&
+          request.resource.data.assignedUserId == request.auth.uid);
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
@@ -1012,15 +1338,22 @@ service cloud.firestore {
         (hasScopedPermission(candidateId, 'contact_center.view', 'assigned') && resource.data.assignedUserId == request.auth.uid) ||
         (hasCandidateRole(candidateId, ['operador']) && resource.data.assignedUserId == request.auth.uid);
 
-      // chofer/dirigente/mesario reportan incidencias desde su propia
-      // vista operativa (Día D Control) — mismo criterio que operador:
-      // basta con que se reporten a sí mismos como reportedBy, sin
-      // importar a quién quede asignada (assignedUserId, ver
-      // wireAccionRapida en dia-d-control-candidate.js).
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 4): antes bastaba con
+      // reportedBy==self (autodeclarado en la misma escritura) — cualquier
+      // rol operativo podía fabricar una incidencia sobre un elector que
+      // nunca tuvo relación real con él. reportedBy==self se mantiene
+      // (identifica QUIÉN reporta, dato legítimo de autoría), pero ahora
+      // se exige ADEMÁS hasAuthoritativeLinkToVoter() — que ESE elector
+      // (request.resource.data.voterId) realmente le corresponda según su
+      // rol (electionDayControl.assignedLeaderId/assignedTableUserId,
+      // isDriverOfVoter() o isOperatorOfVoter(), nunca un campo de esta
+      // misma escritura).
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
         (hasEffectivePermission(candidateId, 'election_day_control.create_incident') && request.resource.data.reportedBy == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['operador', 'chofer', 'dirigente', 'mesario']) && request.resource.data.reportedBy == request.auth.uid);
+        (hasCandidateRole(candidateId, ['operador', 'chofer', 'dirigente', 'mesario']) &&
+          request.resource.data.reportedBy == request.auth.uid &&
+          hasAuthoritativeLinkToVoter(candidateId, request.resource.data.voterId));
 
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
@@ -1098,14 +1431,63 @@ service cloud.firestore {
             resource.data.get('assignedTableUserId', null) == request.auth.uid ||
             isDriverOwner(candidateId, resource.data.get('assignedDriverId', null))));
 
-      // Creación lazy: la primera vez que cualquier rol operativo toca un
+      // Creación lazy: la primera vez que cierto rol operativo toca un
       // voterId se crea el doc, siempre y cuando se cree apuntándose a sí
       // mismo (nadie crea un doc "asignado a otro" salvo admin/coordinator).
+      //
+      // FIX DE SEGURIDAD (auditoría rol mesario): la rama de `mesario` que
+      // había acá («hasCandidateRole(['mesario']) &&
+      // request.resource.data.get('assignedTableUserId', null) ==
+      // request.auth.uid») permitía que CUALQUIER mesario se
+      // auto-asignara a CUALQUIER voterId del candidato — sin importar
+      // mesa/local — con solo poner su propio uid en assignedTableUserId
+      // en el create. No hay ningún campo confiable (no editable por el
+      // propio cliente en la misma escritura) contra el cual validar
+      // "este elector es de este mesario" ANTES de que el doc exista: el
+      // único origen legítimo de esa asignación es que un
+      // campaign_admin/coordinator la haya hecho ya (assignTableUserToVoter,
+      // ver firebaseCandidate.js) — y esa función SIEMPRE crea el doc si
+      // no existe, autorizada por la rama de campaign_admin/coordinator de
+      // arriba. Por diseño real de la UI (renderMesarioView lee sus
+      // votantes vía getElectionDayControlByTableUser, que solo devuelve
+      // docs YA creados), el mesario nunca necesita crear este doc desde
+      // cero — solo actualizar uno que ya le fue asignado (ver `allow
+      // update` abajo, que sí sigue exigiendo assignedTableUserId propio).
+      // Quitar esta rama no le saca ninguna capacidad real al mesario.
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 2): la rama de `dirigente`
+      // tenía el mismo hueco que tenía `mesario` (auto-claim solo con
+      // assignedLeaderId==self, sin comparar contra ninguna fuente
+      // previa) — un dirigente podía crearse un electionDayControl para
+      // CUALQUIER voterId del candidato, incluso uno jamás capturado por
+      // él. A diferencia de mesario, acá SÍ hay un uso legítimo y real de
+      // la creación lazy: renderDirigenteView opera sobre sus PROPIOS
+      // votantes (getUserRecords, where uid==self) y, para esos, todavía
+      // puede no existir electionDayControl la primera vez que clickea un
+      // estado — ahí setDiaDStatus() crea el doc con
+      // assignedLeaderId=record.uid, que para un registro propio ES su
+      // propio uid. Por eso no se puede simplemente quitar la rama como
+      // se hizo con mesario (rompería ese primer click) — en cambio, se
+      // exige además que savedRecords/{voterId}.uid (quién capturó
+      // realmente a ese votante — el dirigente NUNCA puede reescribir el
+      // `uid` de un savedRecords ajeno, ver `allow update` de esa
+      // colección) coincida con quien está creando. Un dirigente
+      // REASIGNADO a un voterId que no capturó (assignedLeaderId
+      // distinto de savedRecords.uid) sigue funcionando igual que antes,
+      // porque ese camino nunca pasa por acá: lo crea admin/coordinator
+      // vía assignLeaderToVoter(), autorizado por la rama de arriba.
       allow create: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) ||
-        (hasCandidateRole(candidateId, ['dirigente']) && request.resource.data.get('assignedLeaderId', null) == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['mesario']) && request.resource.data.get('assignedTableUserId', null) == request.auth.uid) ||
-        (hasCandidateRole(candidateId, ['chofer']) && isDriverOwner(candidateId, request.resource.data.get('assignedDriverId', null))) ||
+        (hasCandidateRole(candidateId, ['dirigente']) &&
+          request.resource.data.get('assignedLeaderId', null) == request.auth.uid &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(voterId)).data.uid == request.auth.uid) ||
+        // FIX DE SEGURIDAD (auditoría RBAC, ronda 3): antes solo exigía
+        // isDriverOwner() (identidad del chofer) — se agrega
+        // isVoterAssignedToDriver() (que ESTE voterId realmente esté en
+        // su ruta, por savedRecords.chofer_asignado o driverZoneVoters).
+        (hasCandidateRole(candidateId, ['chofer']) &&
+          isDriverOwner(candidateId, request.resource.data.get('assignedDriverId', null)) &&
+          isVoterAssignedToDriver(candidateId, voterId, request.resource.data.get('assignedDriverId', null))) ||
         (hasCandidateRole(candidateId, ['operador']) && isOperatorOfVoter(candidateId, voterId));
 
       // Los roles operativos pueden actualizar el estado de SU propio
@@ -1143,9 +1525,19 @@ service cloud.firestore {
         hasEffectivePermission(candidateId, 'election_day_control.view_operations') ||
         (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer', 'operador']) && resource.data.updatedBy == request.auth.uid);
 
-      allow create: if (isSuperAdmin() ||
-        hasCandidateRole(candidateId, ['campaign_admin', 'coordinator', 'dirigente', 'mesario', 'chofer', 'operador'])) &&
-        request.resource.data.updatedBy == request.auth.uid;
+      // FIX DE SEGURIDAD (auditoría RBAC, ronda 4): antes bastaba con
+      // updatedBy==self — cualquier rol operativo podía fabricar historial
+      // falso para un voterId ajeno. Se exige ahora ADEMÁS
+      // hasAuthoritativeLinkToVoter() para los 4 roles operativos (no para
+      // campaign_admin/coordinator, que siguen sin restricción). No rompe
+      // logDiaDMovement(): siempre se llama DESPUÉS de que setDiaDStatus()
+      // ya escribió electionDayControl con éxito, así que el campo
+      // assignedXxx que este helper necesita ya está en el estado correcto.
+      allow create: if isSuperAdmin() ||
+        (hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']) && request.resource.data.updatedBy == request.auth.uid) ||
+        (hasCandidateRole(candidateId, ['dirigente', 'mesario', 'chofer', 'operador']) &&
+          request.resource.data.updatedBy == request.auth.uid &&
+          hasAuthoritativeLinkToVoter(candidateId, request.resource.data.voterId));
 
       allow update, delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
     }
@@ -1168,6 +1560,208 @@ service cloud.firestore {
         hasEffectivePermission(candidateId, 'reports.view');
       allow create, update: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin', 'coordinator']);
       allow delete: if isSuperAdmin() || hasCandidateRole(candidateId, ['campaign_admin']);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Organización Electoral (Fase 1 de cimiento) — bloque nuevo,
+    // completamente aditivo. Ninguna colección de arriba se modifica.
+    // Módulo de incidencias (electoralIncidents/evidence/writings) NO se
+    // agrega todavía — solo la estructura organizacional (Fase 1).
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── /electoralOrganizations/{organizationId} — metadata ────────────
+    // Mismo criterio que /candidates/{candidateId}: solo superadmin crea/
+    // borra/suspende (campo `estado`). organization_admin puede editar
+    // datos estructurales no sensibles (nombre/sigla/logo), nunca `estado`
+    // ni vincular/desvincular candidatos (eso son Cloud Functions aparte,
+    // ver sección de candidates.organizationId más abajo).
+    match /electoralOrganizations/{organizationId} {
+      allow read: if isSuperAdmin() || isOrganizationMember(organizationId);
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin() ||
+        (hasOrganizationRole(organizationId, ['organization_admin']) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['nombre', 'sigla', 'logoUrl', 'updatedAt']));
+      allow delete: if isSuperAdmin();
+    }
+
+    // ── /electoralOrganizations/{organizationId}/users/{uid} — roster ──
+    // Roster informativo (mismo propósito que candidates/{id}/users): qué
+    // uids pertenecen a esta organización y con qué rol/estado, para
+    // listarlos en la UI de organization_admin. La fuente de verdad para
+    // AUTORIZACIÓN es siempre /userOrganizationIndex/{uid} (abajo), nunca
+    // este roster — mismo criterio que ya usa el modelo por candidato
+    // (candidateUserDoc, no un roster aparte).
+    match /electoralOrganizations/{organizationId}/users/{uid} {
+      allow read: if isSuperAdmin() || isOrganizationMember(organizationId) || isOwner(uid);
+      // Nunca se escribe directo desde el cliente — solo Cloud Functions
+      // (Admin SDK), igual criterio que candidates/{id}/auditLogs: crear/
+      // activar/desactivar/cambiar scope de un apoderado son acciones que
+      // deben quedar auditadas server-side, no ediciones libres de doc.
+      allow write: if false;
+    }
+
+    // ── /userOrganizationIndex/{uid} — pertenencia + rol + scope ───────
+    // Solo Cloud Functions escriben (ver upsertUserOrganizationIndex).
+    // Lectura: el propio dueño (para que el cliente resuelva su acceso al
+    // iniciar sesión, igual que userCandidateIndex) o superadmin.
+    match /userOrganizationIndex/{uid} {
+      allow read: if isOwner(uid) || isSuperAdmin();
+      allow write: if false;
+    }
+
+    // ── /electoralOrganizations/{organizationId}/auditLogs/{logId} ─────
+    // Inmutable desde cliente — solo Cloud Functions (Admin SDK) escriben,
+    // mismo patrón exacto que candidates/{id}/auditLogs.
+    match /electoralOrganizations/{organizationId}/auditLogs/{logId} {
+      allow read: if isSuperAdmin() || hasOrganizationRole(organizationId, ['organization_admin']);
+      allow write: if false;
+    }
+
+    // NOTA: no se agrega match para /orgInvites — sigue el mismo criterio
+    // ya usado por /invites: sin reglas propias a propósito, solo Cloud
+    // Functions la tocan.
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Incidencia Electoral (Fase 2) — núcleo del Módulo Apoderado.
+    // Pertenece a la ORGANIZACIÓN (no a un candidato), puede afectar 0
+    // (=toda la organización), 1 o varias candidaturas (affectedCandidateIds).
+    //
+    // DECISIÓN: TODA escritura (crear/editar/cambiar estado/escalar/
+    // asignar responsable) pasa por Cloud Functions (Admin SDK) — mismo
+    // criterio ya usado en este archivo para driverZoneVoters/roles/
+    // auditLogs, acá con más razón todavía: una incidencia jurídica no
+    // puede quedar sujeta a que un cliente arme un `update()` con
+    // cualquier combinación de campos, necesita validar territorio/
+    // candidatura/transición de estado/historial en un solo lugar
+    // auditado. `allow write: if false` en las 3 colecciones de abajo.
+    //
+    // canAccessIncidentByTerritory (definida arriba, dormida desde Fase 1)
+    // se activa acá por primera vez.
+    match /electoralOrganizations/{organizationId}/electoralIncidents/{incidentId} {
+      allow read: if isSuperAdmin() || canAccessIncidentByTerritory(organizationId, resource.data);
+      allow write: if false;
+    }
+
+    // get() acotado por path (organizationId+incidentId son segmentos de
+    // path, no resource.data) — mismo patrón ya usado en
+    // isMesarioOfControlVoter/isAssignedToSavedRecord para traer el
+    // "padre" desde una subcolección sin costar más de 1 get() extra.
+    function incidentTerritoryData(organizationId, incidentId) {
+      return get(/databases/$(database)/documents/electoralOrganizations/$(organizationId)/electoralIncidents/$(incidentId)).data;
+    }
+
+    // Historial de transiciones de estado — inmutable desde cliente,
+    // mismo criterio que roleAuditLogs/auditLogs. La visibilidad de UNA
+    // entrada de historial depende del territorio de SU incidencia padre
+    // (si no podés ver la incidencia, tampoco su historial).
+    match /electoralOrganizations/{organizationId}/electoralIncidents/{incidentId}/history/{historyId} {
+      allow read: if isSuperAdmin() || canAccessIncidentByTerritory(organizationId, incidentTerritoryData(organizationId, incidentId));
+      allow write: if false;
+    }
+
+    // Evidencia — estructura preparada, sin capacidad real de carga
+    // todavía (ver auditoría Fase 1 §D: Firebase Storage del proyecto
+    // real sigue sin inicializar, y acá no existe mecanismo de hash/
+    // cadena de custodia). `allow write: if false` reflejeja que ningún
+    // flujo puede escribir acá hoy, ni siquiera Cloud Functions (no hay
+    // ninguna función que lo haga en esta fase) — se deja la regla lista
+    // para cuando exista el flujo real, en vez de omitir la colección.
+    match /electoralOrganizations/{organizationId}/electoralIncidents/{incidentId}/evidence/{evidenceId} {
+      allow read: if isSuperAdmin() || canAccessIncidentByTerritory(organizationId, incidentTerritoryData(organizationId, incidentId));
+      allow write: if false;
+    }
+
+    // ── .../reclamaciones/{reclamacionId} — AUTORIZACIÓN FASE 3C §12 ────
+    // Reclamación escrita del veedor (art. 190). Mismo patrón exacto que
+    // history/evidence: visibilidad heredada de la incidencia padre, toda
+    // escritura (crear/registrar constancia) pasa por Cloud Functions
+    // (crearReclamacionIncidencia/registrarConstanciaReclamacion en
+    // incidents.ts). NO existe ninguna Cloud Function de borrado — borrado
+    // físico es imposible tanto por Rules (`if false`) como porque la
+    // función simplemente no existe (test BV).
+    match /electoralOrganizations/{organizationId}/electoralIncidents/{incidentId}/reclamaciones/{reclamacionId} {
+      allow read: if isSuperAdmin() || canAccessIncidentByTerritory(organizationId, incidentTerritoryData(organizationId, incidentId));
+      allow write: if false;
+    }
+
+    // ── .../clasificacionHistory/{entryId} — AUTORIZACIÓN FASE 3C §4 ────
+    // Historial INMUTABLE de cambios de clasificacionJuridica, separado a
+    // propósito del historial de estadoOperativo (`history` de arriba) —
+    // un cambio de clasificación jurídica NUNCA debe mezclarse con ni
+    // disparar una transición de estadoOperativo (test BM/BN). Solo
+    // clasificarIncidenciaJuridicamente (incidents.ts) escribe acá.
+    match /electoralOrganizations/{organizationId}/electoralIncidents/{incidentId}/clasificacionHistory/{entryId} {
+      allow read: if isSuperAdmin() || canAccessIncidentByTerritory(organizationId, incidentTerritoryData(organizationId, incidentId));
+      allow write: if false;
+    }
+
+    // ── /legalSources/{sourceId} — AUTORIZACIÓN FASE 3C §11, GLOBAL ─────
+    // Metadatos de procedencia (organismo/norma/URL/fecha/checksum) — no es
+    // contenido normativo en sí (eso sigue siendo legalBasis), así que se
+    // trata como información de auditoría/citación, visible a cualquier
+    // autenticado igual que incidentCatalog. Escritura SIEMPRE por Cloud
+    // Function (crearFuenteLegal/actualizarFuenteLegal en legalKnowledge.ts,
+    // auditada en legalAuditLogs) — mismo criterio `if false` que
+    // legalBasis/incidentCatalog.
+    match /legalSources/{sourceId} {
+      allow read: if isAuth();
+      allow write: if false;
+    }
+
+    // ── /incidentCatalog/{catalogId} — catálogo GLOBAL, no por organización ─
+    // Mismo razonamiento que legalBasis: un catálogo de tipos de
+    // incidencia no es propiedad de una organización particular, así que
+    // vive fuera de electoralOrganizations. Lectura abierta a cualquier
+    // autenticado (no es información sensible, es taxonomía); escritura
+    // ENDURECIDA en Fase 3: antes era `isSuperAdmin()` directo, ahora
+    // `if false` — TODA escritura (crear/editar/versionar/activar) pasa
+    // por Cloud Functions (functions/src/legalKnowledge.ts) para que
+    // quede auditada en legalAuditLogs sin excepción, incluso para
+    // superadmin (sección 14 del pedido: "toda modificación debe quedar
+    // auditada", sin dejar una puerta de `set()`/`update()` directo que la
+    // esquive). No rompe ningún test de Fase 2 (ninguno probaba que
+    // superadmin pudiera escribir directo, solo que apoderado no podía).
+    match /incidentCatalog/{catalogId} {
+      allow read: if isAuth();
+      allow write: if false;
+    }
+
+    // ── /legalBasis/{legalBasisId} — Base Jurídica Electoral, GLOBAL ───
+    // Fase 3. Un fundamento legal no es propiedad de una organización ni
+    // de un candidato — es la misma ley para todos, así que vive fuera de
+    // electoralOrganizations (mismo criterio ya aplicado a incidentCatalog).
+    //
+    // LECTURA: solo status=='VERIFICADO' Y active==true es visible para
+    // cualquier autenticado — un BORRADOR/EN_REVISION/OBSOLETO/DEROGADO
+    // NUNCA debe llegarle a un apoderado como si fuera derecho vigente
+    // (sección 6 y 8 del pedido: nunca mostrar contenido no verificado
+    // como confirmado). Superadmin ve todo, para poder gestionar el ciclo
+    // completo (verificar, marcar obsoleto, reactivar).
+    //
+    // ESCRITURA: `if false` siempre — ni siquiera superadmin escribe
+    // directo, todo pasa por Cloud Functions (auditoría obligatoria,
+    // sección 14) — mismo criterio que incidentCatalog arriba.
+    //
+    // BORRADO FÍSICO: nunca, ni por Cloud Function (no existe
+    // eliminarFundamentoLegal en absoluto) — un fundamento derogado sigue
+    // existiendo con status:'DEROGADO', para que cualquier incidencia
+    // vieja que lo haya usado (vía legalBasisSnapshot, ver
+    // crearIncidenciaElectoral) siga siendo trazable.
+    match /legalBasis/{legalBasisId} {
+      allow read: if isSuperAdmin() ||
+        (isAuth() && resource.data.status == 'VERIFICADO' && resource.data.active == true);
+      allow write: if false;
+    }
+
+    // ── /legalAuditLogs/{logId} — auditoría de Base Jurídica + Catálogo ─
+    // Global (no por organización) — mismo patrón inmutable que
+    // electoralOrganizations/{id}/auditLogs: solo Cloud Functions
+    // (Admin SDK) escriben, superadmin es el único que lee (contenido
+    // interno de gestión jurídica, no operativo de campaña).
+    match /legalAuditLogs/{logId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
     }
   }
 }

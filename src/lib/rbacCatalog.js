@@ -150,6 +150,17 @@ export const PERMISSIONS = [
   { key: 'finance.export', module: 'finance', name: 'Exportar reportes financieros' },
   { key: 'finance.configure', module: 'finance', name: 'Configurar tarifas' },
 
+  // Cajeros DD (aditivo, no afecta finance.view_cash/manage_cash de la
+  // Caja general) — ver functions/src/cashierFunds.ts, únicos permisos
+  // que gatean acciones sobre cuentas/movimientos `type:'cajero_dia_d'`.
+  { key: 'finance.cashier_funds.assign', module: 'finance', name: 'Asignar fondos a un cajero' },
+  { key: 'finance.cashier_funds.view_all', module: 'finance', name: 'Ver todos los cajeros (no solo el propio)' },
+  { key: 'finance.cashier_funds.register_expense', module: 'finance', name: 'Registrar egreso como cajero' },
+  { key: 'finance.cashier_funds.request_void', module: 'finance', name: 'Solicitar anulación de un movimiento' },
+  { key: 'finance.cashier_funds.resolve_void', module: 'finance', name: 'Aprobar/rechazar anulación' },
+  { key: 'finance.cashier_funds.manage_account', module: 'finance', name: 'Crear/cerrar/reabrir cuenta de cajero' },
+  { key: 'finance.cashier_funds.authorize_exception', module: 'finance', name: 'Autorizar excepción de reasistencia' },
+
   // settings
   { key: 'settings.view', module: 'settings', name: 'Ver configuración del candidato' },
   { key: 'settings.edit', module: 'settings', name: 'Editar configuración del candidato' },

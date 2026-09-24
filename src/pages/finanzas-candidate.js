@@ -62,6 +62,19 @@ import {
   resolveFinanceAlert,
   getFinanceSettings,
   updateFinanceSettings,
+  crearCuentaCajero,
+  asignarFondosCajero,
+  registrarEgresoCajero,
+  solicitarAnulacionMovimiento,
+  resolverAnulacionMovimiento,
+  cerrarCuentaCajero,
+  reabrirCuentaCajero,
+  autorizarExcepcionBeneficiario,
+  getCajerosDiaDAccounts,
+  getCajeroDiaDAccountByResponsible,
+  getCajeroDiaDAccountSummary,
+  getCajeroDiaDMovementsPage,
+  generateCashierOperationId,
   FINANCE_BENEFICIARY_TYPES,
   FINANCE_FREQUENCIES,
   FINANCE_PAYMENT_METHODS,
@@ -71,6 +84,7 @@ import {
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
 import { exportGenericToExcel } from '../lib/excel.js'
+import { exportGenericToPdf } from '../lib/pdf.js'
 import { can } from '../lib/rbac.js'
 
 const BENEFICIARY_LABELS = {
@@ -117,6 +131,7 @@ const TABS = [
   { id: 'pagos', label: '💳 Pagos', ready: true },
   { id: 'liquidaciones', label: '🧾 Liquidaciones', ready: true },
   { id: 'caja', label: '🏦 Caja', ready: true },
+  { id: 'cajeros-dia-d', label: '💵 Cajeros DD', ready: true },
   { id: 'dia-d-finanzas', label: '🗳️ Día D', ready: true },
   { id: 'comprobantes', label: '📎 Comprobantes', ready: true },
   { id: 'reportes', label: '📈 Reportes', ready: true },
@@ -151,8 +166,54 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   const puedeGenerarDiaD = permitir('finance.create_obligation', ['campaign_admin', 'finance_admin', 'finance_operator'])
   const puedeGestionarAlertas = permitir('finance.configure', ['campaign_admin', 'finance_admin'])
   const puedeConfigurarTarifas = permitir('finance.configure', ['campaign_admin', 'finance_admin'])
+  // Cajeros DD — ver toda la cuenta de todos (admin) vs. solo la propia
+  // (cashier). puedeVerTodosCajeros decide qué rama de pintarCajerosDiaD
+  // se renderiza; firestore.rules aplica el mismo criterio del lado
+  // servidor (isCajeroOwnerOfAccount), así que esto es solo UX, no la
+  // barrera de seguridad real.
+  const puedeVerTodosCajeros = permitir('finance.cashier_funds.view_all', ['campaign_admin', 'finance_admin', 'auditor'])
+  const puedeAsignarFondosCajero = permitir('finance.cashier_funds.assign', ['campaign_admin', 'finance_admin'])
+  const puedeGestionarCuentaCajero = permitir('finance.cashier_funds.manage_account', ['campaign_admin', 'finance_admin'])
+  const puedeResolverAnulacionCajero = permitir('finance.cashier_funds.resolve_void', ['campaign_admin', 'finance_admin'])
+  const puedeAutorizarExcepcionCajero = permitir('finance.cashier_funds.authorize_exception', ['campaign_admin', 'finance_admin'])
+  const puedeRegistrarEgresoCajero = permitir('finance.cashier_funds.register_expense', ['cashier'])
+  const puedeSolicitarAnulacionCajero = permitir('finance.cashier_funds.request_void', ['cashier', 'campaign_admin', 'finance_admin'])
 
-  let tab = 'resumen'
+  // Visibilidad de pestañas por permiso efectivo (hallazgo UX Fase 9 de
+  // Cajeros DD) — NUNCA `role === 'cashier'` a mano, mismo patrón
+  // permitir() de arriba. Antes: TABS se mostraba completo a cualquiera
+  // que abriera Finanzas, y la pestaña por defecto ("Resumen") tira
+  // permission-denied real para un cashier puro porque
+  // getOpenFinanceAlerts() lee financeAlerts, cuya regla NO incluye
+  // 'cashier' (ver firestore.rules match .../financeAlerts/{alertId}).
+  // Cajeros DD es el único módulo de Finanzas pensado para operarse con
+  // un rol cashier puro — los demás permisos legacy de 'cashier' sobre
+  // financeObligations/financePayments/paymentBatches/financeReceipts
+  // (ver firestore.rules) son para acciones puntuales (ej. marcar un
+  // pago aprobado como pagado), no para navegar esas pestañas completas,
+  // así que acá se excluyen a propósito. legacyGeneral es EXACTAMENTE
+  // los 4 roles que ya veían las 11 pestañas sin gate ninguno — ninguno
+  // de ellos pierde ni gana una sola pestaña con este cambio, incluido
+  // 'cashier' en 'cajeros-dia-d' (reusa los flags ya computados arriba,
+  // ningún permiso nuevo inventado para ese caso).
+  const legacyGeneral = ['campaign_admin', 'finance_admin', 'finance_operator', 'auditor']
+  const puedeVerPestanaCajerosDD = puedeVerTodosCajeros || puedeRegistrarEgresoCajero
+  const TAB_PERMISSIONS = {
+    'resumen': permitir('finance.view', legacyGeneral),
+    'obligaciones': permitir('finance.view', legacyGeneral),
+    'pagos': permitir('finance.view', legacyGeneral),
+    'liquidaciones': permitir('finance.view', legacyGeneral),
+    'caja': permitir('finance.view_cash', legacyGeneral),
+    'cajeros-dia-d': puedeVerPestanaCajerosDD,
+    'dia-d-finanzas': permitir('finance.create_obligation', legacyGeneral),
+    'comprobantes': permitir('finance.view', legacyGeneral),
+    'reportes': permitir('finance.view', legacyGeneral),
+    'auditoria-finanzas': permitir('finance.view_audit', legacyGeneral),
+    'configuracion-finanzas': permitir('finance.configure', legacyGeneral)
+  }
+  const TABS_VISIBLES = TABS.filter(t => TAB_PERMISSIONS[t.id])
+
+  let tab = TABS_VISIBLES[0]?.id || 'resumen'
   let cursor = null
   let obligaciones = []
   let filtroStatus = ''
@@ -167,8 +228,30 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   let cuentaCajaActiva = null
   let movimientosCaja = []
   let cursorMovimientos = null
+  let cddCuentas = []
+  let cddCuentaDrillDown = null
+  let cddMovimientos = []
+  let cddCursorMovimientos = null
+  let cddMiCuenta = null
+  // Filtro de CI en el detalle de movimientos de Cajeros DD — LOCAL sobre
+  // cddMovimientos (lo ya cargado en pantalla), no una query nueva: no
+  // toca permisos ni consulta datos fuera de la cuenta que el usuario ya
+  // puede ver (misma cuenta, mismo query base de cargarMovimientosCajero).
+  // Limitación conocida y señalada en la UI (ver pintarDrillDownHtml): si
+  // hay más movimientos de los que entraron en la página actual
+  // (hasMore), la búsqueda no los alcanza hasta que se toque "Cargar
+  // más" — para el volumen real de una cuenta de cajero (Día D, un
+  // rango acotado) esto no debería ser un problema práctico.
+  let cddFiltroCI = ''
 
   function render() {
+    // Guard contra navegación forzada a una pestaña no autorizada (URL,
+    // hash, o cualquier otro camino que llegue a pisar `tab` por fuera
+    // del click handler de abajo, que ya solo ofrece pestañas de
+    // TABS_VISIBLES) — nunca se renderiza una pestaña sin permiso,
+    // siempre cae a la primera autorizada disponible.
+    if (!TAB_PERMISSIONS[tab]) tab = TABS_VISIBLES[0]?.id || tab
+
     container.innerHTML = `
       <div style="background: linear-gradient(135deg, #00695c 0%, #004d40 100%); color: white; padding: 24px; border-radius: 8px 8px 0 0;">
         <h2 style="margin: 0; font-family: 'Barlow Condensed', sans-serif; font-size: 2rem; text-transform: uppercase;">💰 FINANZAS DE CAMPAÑA</h2>
@@ -176,7 +259,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; padding:16px 20px 0;">
         <div style="display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid #eee; padding-bottom:10px;">
-          ${TABS.map(t => `<button class="fin-tab btn-tab${tab === t.id ? ' active' : ''}" data-tab="${t.id}" style="--tab-color:#00695c;">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
+          ${TABS_VISIBLES.map(t => `<button class="fin-tab btn-tab${tab === t.id ? ' active' : ''}" data-tab="${t.id}" style="--tab-color:#00695c;">${t.label}${t.ready ? '' : ' 🚧'}</button>`).join('')}
         </div>
       </div>
       <div style="background:white; border:1px solid #ddd; border-top:none; border-radius:0 0 8px 8px; padding:20px;">
@@ -184,7 +267,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       </div>
     `
     container.querySelectorAll('.fin-tab').forEach(btn => {
-      btn.addEventListener('click', () => { tab = btn.dataset.tab; render() })
+      btn.addEventListener('click', () => { tab = TAB_PERMISSIONS[btn.dataset.tab] ? btn.dataset.tab : tab; render() })
     })
     pintarTab()
   }
@@ -206,6 +289,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     if (tab === 'pagos') return pintarPagos(body)
     if (tab === 'liquidaciones') return pintarLiquidaciones(body)
     if (tab === 'caja') return pintarCaja(body)
+    if (tab === 'cajeros-dia-d') return pintarCajerosDiaD(body)
     if (tab === 'reportes') return pintarReportes(body)
     if (tab === 'comprobantes') return pintarComprobantes(body)
     if (tab === 'dia-d-finanzas') return pintarDiaDFinanzas(body)
@@ -931,6 +1015,407 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         modal.remove()
         await cargarMovimientosCaja(true)
       } catch (err) {
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+  }
+
+  // ── CAJEROS DD ───────────────────────────────────────────────────────
+  // Fondos operativos por cajero, aditivo sobre `type:'cajero_dia_d'` —
+  // nunca toca cashAccounts/cashMovements de Caja general (arriba, sin
+  // `type` o `type:'general'`). Vista admin (tabla + drill-down) vs.
+  // vista propia del cajero, según puedeVerTodosCajeros.
+  async function pintarCajerosDiaD(body) {
+    if (puedeVerTodosCajeros) return pintarCajerosDiaDAdmin(body)
+    return pintarCajerosDiaDPropio(body)
+  }
+
+  async function pintarCajerosDiaDAdmin(body) {
+    body.innerHTML = '<p style="color:#999;">Cargando cajeros...</p>'
+    try {
+      cddCuentas = await getCajerosDiaDAccounts(candidateId)
+      const resumenes = await Promise.all(cddCuentas.map(c => getCajeroDiaDAccountSummary(candidateId, c.id, c.responsibleUserId)))
+      body.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+          <h3 style="margin:0; font-size:.95rem;">💵 Cajeros Día D</h3>
+          ${puedeGestionarCuentaCajero ? `<button id="cdd-btn-nueva-cuenta" style="background:#00695c; color:white; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-weight:700;">➕ Nueva cuenta de cajero</button>` : ''}
+        </div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; font-size:.83rem;">
+            <thead><tr style="text-align:left; border-bottom:2px solid #eee;">
+              <th style="padding:6px;">Cajero</th><th>Asignado</th><th>Utilizado</th><th>Saldo</th><th>Operaciones</th><th>Estado</th>
+            </tr></thead>
+            <tbody>
+              ${cddCuentas.length === 0 ? `<tr><td colspan="6" style="padding:40px; text-align:center; color:#999;">Sin cuentas de cajero todavía.</td></tr>` : cddCuentas.map((c, i) => `
+                <tr style="border-bottom:1px solid #eee; cursor:pointer;" class="cdd-fila-cuenta" data-id="${c.id}">
+                  <td style="padding:6px; font-weight:700;">${escapeHtml(c.name)}</td>
+                  <td>${money(resumenes[i].totalAssigned, c.currency)}</td>
+                  <td>${money(resumenes[i].totalExpensed, c.currency)}</td>
+                  <td style="font-weight:700; color:${Number(c.balance) > 0 ? '#2e7d32' : '#999'};">${money(c.balance, c.currency)}</td>
+                  <td><button class="cdd-btn-operaciones" data-id="${c.id}" style="background:#455a64; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">🕐 Ver (${resumenes[i].operationsCount})</button></td>
+                  <td>${c.status === 'active' ? '<span style="color:#2e7d32; font-weight:700;">🟢 Activa</span>' : '<span style="color:#c62828; font-weight:700;">🔴 Cerrada</span>'}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div id="cdd-drilldown" style="margin-top:20px;"></div>
+      `
+      document.getElementById('cdd-btn-nueva-cuenta')?.addEventListener('click', () => mostrarModalNuevaCuentaCajero())
+      body.querySelectorAll('.cdd-btn-operaciones, .cdd-fila-cuenta').forEach(el => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation()
+          pintarCajeroDrillDown(el.dataset.id)
+        })
+      })
+    } catch (err) {
+      body.innerHTML = `<div style="color:#c62828; padding:20px;">Error cargando cajeros: ${escapeHtml(err.message)}</div>`
+    }
+  }
+
+  async function mostrarModalNuevaCuentaCajero() {
+    const equipo = await getAllCandidateUsers(candidateId)
+    const cajeros = equipo.filter(u => u.role === 'cashier' || (Array.isArray(u.roleIds) && u.roleIds.includes('cashier')))
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px;'
+    modal.innerHTML = `
+      <div style="background: white; border-radius: 8px; max-width: 460px; width: 100%; padding: 24px;">
+        <h3 style="margin:0 0 16px;">➕ Nueva cuenta de cajero</h3>
+        <div style="display:grid; gap:10px;">
+          <select id="cdd-nc-responsable" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+            <option value="">-- Elegí un cajero (rol cashier) --</option>
+            ${cajeros.map(u => `<option value="${u.id}">${escapeHtml(u.nombre || u.email || u.id)}</option>`).join('')}
+          </select>
+          ${cajeros.length === 0 ? '<div style="font-size:.78rem; color:#c62828;">No hay ningún usuario con rol cashier todavía — creá uno primero en Usuarios.</div>' : ''}
+          <div id="cdd-nc-msg" style="font-size:.85rem;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="cdd-nc-btn-guardar" style="flex:1; background:#00695c; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Crear cuenta</button>
+            <button id="cdd-nc-btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('#cdd-nc-btn-cancelar').addEventListener('click', () => modal.remove())
+    modal.querySelector('#cdd-nc-btn-guardar').addEventListener('click', async () => {
+      const responsibleUserId = modal.querySelector('#cdd-nc-responsable').value
+      const msg = modal.querySelector('#cdd-nc-msg')
+      if (!responsibleUserId) { msg.innerHTML = '<span style="color:#c62828;">Elegí un cajero.</span>'; return }
+      msg.textContent = 'Creando...'
+      try {
+        await crearCuentaCajero(candidateId, responsibleUserId)
+        modal.remove()
+        await pintarCajerosDiaDAdmin(document.getElementById('fin-body'))
+      } catch (err) {
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+  }
+
+  async function pintarCajeroDrillDown(cashAccountId) {
+    cddCuentaDrillDown = cashAccountId
+    const el = document.getElementById('cdd-drilldown')
+    if (!el) return
+    el.innerHTML = '<p style="color:#999;">Cargando movimientos...</p>'
+    const cuenta = cddCuentas.find(c => c.id === cashAccountId)
+    cddMovimientos = []
+    cddCursorMovimientos = null
+    cddFiltroCI = '' // cajero distinto -> filtro viejo no debe arrastrarse
+    await cargarMovimientosCajero(true)
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    void cuenta
+  }
+
+  async function cargarMovimientosCajero(reset) {
+    const el = document.getElementById('cdd-drilldown')
+    if (!el) return
+    if (reset) { cddMovimientos = []; cddCursorMovimientos = null }
+    const cuenta = cddCuentas.find(c => c.id === cddCuentaDrillDown)
+    const { movements, lastDoc, hasMore } = await getCajeroDiaDMovementsPage(candidateId, {
+      cashAccountId: cddCuentaDrillDown, responsibleUserId: cuenta.responsibleUserId, cursor: cddCursorMovimientos, pageSize: 50
+    })
+    cddMovimientos = reset ? movements : [...cddMovimientos, ...movements]
+    cddCursorMovimientos = lastDoc
+    pintarDrillDownHtml(cuenta, hasMore)
+  }
+
+  function pintarDrillDownHtml(cuenta, hasMore) {
+    const el = document.getElementById('cdd-drilldown')
+    if (!el || !cuenta) return
+    const pendientesAnulacion = cddMovimientos.filter(m => m.voidRequest?.status === 'pending')
+    // Filtro de CI: LOCAL sobre cddMovimientos (lo ya cargado, misma
+    // cuenta que el usuario ya puede ver — ni un permiso ni una consulta
+    // nueva). ciNormalizada compara solo dígitos para que "900-000-01",
+    // "900 000 01" o "90000001" encuentren lo mismo.
+    const ciNormalizada = cddFiltroCI.replace(/\D/g, '')
+    const movimientosFiltrados = ciNormalizada
+      ? cddMovimientos.filter(m => (m.beneficiaryCI || '').replace(/\D/g, '').includes(ciNormalizada))
+      : cddMovimientos
+    el.innerHTML = `
+      <div style="border:2px solid #00695c; border-radius:8px; padding:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+          <h4 style="margin:0;">🗂️ ${escapeHtml(cuenta.name)} — Saldo: ${money(cuenta.balance, cuenta.currency)}</h4>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${puedeAsignarFondosCajero && cuenta.status === 'active' ? `<button id="cdd-btn-asignar" style="background:#00695c; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-weight:700; font-size:.8rem;">➕ Asignar fondos</button>` : ''}
+            ${puedeGestionarCuentaCajero && cuenta.status === 'active' ? `<button id="cdd-btn-cerrar" style="background:#c62828; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-size:.8rem;">🔒 Cerrar cuenta</button>` : ''}
+            ${puedeGestionarCuentaCajero && cuenta.status === 'closed' ? `<button id="cdd-btn-reabrir" style="background:#2e7d32; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-size:.8rem;">🔓 Reabrir cuenta</button>` : ''}
+            ${puedeAutorizarExcepcionCajero ? `<button id="cdd-btn-excepcion" style="background:#6a1b9a; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-size:.8rem;">🔓 Autorizar 2do aporte</button>` : ''}
+            <button id="cdd-btn-pdf" style="background:#455a64; color:white; border:none; padding:8px 14px; border-radius:4px; cursor:pointer; font-size:.8rem;">🖨️ PDF rendición</button>
+          </div>
+        </div>
+        ${pendientesAnulacion.length > 0 ? `<div style="background:#fff3cd; border-left:4px solid #ffc107; padding:8px 12px; border-radius:4px; margin-bottom:10px; font-size:.82rem;">⚠️ ${pendientesAnulacion.length} solicitud(es) de anulación pendiente(s) de resolver.</div>` : ''}
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+          <input id="cdd-search-ci" type="search" inputmode="numeric" placeholder="🔎 Buscar por CI del beneficiario..." value="${escapeHtml(cddFiltroCI)}" style="flex:1; min-width:220px; padding:8px 10px; border:1px solid #ddd; border-radius:4px; font-size:.85rem;">
+          ${ciNormalizada ? `<span style="font-size:.78rem; color:#666;">${movimientosFiltrados.length} de ${cddMovimientos.length} movimientos cargados</span>` : ''}
+        </div>
+        ${ciNormalizada && hasMore ? `<div style="background:#fff3cd; border-left:4px solid #ffc107; padding:8px 12px; border-radius:4px; margin-bottom:10px; font-size:.78rem;">⚠️ Esta búsqueda solo abarca los ${cddMovimientos.length} movimientos ya cargados en pantalla — esta cuenta tiene más movimientos antiguos sin cargar. Tocá "Cargar más" para ampliar el rango antes de buscar si el que buscás podría ser más viejo.</div>` : ''}
+        <div style="overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; font-size:.8rem;">
+            <thead><tr style="text-align:left; border-bottom:2px solid #eee;">
+              <th style="padding:6px;">Fecha/hora</th><th>CI/beneficiario</th><th>Concepto</th><th>Monto</th><th>Saldo posterior</th><th>Estado</th><th>Cajero</th><th>Comprobante</th><th>Acciones</th>
+            </tr></thead>
+            <tbody>
+              ${movimientosFiltrados.length === 0 ? `<tr><td colspan="9" style="padding:30px; text-align:center; color:#999;">${ciNormalizada ? 'Sin resultados para esa CI entre los movimientos cargados.' : 'Sin movimientos todavía.'}</td></tr>` : movimientosFiltrados.map(m => `
+                <tr style="border-bottom:1px solid #eee; ${m.status === 'voided' ? 'opacity:.55; text-decoration:line-through;' : ''}">
+                  <td style="padding:6px; white-space:nowrap;">${m.createdAt?.toDate ? m.createdAt.toDate().toLocaleString('es-PY') : '—'}</td>
+                  <td>${m.beneficiaryName ? `${escapeHtml(m.beneficiaryName)}<br><span style="color:#999; font-size:.72rem;">CI ${escapeHtml(m.beneficiaryCI || '')}</span>` : '—'}</td>
+                  <td>${escapeHtml(m.concept || CASH_TYPE_LABELS[m.type] || m.type)}${m.originalMovementId ? `<br><span style="color:#999; font-size:.7rem;">ref. ${escapeHtml(m.originalMovementId)}</span>` : ''}</td>
+                  <td style="font-weight:700; color:${m.type === 'expense' ? '#c62828' : '#2e7d32'};">${m.type === 'expense' ? '−' : '+'}${money(m.amount, m.currency)}</td>
+                  <td>${money(m.balanceAfter, m.currency)}</td>
+                  <td>${m.status === 'voided' ? '⚪ Anulado' : (m.voidRequest?.status === 'pending' ? '🟡 Anulación pendiente' : '✅ Confirmado')}</td>
+                  <td style="font-size:.72rem; color:#666;">${m.createdByRole === 'cashier' ? '👤 Cajero' : '🛡️ Admin'}</td>
+                  <td>${m.receiptUrl ? `<a href="${escapeHtml(m.receiptUrl)}" target="_blank" rel="noopener">📎 Ver</a>` : '—'}</td>
+                  <td>
+                    ${m.voidRequest?.status === 'pending' && puedeResolverAnulacionCajero ? `
+                      <button class="cdd-btn-aprobar-anulacion" data-id="${m.id}" style="background:#2e7d32; color:white; border:none; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">✅ Aprobar</button>
+                      <button class="cdd-btn-rechazar-anulacion" data-id="${m.id}" style="background:#c62828; color:white; border:none; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">🚫 Rechazar</button>
+                    ` : ''}
+                    ${m.status === 'confirmed' && !m.voidRequest && ['fund_assignment', 'expense'].includes(m.type) && puedeSolicitarAnulacionCajero ? `<button class="cdd-btn-pedir-anulacion" data-id="${m.id}" style="background:#e65100; color:white; border:none; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">↩️ Pedir anulación</button>` : ''}
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="text-align:center; margin-top:10px;"><button id="cdd-btn-mas" style="${hasMore ? '' : 'display:none;'} background:#eee; border:none; padding:8px 16px; border-radius:6px; cursor:pointer;">Cargar más</button></div>
+      </div>
+    `
+    document.getElementById('cdd-btn-mas')?.addEventListener('click', () => cargarMovimientosCajero(false))
+    // pintarDrillDownHtml reemplaza el innerHTML completo en cada tecla
+    // (debounced) — sin restaurar foco/cursor, el input perdería el foco
+    // apenas el usuario empezara a tipear.
+    document.getElementById('cdd-search-ci')?.addEventListener('input', debounce((e) => {
+      cddFiltroCI = e.target.value
+      const cursorPos = e.target.selectionStart
+      pintarDrillDownHtml(cuenta, hasMore)
+      const input = document.getElementById('cdd-search-ci')
+      if (input) { input.focus(); input.setSelectionRange(cursorPos, cursorPos) }
+    }, 200))
+    document.getElementById('cdd-btn-asignar')?.addEventListener('click', () => mostrarModalAsignarFondos(cuenta))
+    document.getElementById('cdd-btn-cerrar')?.addEventListener('click', () => accionCuentaCajero('cerrar', cuenta))
+    document.getElementById('cdd-btn-reabrir')?.addEventListener('click', () => accionCuentaCajero('reabrir', cuenta))
+    document.getElementById('cdd-btn-excepcion')?.addEventListener('click', () => mostrarModalAutorizarExcepcion())
+    document.getElementById('cdd-btn-pdf')?.addEventListener('click', () => exportarRendicionCajeroPdf(cuenta, cddMovimientos))
+    el.querySelectorAll('.cdd-btn-aprobar-anulacion').forEach(btn => btn.addEventListener('click', () => resolverAnulacionUI(btn.dataset.id, 'approve')))
+    el.querySelectorAll('.cdd-btn-rechazar-anulacion').forEach(btn => btn.addEventListener('click', () => resolverAnulacionUI(btn.dataset.id, 'reject')))
+    el.querySelectorAll('.cdd-btn-pedir-anulacion').forEach(btn => btn.addEventListener('click', () => pedirAnulacionUI(btn.dataset.id)))
+  }
+
+  function mostrarModalAsignarFondos(cuenta) {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px;'
+    modal.innerHTML = `
+      <div style="background: white; border-radius: 8px; max-width: 420px; width: 100%; padding: 24px;">
+        <h3 style="margin:0 0 6px;">➕ Asignar fondos</h3>
+        <p style="margin:0 0 14px; font-size:.85rem; color:#666;">${escapeHtml(cuenta.name)} — saldo actual: ${money(cuenta.balance, cuenta.currency)}</p>
+        <div style="display:grid; gap:10px;">
+          <input id="cdd-af-monto" type="number" placeholder="Monto a asignar" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-af-motivo" placeholder="Motivo (opcional)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div id="cdd-af-msg" style="font-size:.85rem;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="cdd-af-btn-guardar" style="flex:1; background:#00695c; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Asignar</button>
+            <button id="cdd-af-btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('#cdd-af-btn-cancelar').addEventListener('click', () => modal.remove())
+    // operationId generado UNA vez al abrir el modal — si "Asignar" se
+    // reintenta (doble clic, timeout), se reusa el MISMO id en vez de
+    // generar uno nuevo, para que la idempotencia del backend funcione.
+    const operationId = generateCashierOperationId()
+    const btnGuardar = modal.querySelector('#cdd-af-btn-guardar')
+    btnGuardar.addEventListener('click', async () => {
+      const monto = Number(modal.querySelector('#cdd-af-monto').value)
+      const msg = modal.querySelector('#cdd-af-msg')
+      if (!(monto > 0)) { msg.innerHTML = '<span style="color:#c62828;">Ingresá un monto mayor a 0.</span>'; return }
+      btnGuardar.disabled = true
+      msg.textContent = 'Asignando...'
+      try {
+        await asignarFondosCajero(candidateId, cuenta.id, monto, modal.querySelector('#cdd-af-motivo').value.trim(), operationId)
+        modal.remove()
+        await pintarCajerosDiaDAdmin(document.getElementById('fin-body'))
+      } catch (err) {
+        btnGuardar.disabled = false
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+  }
+
+  async function accionCuentaCajero(accion, cuenta) {
+    const reason = prompt(accion === 'cerrar' ? '¿Motivo del cierre? (obligatorio)' : '¿Motivo de la reapertura? (obligatorio)')
+    if (!reason || !reason.trim()) return
+    try {
+      if (accion === 'cerrar') await cerrarCuentaCajero(candidateId, cuenta.id, reason.trim())
+      else await reabrirCuentaCajero(candidateId, cuenta.id, reason.trim())
+      await pintarCajerosDiaDAdmin(document.getElementById('fin-body'))
+    } catch (err) {
+      alert('Error: ' + err.message)
+    }
+  }
+
+  function mostrarModalAutorizarExcepcion() {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px;'
+    modal.innerHTML = `
+      <div style="background: white; border-radius: 8px; max-width: 420px; width: 100%; padding: 24px;">
+        <h3 style="margin:0 0 6px;">🔓 Autorizar un segundo aporte</h3>
+        <p style="margin:0 0 14px; font-size:.85rem; color:#666;">Por beneficiario concreto (CI, validada contra el padrón de esta localidad) — de un solo uso, se consume automáticamente en el próximo egreso a esa persona.</p>
+        <div style="display:grid; gap:10px;">
+          <input id="cdd-ex-ci" placeholder="CI del beneficiario" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-ex-motivo" placeholder="Motivo (obligatorio)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div id="cdd-ex-msg" style="font-size:.85rem;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="cdd-ex-btn-guardar" style="flex:1; background:#6a1b9a; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Autorizar</button>
+            <button id="cdd-ex-btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('#cdd-ex-btn-cancelar').addEventListener('click', () => modal.remove())
+    modal.querySelector('#cdd-ex-btn-guardar').addEventListener('click', async () => {
+      const ci = modal.querySelector('#cdd-ex-ci').value.trim()
+      const motivo = modal.querySelector('#cdd-ex-motivo').value.trim()
+      const msg = modal.querySelector('#cdd-ex-msg')
+      if (!ci || !motivo) { msg.innerHTML = '<span style="color:#c62828;">CI y motivo son obligatorios.</span>'; return }
+      msg.textContent = 'Autorizando...'
+      try {
+        const { exceptionId, beneficiaryName } = await autorizarExcepcionBeneficiario(candidateId, ci, motivo)
+        msg.innerHTML = `<span style="color:#2e7d32;">✅ Autorizado para ${escapeHtml(beneficiaryName)}. ID de autorización (pasáselo al cajero): <strong>${escapeHtml(exceptionId)}</strong></span>`
+      } catch (err) {
+        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+      }
+    })
+  }
+
+  function pedirAnulacionUI(movementId) {
+    const reason = prompt('¿Motivo de la solicitud de anulación? (obligatorio)')
+    if (!reason || !reason.trim()) return
+    solicitarAnulacionMovimiento(candidateId, movementId, reason.trim())
+      .then(() => cargarMovimientosCajero(true))
+      .catch(err => alert('Error: ' + err.message))
+  }
+
+  function resolverAnulacionUI(movementId, decision) {
+    const resolution = prompt(decision === 'approve' ? '¿Observación al aprobar? (opcional)' : '¿Motivo del rechazo? (obligatorio)')
+    if (decision === 'reject' && (!resolution || !resolution.trim())) return
+    resolverAnulacionMovimiento(candidateId, movementId, decision, (resolution || '').trim())
+      .then(() => pintarCajerosDiaDAdmin(document.getElementById('fin-body')))
+      .catch(err => alert('Error: ' + err.message))
+  }
+
+  function exportarRendicionCajeroPdf(cuenta, movimientos) {
+    const filas = movimientos.map(m => ({
+      'Fecha/hora': m.createdAt?.toDate ? m.createdAt.toDate().toLocaleString('es-PY') : '',
+      'CI/Beneficiario': m.beneficiaryName ? `${m.beneficiaryName} (CI ${m.beneficiaryCI || ''})` : '',
+      'Concepto': m.concept || m.type,
+      'Monto': (m.type === 'expense' ? '-' : '+') + money(m.amount, m.currency),
+      'Saldo posterior': money(m.balanceAfter, m.currency),
+      'Estado': m.status === 'voided' ? 'Anulado' : 'Confirmado',
+      'Cajero': m.createdByRole === 'cashier' ? 'Cajero' : 'Admin'
+    }))
+    exportGenericToPdf(filas, `rendicion-${cuenta.name}`, `Rendición de ${cuenta.name} — Saldo actual: ${money(cuenta.balance, cuenta.currency)}`)
+  }
+
+  // ── Vista propia del cajero (no ve otras cuentas — reforzado también
+  // por firestore.rules, esto es solo la experiencia de UI) ────────────
+  async function pintarCajerosDiaDPropio(body) {
+    body.innerHTML = '<p style="color:#999;">Cargando tu cuenta...</p>'
+    try {
+      cddMiCuenta = await getCajeroDiaDAccountByResponsible(candidateId, user.uid)
+      if (!cddMiCuenta) {
+        body.innerHTML = '<div style="text-align:center; padding:40px; color:#999;">Todavía no tenés una cuenta de cajero asignada — pedile al administrador que te cree una.</div>'
+        return
+      }
+      const resumen = await getCajeroDiaDAccountSummary(candidateId, cddMiCuenta.id, cddMiCuenta.responsibleUserId)
+      cddCuentaDrillDown = cddMiCuenta.id
+      cddCuentas = [cddMiCuenta]
+      body.innerHTML = `
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-bottom:16px;">
+          <div class="stat-card stat-card--accent" style="--accent:#2e7d32;"><div class="stat-num">${money(resumen.totalAssigned, cddMiCuenta.currency)}</div><div class="stat-label">Recibido</div></div>
+          <div class="stat-card stat-card--accent" style="--accent:#c62828;"><div class="stat-num">${money(resumen.totalExpensed, cddMiCuenta.currency)}</div><div class="stat-label">Utilizado</div></div>
+          <div class="stat-card stat-card--accent" style="--accent:#1976d2;"><div class="stat-num">${money(cddMiCuenta.balance, cddMiCuenta.currency)}</div><div class="stat-label">Saldo disponible</div></div>
+        </div>
+        ${cddMiCuenta.status === 'closed' ? '<div style="background:#ffebee; border-left:4px solid #c62828; padding:8px 12px; border-radius:4px; margin-bottom:12px; font-size:.85rem;">🔒 Tu cuenta está cerrada — no podés registrar egresos hasta que un administrador la reabra.</div>' : ''}
+        ${puedeRegistrarEgresoCajero && cddMiCuenta.status === 'active' ? `<button id="cdd-propio-btn-egreso" style="background:#c62828; color:white; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:700; margin-bottom:14px;">➖ Registrar egreso</button>` : ''}
+        <div id="cdd-drilldown"></div>
+      `
+      document.getElementById('cdd-propio-btn-egreso')?.addEventListener('click', () => mostrarModalRegistrarEgreso(cddMiCuenta))
+      await cargarMovimientosCajero(true)
+    } catch (err) {
+      body.innerHTML = `<div style="color:#c62828; padding:20px;">Error cargando tu cuenta: ${escapeHtml(err.message)}</div>`
+    }
+  }
+
+  function mostrarModalRegistrarEgreso(cuenta) {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px; overflow-y:auto;'
+    modal.innerHTML = `
+      <div style="background: white; border-radius: 8px; max-width: 460px; width: 100%; padding: 24px; margin: 20px 0;">
+        <h3 style="margin:0 0 6px;">➖ Registrar egreso</h3>
+        <p style="margin:0 0 14px; font-size:.85rem; color:#666;">Saldo disponible: ${money(cuenta.balance, cuenta.currency)}</p>
+        <div style="display:grid; gap:10px;">
+          <input id="cdd-eg-monto" type="number" placeholder="Monto" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-concepto" placeholder="Concepto (obligatorio)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-ci" placeholder="CI del beneficiario (opcional)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-excepcion" placeholder="ID de autorización excepcional (solo si aplica)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <div id="cdd-eg-msg" style="font-size:.85rem;"></div>
+          <div style="display:flex; gap:8px;">
+            <button id="cdd-eg-btn-guardar" style="flex:1; background:#c62828; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Registrar</button>
+            <button id="cdd-eg-btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('#cdd-eg-btn-cancelar').addEventListener('click', () => modal.remove())
+    // Mismo criterio que mostrarModalAsignarFondos: UN operationId por
+    // apertura del modal, reusado en cada click de "Registrar" mientras
+    // el modal siga abierto (doble clic == mismo operationId == mismo
+    // resultado idempotente, nunca un movimiento duplicado).
+    const operationId = generateCashierOperationId()
+    const btnGuardar = modal.querySelector('#cdd-eg-btn-guardar')
+    btnGuardar.addEventListener('click', async () => {
+      const monto = Number(modal.querySelector('#cdd-eg-monto').value)
+      const concept = modal.querySelector('#cdd-eg-concepto').value.trim()
+      const msg = modal.querySelector('#cdd-eg-msg')
+      if (!(monto > 0) || !concept) { msg.innerHTML = '<span style="color:#c62828;">Monto y concepto son obligatorios.</span>'; return }
+      btnGuardar.disabled = true
+      msg.textContent = 'Registrando...'
+      try {
+        await registrarEgresoCajero(candidateId, {
+          cashAccountId: cuenta.id,
+          amount: monto,
+          concept,
+          beneficiaryCI: modal.querySelector('#cdd-eg-ci').value.trim() || null,
+          exceptionAuthorizationId: modal.querySelector('#cdd-eg-excepcion').value.trim() || null
+        }, operationId)
+        modal.remove()
+        await pintarCajerosDiaDPropio(document.getElementById('fin-body'))
+      } catch (err) {
+        btnGuardar.disabled = false
         msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
       }
     })

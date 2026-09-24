@@ -217,7 +217,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           ${visibleTabs.map(t => navBtn(t, TAB_LABELS[t])).join('')}
         </div>
       </div>
-      <div id="tab-content" style="max-width:1100px; margin:24px auto; padding:0 16px;"></div>
+      <div id="tab-content" style="max-width:1100px; min-width:0; width:100%; margin:24px auto; padding:0 16px; box-sizing:border-box;"></div>
     `
 
     document.getElementById('btn-logout').addEventListener('click', async () => {

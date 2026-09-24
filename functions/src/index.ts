@@ -1106,3 +1106,7 @@ export const aceptarInvitacion = functions.https.onCall(
 // functions` las despliegue igual que a cualquier otra función de este
 // archivo.
 export * from "./driverZones";
+
+// Cajeros DD (Finanzas → 💵 Cajeros DD) — ver functions/src/cashierFunds.ts.
+// Reexportado igual que driverZones arriba, mismo criterio.
+export * from "./cashierFunds";
