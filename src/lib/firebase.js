@@ -22,21 +22,102 @@ import {
   writeBatch,
   onSnapshot
 } from 'firebase/firestore'
-import { getFunctions, httpsCallable } from 'firebase/functions'
+import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions'
+import { connectFirestoreEmulator } from 'firebase/firestore'
+import { connectAuthEmulator } from 'firebase/auth'
 
-const firebaseConfig = {
-  apiKey: "AIzaSyD3kNTmqRpTqXBjCJI0yDwhcGY543bPBbI",
-  authDomain: "samy-fidabel.firebaseapp.com",
-  projectId: "samy-fidabel",
-  storageBucket: "samy-fidabel.firebasestorage.app",
-  messagingSenderId: "184842107847",
-  appId: "1:184842107847:web:542c1fe9671e551bbff7e2"
+// Hardening Fase 2.5 §3: modo Emulator Suite, EXCLUSIVAMENTE opt-in vía
+// `npm run dev:emulator` (VITE_USE_FIREBASE_EMULATOR=true en .env.emulator,
+// ver package.json/vite.config.js) — `npm run dev`/`npm run build`
+// normales NUNCA activan esto, cero cambio de comportamiento para
+// producción/desarrollo real. Cuando está activo, se usa un projectId
+// "demo-*" DISTINTO del real ("samy-fidabel") en vez de reconectar el
+// mismo config real a localhost — así, si por cualquier motivo alguna de
+// las 3 líneas connect*Emulator no llegara a ejecutarse, el SDK apuntaría
+// a un proyecto que no existe (demo-sigev-local) en vez de arriesgarse a
+// tocar el proyecto real por accidente. Mismo principio de seguridad ya
+// aplicado en las suites de functions/test/ (projectIds demo-*).
+// BUG REAL encontrado en el hardening Fase 2.5 (walkthrough + regresión de
+// tests): `import.meta.env` solo existe cuando Vite sirve/empaqueta el
+// módulo — bajo Node plano (ej. `node --test` importando este archivo de
+// forma transitiva, como hace firebaseIncidents.test.js) `import.meta.env`
+// es `undefined`, y acceder a `.VITE_USE_FIREBASE_EMULATOR` tiraba
+// `TypeError` al importar, no solo al usarlo. `?.` lo resuelve: fuera de
+// Vite, USE_EMULATOR cae a `false` (config real) sin romper el import.
+const USE_EMULATOR = import.meta.env?.VITE_USE_FIREBASE_EMULATOR === 'true'
+// Staging real (proyecto sigev-staging, autorizado por el usuario —
+// "Opción A: crear un proyecto Firebase de staging separado", hardening
+// Fase 2.5 §16) — opt-in vía `npm run dev:staging` (.env.staging), NUNCA
+// activo por defecto. A diferencia del modo emulador, acá SÍ se habla con
+// servicios reales de Google (Firestore/Auth/Functions de sigev-staging),
+// pero NUNCA con samy-fidabel — son proyectos GCP distintos, sin relación.
+const USE_STAGING = import.meta.env?.VITE_USE_STAGING === 'true'
+
+// Config de producción (samy-fidabel) — YA NO hardcodeada. Netlify tiene
+// estas 6 variables configuradas para el contexto `production` (ver
+// `netlify env:list --context production`) y, desde este cambio,
+// `SECRETS_SCAN_OMIT_KEYS` las excluye explícitamente del secrets
+// scanning de Netlify — son el config público del SDK Web de Firebase
+// (nunca secreto real: la seguridad la dan las Firestore/Storage rules y
+// las restricciones de la apiKey en Google Cloud, no ocultar estos
+// valores). Antes estaban hardcodeadas acá y coincidían con esas mismas
+// variables salvo `appId`, que en Netlify apuntaba a una Web App que ya
+// no existe en el proyecto — corregido en Netlify, verificado contra el
+// listado real de Firebase (`projects/samy-fidabel/webApps`) antes de
+// este cambio, no asumido.
+function requireProdEnv(key) {
+  const value = import.meta.env?.[key]
+  if (!value) {
+    throw new Error(`Config de Firebase de producción incompleta: falta la variable de entorno ${key} (definila en Netlify → Site configuration → Environment variables).`)
+  }
+  return value
 }
+
+const firebaseConfig = USE_EMULATOR
+  ? {
+      apiKey: 'demo-key',
+      authDomain: 'demo-sigev-local.firebaseapp.com',
+      projectId: 'demo-sigev-local',
+      storageBucket: 'demo-sigev-local.appspot.com',
+      messagingSenderId: '0',
+      appId: '1:0:web:0'
+    }
+  : USE_STAGING
+  ? {
+      apiKey: 'AIzaSyDhRshwyNfsakwRhcP-OGOGGIrkHZQ58J0',
+      authDomain: 'sigev-staging.firebaseapp.com',
+      projectId: 'sigev-staging',
+      storageBucket: 'sigev-staging.firebasestorage.app',
+      messagingSenderId: '130499056486',
+      appId: '1:130499056486:web:0e0ebf5c16e7ab56e56ea7'
+    }
+  : {
+      apiKey: requireProdEnv('VITE_FIREBASE_API_KEY'),
+      authDomain: requireProdEnv('VITE_FIREBASE_AUTH_DOMAIN'),
+      projectId: requireProdEnv('VITE_FIREBASE_PROJECT_ID'),
+      storageBucket: requireProdEnv('VITE_FIREBASE_STORAGE_BUCKET'),
+      messagingSenderId: requireProdEnv('VITE_FIREBASE_MESSAGING_SENDER_ID'),
+      appId: requireProdEnv('VITE_FIREBASE_APP_ID')
+    }
 
 const app = initializeApp(firebaseConfig)
 export const auth = getAuth(app)
 export const db = getFirestore(app)
 export const functionsInstance = getFunctions(app)
+
+if (USE_EMULATOR) {
+  // Conectar INMEDIATAMENTE después de crear cada cliente, antes de
+  // cualquier lectura/escritura — connect*Emulator debe llamarse antes
+  // del primer uso real del SDK correspondiente.
+  connectFirestoreEmulator(db, 'localhost', 8080)
+  connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true })
+  connectFunctionsEmulator(functionsInstance, 'localhost', 5001)
+  // eslint-disable-next-line no-console
+  console.warn('🧪 Firebase Emulator Suite activo (demo-sigev-local) — NO es producción. Datos ficticios únicamente.')
+} else if (USE_STAGING) {
+  // eslint-disable-next-line no-console
+  console.warn('🧪 Conectado a sigev-staging (proyecto real de staging) — NO es samy-fidabel. Usar solo datos ficticios.')
+}
 
 export const loginUser = (email, password) =>
   signInWithEmailAndPassword(auth, email, password)
