@@ -65,13 +65,17 @@ const USE_STAGING = import.meta.env?.VITE_USE_STAGING === 'true'
 // no existe en el proyecto — corregido en Netlify, verificado contra el
 // listado real de Firebase (`projects/samy-fidabel/webApps`) antes de
 // este cambio, no asumido.
-function requireProdEnv(key) {
+// Fail-fast genérico — nunca inicializa Firebase en silencio con un
+// valor undefined. `where` identifica de dónde debería salir la
+// variable faltante (nunca imprime el valor, solo el nombre).
+function requireEnv(key, where) {
   const value = import.meta.env?.[key]
   if (!value) {
-    throw new Error(`Config de Firebase de producción incompleta: falta la variable de entorno ${key} (definila en Netlify → Site configuration → Environment variables).`)
+    throw new Error(`Config de Firebase incompleta: falta la variable de entorno ${key} (${where}).`)
   }
   return value
 }
+const requireProdEnv = (key) => requireEnv(key, 'definila en Netlify → Site configuration → Environment variables, contexto production')
 
 const firebaseConfig = USE_EMULATOR
   ? {
@@ -84,7 +88,14 @@ const firebaseConfig = USE_EMULATOR
     }
   : USE_STAGING
   ? {
-      apiKey: 'AIzaSyDhRshwyNfsakwRhcP-OGOGGIrkHZQ58J0',
+      // Detección inteligente de secretos de Netlify (smart detection)
+      // encuentra el patrón de API key de Google como texto literal en
+      // cualquier archivo del repo clonado, sin importar si el build lo usa o no
+      // — SECRETS_SCAN_OMIT_KEYS no la cubre (esa solo suprime la
+      // detección "valor de env var apareció en el output"). Resto de
+      // la config de staging queda igual: no es lo que el scanner
+      // reportó, no hace falta tocarlo.
+      apiKey: requireEnv('VITE_STAGING_FIREBASE_API_KEY', 'definila en .env.staging — archivo local, nunca se commitea'),
       authDomain: 'sigev-staging.firebaseapp.com',
       projectId: 'sigev-staging',
       storageBucket: 'sigev-staging.firebasestorage.app',
