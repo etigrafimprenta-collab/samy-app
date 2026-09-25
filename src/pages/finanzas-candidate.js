@@ -1133,8 +1133,12 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     const pendEl = document.getElementById('cdd-pendientes')
     if (pendEl) pendEl.innerHTML = ''
     await cargarMovimientosCajero(true)
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     if (cuenta && cuenta.status === 'active') await pintarPendientesDePago(cuenta)
+    // Si hay pendientes, el scroll apunta ahí (arriba del todo) en vez de
+    // directo a los movimientos — si no, la sección queda fuera de vista y
+    // parece que "no aparece" aunque sí se haya renderizado (hallazgo real
+    // probando el drill-down del admin).
+    ;(pendEl && pendEl.innerHTML ? pendEl : el).scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
 
   async function cargarMovimientosCajero(reset) {
