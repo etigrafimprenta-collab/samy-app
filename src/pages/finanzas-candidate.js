@@ -1067,6 +1067,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
             </tbody>
           </table>
         </div>
+        <div id="cdd-pendientes" style="margin-top:20px;"></div>
         <div id="cdd-drilldown" style="margin-top:20px;"></div>
       `
       document.getElementById('cdd-btn-nueva-cuenta')?.addEventListener('click', () => mostrarModalNuevaCuentaCajero())
@@ -1129,9 +1130,11 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     cddMovimientos = []
     cddCursorMovimientos = null
     cddFiltroCI = '' // cajero distinto -> filtro viejo no debe arrastrarse
+    const pendEl = document.getElementById('cdd-pendientes')
+    if (pendEl) pendEl.innerHTML = ''
     await cargarMovimientosCajero(true)
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    void cuenta
+    if (cuenta && cuenta.status === 'active') await pintarPendientesDePago(cuenta)
   }
 
   async function cargarMovimientosCajero(reset) {
@@ -1380,27 +1383,39 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   }
 
   // "Cajero de campo" (auto-cajero desde dirigente, ver hallazgo needsAssistance
-  // → Cajeros DD): lista de SUS PROPIOS savedRecords con needsAssistance,
-  // reutilizando lo que ya carga "Mis registros" (mismo getUserRecords) —
-  // no es una colección nueva. "Ya pagado" es una aproximación sobre los
-  // movimientos ya cargados (cddMovimientos, con la misma limitación de
-  // paginación que el filtro por CI de más abajo — hasta 50 sin "cargar
-  // más") comparando por CI; el intento real de cobro doble lo bloquea
-  // siempre el servidor (beneficiaryVoterId + status confirmed en
-  // cashierFunds.ts), esto es solo para no mostrar "Pagar" de más en la UI.
+  // → Cajeros DD): lista de los savedRecords con needsAssistance del
+  // RESPONSABLE de la cuenta (cuenta.responsibleUserId, no siempre el
+  // usuario logueado) — reutiliza lo que ya carga "Mis registros" (mismo
+  // getUserRecords), no es una colección nueva. Se usa en 2 lugares: la
+  // vista propia del cajero (pintarCajerosDiaDPropio, responsibleUserId ==
+  // user.uid) Y el drill-down del admin (pintarCajeroDrillDown, cualquier
+  // cajero) — hallazgo de uso real: el admin necesita ver el mismo dato
+  // que el cajero para decidir cuánto fondearle. "Ya pagado" es una
+  // aproximación sobre los movimientos ya cargados (cddMovimientos, con
+  // la misma limitación de paginación que el filtro por CI de más abajo —
+  // hasta 50 sin "cargar más") comparando por CI; el intento real de
+  // cobro doble lo bloquea siempre el servidor (beneficiaryVoterId +
+  // status confirmed en cashierFunds.ts), esto es solo para no mostrar
+  // "Pagar" de más en la UI.
   async function pintarPendientesDePago(cuenta) {
     const el = document.getElementById('cdd-pendientes')
     if (!el) return
-    const registros = (await getUserRecords(candidateId, user.uid).catch(() => []))
+    const esPropia = cuenta.responsibleUserId === user.uid
+    const registros = (await getUserRecords(candidateId, cuenta.responsibleUserId).catch(() => []))
       .filter(r => r.needsAssistance)
-    if (registros.length === 0) return
+    if (registros.length === 0) { el.innerHTML = ''; return }
     const ciYaPagadas = new Set(
       cddMovimientos.filter(m => m.type === 'expense' && m.status === 'confirmed' && m.beneficiaryCI)
         .map(m => String(m.beneficiaryCI).replace(/\D/g, ''))
     )
+    // registrarEgresoCajero (cashierFunds.ts) acepta al dueño de la cuenta
+    // O a un admin (campaign_admin/finance_admin) — mismo criterio acá
+    // para mostrar el botón "Pagar", tanto en la vista propia como en el
+    // drill-down del admin.
+    const puedePagarEstaCuenta = esPropia ? puedeRegistrarEgresoCajero : puedeGestionarCuentaCajero
     el.innerHTML = `
       <div style="border:1px solid #eee; border-radius:8px; padding:14px; margin-bottom:16px;">
-        <h4 style="margin:0 0 10px; font-size:.9rem;">🧑‍🤝‍🧑 Votantes que marcaste "necesita ayuda" (${registros.length})</h4>
+        <h4 style="margin:0 0 10px; font-size:.9rem;">🧑‍🤝‍🧑 ${esPropia ? 'Votantes que marcaste' : `Votantes que marcó ${escapeHtml(cuenta.name)}`} "necesita ayuda" (${registros.length})</h4>
         <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
           <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Votante</th><th>CI</th><th>Monto</th><th></th></tr></thead>
           <tbody>
@@ -1413,7 +1428,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
                 <td>${money(r.montoAyuda || 0)}</td>
                 <td>${yaPagado
                   ? '<span style="color:#2e7d32; font-weight:700;">✅ Pagado</span>'
-                  : (puedeRegistrarEgresoCajero && cuenta.status === 'active'
+                  : (puedePagarEstaCuenta && cuenta.status === 'active'
                     ? `<button class="cdd-pend-btn-pagar" data-ci="${escapeHtml(r.cedula || '')}" data-nombre="${escapeHtml(r.nombre || '')}" data-monto="${Number(r.montoAyuda) || 0}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.75rem;">Pagar</button>`
                     : '')
                 }</td>
