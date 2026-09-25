@@ -139,6 +139,13 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
   const candidateUserDoc = opts.asSuperAdmin ? null : await getCandidateUser(candidateId, user.uid)
   const myRole = opts.asSuperAdmin ? 'campaign_admin' : (candidateUserDoc?.role || 'viewer')
+  // "Cajero de campo" (auto-cajero desde dirigente) — flag ADICIONAL a
+  // myRole, nunca lo reemplaza (ver mismo criterio en
+  // firestore.rules/isFieldCashier() y functions/src/cashierFunds.ts).
+  // Lo pone únicamente la Cloud Function de auto-enrolamiento cuando el
+  // candidato tiene cashierFundsAutoEnroll:true — para el resto (el 100%
+  // de candidatos hoy) este flag nunca existe y no cambia nada.
+  const isFieldCashier = opts.asSuperAdmin ? false : candidateUserDoc?.isFieldCashier === true
 
   // Modo compatibilidad: si hay roleIds asignados y esos roles existen de
   // verdad en Firestore, se resuelve la visibilidad con el motor nuevo
@@ -165,6 +172,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   }
   if (!visibleTabs) {
     visibleTabs = Object.keys(TAB_ROLES).filter(t => TAB_ROLES[t].includes(myRole))
+  }
+  // Un cajero de campo ve Finanzas (→ Cajeros DD, ver TAB_PERMISSIONS de
+  // finanzas-candidate.js) aunque su myRole (ej. 'dirigente') no esté en
+  // TAB_ROLES.finanzas — mismo criterio OR que el resto de este flag.
+  if (isFieldCashier && !visibleTabs.includes('finanzas')) {
+    visibleTabs = [...visibleTabs, 'finanzas']
   }
 
   // Gating por plan/plataforma: el superadmin puede deshabilitar módulos
@@ -260,7 +273,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     } else if (tab === 'centro-contacto') {
       import('./contactCenter.js').then(({ renderContactCenter }) => renderContactCenter(content, candidateId, user, myRole, misRoles))
     } else if (tab === 'finanzas') {
-      import('./finanzas-candidate.js').then(({ renderFinanzasCandidate }) => renderFinanzasCandidate(content, candidateId, user, myRole, misRoles))
+      import('./finanzas-candidate.js').then(({ renderFinanzasCandidate }) => renderFinanzasCandidate(content, candidateId, user, myRole, misRoles, isFieldCashier))
     } else if (tab === 'roles') {
       import('./roles-candidate.js').then(({ renderRolesCandidate }) => renderRolesCandidate(content, candidateId, user, myRole))
     } else if (tab === 'reportes') {
@@ -655,6 +668,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
             <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
               <input type="checkbox" id="chk-assistance"> ¿Precisa ayuda para votar?
             </label>
+            <div id="wrap-monto-ayuda" style="display:none; margin-left:26px;">
+              <input type="number" id="inp-monto-ayuda" placeholder="Monto de ayuda (Gs.)" min="0" style="width:100%; padding:8px; border:1px solid #ddd; border-radius:4px; font-size:.85rem;">
+            </div>
             <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; cursor:pointer;">
               <input type="checkbox" id="chk-driver"> ¿Puede colaborar como chofer el Día D?
             </label>
@@ -678,6 +694,11 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           </div>
         </div>
       `
+
+      modal.querySelector('#chk-assistance').addEventListener('change', (e) => {
+        modal.querySelector('#wrap-monto-ayuda').style.display = e.target.checked ? 'block' : 'none'
+        if (!e.target.checked) modal.querySelector('#inp-monto-ayuda').value = ''
+      })
       document.body.appendChild(modal)
       modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
 
@@ -732,6 +753,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
             googleMapsUrl: ubicacion.googleMapsUrl,
             requiresPickup: modal.querySelector('#chk-pickup').checked,
             needsAssistance: modal.querySelector('#chk-assistance').checked,
+            montoAyuda: modal.querySelector('#inp-monto-ayuda').value,
             canBeDriver: modal.querySelector('#chk-driver').checked,
             wantsToBeMesario: modal.querySelector('#chk-mesario').checked,
             militanteName: user.displayName || user.email

@@ -199,6 +199,19 @@ service cloud.firestore {
       );
     }
 
+    // "Cajero de campo" (auto-cajero desde dirigente) — flag ADICIONAL a
+    // `role`, nunca lo reemplaza: un dirigente sigue siendo role:'dirigente'
+    // y además puede tener isFieldCashier:true (lo pone la Cloud Function
+    // de auto-enrolamiento en cashierFunds.ts, nunca el cliente — mismo
+    // criterio write:false de las colecciones de Cajeros DD). Solo se
+    // consulta en los 2 puntos de lectura de Cajeros DD de abajo — nunca en
+    // Caja general ni en el resto de Finanzas, para no ampliar sin querer
+    // ningún otro permiso legacy de 'cashier'.
+    function isFieldCashier(candidateId) {
+      return belongsToCandidate(candidateId) &&
+        candidateUserDoc(candidateId).get('isFieldCashier', false) == true;
+    }
+
     // ── RBAC dinámico para roles PERSONALIZADOS (auditoría RBAC) ─────────
     // Un rol personalizado no puede resolverse con hasCandidateRole()
     // (arriba) porque su id nunca aparece en ningún array literal de este
@@ -627,7 +640,7 @@ service cloud.firestore {
         (hasEffectivePermission(candidateId, 'operators.manage_payment') && !isOwner(uid) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['montoEntregado', 'cadenciaPago', 'updatedAt'])) ||
         (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'role', 'roleIds', 'primaryRoleId', 'scopedPermissions',
+          'role', 'roleIds', 'primaryRoleId', 'scopedPermissions', 'isFieldCashier',
           'mesa', 'mesasAsignadas', 'tableIds', 'seccional', 'zoneIds', 'pollingPlaceIds', 'local', 'teamId'
         ]))
       );
@@ -1081,7 +1094,8 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
         hasEffectivePermission(candidateId, 'finance.cashier_funds.view_all') ||
-        (hasCandidateRole(candidateId, ['cashier']) && resource.data.responsibleUserId == request.auth.uid);
+        ((hasCandidateRole(candidateId, ['cashier']) || isFieldCashier(candidateId)) &&
+          resource.data.responsibleUserId == request.auth.uid);
       allow write: if false;
     }
 
@@ -1100,7 +1114,8 @@ service cloud.firestore {
       allow read: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin']) ||
         hasEffectivePermission(candidateId, 'finance.cashier_funds.view_all') ||
-        (hasCandidateRole(candidateId, ['cashier']) && resource.data.responsibleUserId == request.auth.uid);
+        ((hasCandidateRole(candidateId, ['cashier']) || isFieldCashier(candidateId)) &&
+          resource.data.responsibleUserId == request.auth.uid);
       allow write: if false;
     }
 

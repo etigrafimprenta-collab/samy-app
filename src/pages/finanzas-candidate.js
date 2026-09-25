@@ -75,6 +75,7 @@ import {
   getCajeroDiaDAccountSummary,
   getCajeroDiaDMovementsPage,
   generateCashierOperationId,
+  getUserRecords,
   FINANCE_BENEFICIARY_TYPES,
   FINANCE_FREQUENCIES,
   FINANCE_PAYMENT_METHODS,
@@ -143,7 +144,7 @@ export function money(n, currency = 'PYG') {
   return (currency === 'PYG' ? 'Gs. ' : currency + ' ') + (Number(n) || 0).toLocaleString('es-PY')
 }
 
-export async function renderFinanzasCandidate(container, candidateId, user, myRole, misRoles = []) {
+export async function renderFinanzasCandidate(container, candidateId, user, myRole, misRoles = [], isFieldCashier = false) {
   // Etapa 7 (RBAC, modo compatibilidad): cada flag ahora es
   // can(misRoles, permiso) || legacyRoles.includes(myRole) — el permiso
   // nuevo solo AMPLÍA lo que ya daba el chequeo viejo, nunca lo achica.
@@ -176,8 +177,15 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   const puedeGestionarCuentaCajero = permitir('finance.cashier_funds.manage_account', ['campaign_admin', 'finance_admin'])
   const puedeResolverAnulacionCajero = permitir('finance.cashier_funds.resolve_void', ['campaign_admin', 'finance_admin'])
   const puedeAutorizarExcepcionCajero = permitir('finance.cashier_funds.authorize_exception', ['campaign_admin', 'finance_admin'])
-  const puedeRegistrarEgresoCajero = permitir('finance.cashier_funds.register_expense', ['cashier'])
-  const puedeSolicitarAnulacionCajero = permitir('finance.cashier_funds.request_void', ['cashier', 'campaign_admin', 'finance_admin'])
+  // isFieldCashier ("cajero de campo", auto-enrolado desde un dirigente
+  // que tildó "necesita ayuda") se suma acá como un OR más, nunca
+  // reemplaza el chequeo de role/permiso — mismo criterio que el resto de
+  // esta función. Solo en estos 2 puntos (los únicos que un cajero de
+  // campo necesita): registrar egreso y solicitar su propia anulación.
+  // view_all/assign/manage_account/resolve_void/authorize_exception
+  // siguen exclusivos de admin, sin cambios.
+  const puedeRegistrarEgresoCajero = permitir('finance.cashier_funds.register_expense', ['cashier']) || isFieldCashier
+  const puedeSolicitarAnulacionCajero = permitir('finance.cashier_funds.request_void', ['cashier', 'campaign_admin', 'finance_admin']) || isFieldCashier
 
   // Visibilidad de pestañas por permiso efectivo (hallazgo UX Fase 9 de
   // Cajeros DD) — NUNCA `role === 'cashier'` a mano, mismo patrón
@@ -1360,16 +1368,71 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         </div>
         ${cddMiCuenta.status === 'closed' ? '<div style="background:#ffebee; border-left:4px solid #c62828; padding:8px 12px; border-radius:4px; margin-bottom:12px; font-size:.85rem;">🔒 Tu cuenta está cerrada — no podés registrar egresos hasta que un administrador la reabra.</div>' : ''}
         ${puedeRegistrarEgresoCajero && cddMiCuenta.status === 'active' ? `<button id="cdd-propio-btn-egreso" style="background:#c62828; color:white; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:700; margin-bottom:14px;">➖ Registrar egreso</button>` : ''}
+        <div id="cdd-pendientes"></div>
         <div id="cdd-drilldown"></div>
       `
       document.getElementById('cdd-propio-btn-egreso')?.addEventListener('click', () => mostrarModalRegistrarEgreso(cddMiCuenta))
       await cargarMovimientosCajero(true)
+      if (cddMiCuenta.status === 'active') await pintarPendientesDePago(cddMiCuenta)
     } catch (err) {
       body.innerHTML = `<div style="color:#c62828; padding:20px;">Error cargando tu cuenta: ${escapeHtml(err.message)}</div>`
     }
   }
 
-  function mostrarModalRegistrarEgreso(cuenta) {
+  // "Cajero de campo" (auto-cajero desde dirigente, ver hallazgo needsAssistance
+  // → Cajeros DD): lista de SUS PROPIOS savedRecords con needsAssistance,
+  // reutilizando lo que ya carga "Mis registros" (mismo getUserRecords) —
+  // no es una colección nueva. "Ya pagado" es una aproximación sobre los
+  // movimientos ya cargados (cddMovimientos, con la misma limitación de
+  // paginación que el filtro por CI de más abajo — hasta 50 sin "cargar
+  // más") comparando por CI; el intento real de cobro doble lo bloquea
+  // siempre el servidor (beneficiaryVoterId + status confirmed en
+  // cashierFunds.ts), esto es solo para no mostrar "Pagar" de más en la UI.
+  async function pintarPendientesDePago(cuenta) {
+    const el = document.getElementById('cdd-pendientes')
+    if (!el) return
+    const registros = (await getUserRecords(candidateId, user.uid).catch(() => []))
+      .filter(r => r.needsAssistance)
+    if (registros.length === 0) return
+    const ciYaPagadas = new Set(
+      cddMovimientos.filter(m => m.type === 'expense' && m.status === 'confirmed' && m.beneficiaryCI)
+        .map(m => String(m.beneficiaryCI).replace(/\D/g, ''))
+    )
+    el.innerHTML = `
+      <div style="border:1px solid #eee; border-radius:8px; padding:14px; margin-bottom:16px;">
+        <h4 style="margin:0 0 10px; font-size:.9rem;">🧑‍🤝‍🧑 Votantes que marcaste "necesita ayuda" (${registros.length})</h4>
+        <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
+          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Votante</th><th>CI</th><th>Monto</th><th></th></tr></thead>
+          <tbody>
+            ${registros.map(r => {
+              const ciNorm = String(r.cedula || '').replace(/\D/g, '')
+              const yaPagado = ciNorm && ciYaPagadas.has(ciNorm)
+              return `<tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px;">${escapeHtml(r.nombre || '')}</td>
+                <td>${escapeHtml(r.cedula || '')}</td>
+                <td>${money(r.montoAyuda || 0)}</td>
+                <td>${yaPagado
+                  ? '<span style="color:#2e7d32; font-weight:700;">✅ Pagado</span>'
+                  : (puedeRegistrarEgresoCajero && cuenta.status === 'active'
+                    ? `<button class="cdd-pend-btn-pagar" data-ci="${escapeHtml(r.cedula || '')}" data-nombre="${escapeHtml(r.nombre || '')}" data-monto="${Number(r.montoAyuda) || 0}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.75rem;">Pagar</button>`
+                    : '')
+                }</td>
+              </tr>`
+            }).join('')}
+          </tbody>
+        </table></div>
+      </div>
+    `
+    el.querySelectorAll('.cdd-pend-btn-pagar').forEach(btn => {
+      btn.addEventListener('click', () => mostrarModalRegistrarEgreso(cuenta, {
+        ci: btn.dataset.ci,
+        monto: btn.dataset.monto,
+        concept: `Ayuda a votante — ${btn.dataset.nombre}`
+      }))
+    })
+  }
+
+  function mostrarModalRegistrarEgreso(cuenta, prefill = null) {
     const modal = document.createElement('div')
     modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px; overflow-y:auto;'
     modal.innerHTML = `
@@ -1377,9 +1440,9 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         <h3 style="margin:0 0 6px;">➖ Registrar egreso</h3>
         <p style="margin:0 0 14px; font-size:.85rem; color:#666;">Saldo disponible: ${money(cuenta.balance, cuenta.currency)}</p>
         <div style="display:grid; gap:10px;">
-          <input id="cdd-eg-monto" type="number" placeholder="Monto" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <input id="cdd-eg-concepto" placeholder="Concepto (obligatorio)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <input id="cdd-eg-ci" placeholder="CI del beneficiario (opcional)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-monto" type="number" placeholder="Monto" value="${prefill?.monto ? escapeHtml(String(prefill.monto)) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-concepto" placeholder="Concepto (obligatorio)" value="${prefill?.concept ? escapeHtml(prefill.concept) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
+          <input id="cdd-eg-ci" placeholder="CI del beneficiario (opcional)" value="${prefill?.ci ? escapeHtml(prefill.ci) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           <input id="cdd-eg-excepcion" placeholder="ID de autorización excepcional (solo si aplica)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
           <div id="cdd-eg-msg" style="font-size:.85rem;"></div>
           <div style="display:flex; gap:8px;">

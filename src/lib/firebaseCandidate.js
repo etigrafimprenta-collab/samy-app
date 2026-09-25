@@ -545,6 +545,7 @@ export async function saveRecord(candidateId, uid, voter, {
   googleMapsUrl = '',
   requiresPickup = false,
   needsAssistance = false,
+  montoAyuda = 0,
   canBeDriver = false,
   wantsToBeMesario = false,
   allowDuplicate = false,
@@ -596,6 +597,7 @@ export async function saveRecord(candidateId, uid, voter, {
     googleMapsUrl,
     requiresPickup,
     needsAssistance,
+    montoAyuda: needsAssistance ? (Number(montoAyuda) || 0) : 0,
     canBeDriver,
     wantsToBeMesario,
     militanteName,
@@ -3132,9 +3134,20 @@ export async function getDiaDValidationForDirigentes(candidateId) {
 // Votantes marcados con requiresPickup/needsAssistance en electionDayControl
 // — candidatos naturales a "ayuda a votante", con vinculación a voterId ya
 // garantizada (spec sección 9: "vinculación con voterId" es obligatoria).
+//
+// Auto-cajero desde dirigente: si el candidato tiene
+// cashierFundsAutoEnroll:true, el circuito de "necesita ayuda" pasa por
+// Cajeros DD (pago directo del dirigente-cajero), no por Obligaciones —
+// así que acá se excluye needsAssistance (requiresPickup, que es de
+// traslado y no de plata, sigue igual). Candidatos sin ese flag (el 100%
+// de hoy salvo el que se pruebe explícitamente) no ven ningún cambio.
 export async function getVotersNeedingAssistanceForFinance(candidateId) {
-  const controls = await getAllElectionDayControl(candidateId)
-  const flagged = controls.filter(c => c.requiresPickup || c.needsAssistance)
+  const [controls, candidate] = await Promise.all([
+    getAllElectionDayControl(candidateId),
+    getCandidate(candidateId)
+  ])
+  const autoEnrollActivo = candidate?.cashierFundsAutoEnroll === true
+  const flagged = controls.filter(c => c.requiresPickup || (c.needsAssistance && !autoEnrollActivo))
   if (flagged.length === 0) return []
   const records = await getRecordsByIds(candidateId, flagged.map(c => c.voterId))
   return records.map(r => ({ ...r, control: flagged.find(c => c.voterId === r.id) }))

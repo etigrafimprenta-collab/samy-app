@@ -40,6 +40,7 @@
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { Auth } from "./lib";
 
 const CASHIER_ROLE = "cashier";
@@ -937,6 +938,104 @@ export const autorizarExcepcionBeneficiario = functions.https.onCall(
         reason,
       });
       return { exceptionId: excRef.id, beneficiaryVoterId, beneficiaryName };
+    });
+  }
+);
+
+// ── 9. onSavedRecordNeedsAssistanceWritten (trigger, no callable) ────────
+// "Cajero de campo": cuando un dirigente tilda `needsAssistance` al
+// registrar/editar un votante (candidates/{id}/savedRecords), y el
+// candidato tiene `cashierFundsAutoEnroll: true`, se le suma
+// `isFieldCashier: true` en su doc de candidates/{id}/users (SIN tocar
+// `role` — sigue siendo dirigente, esto es un flag ADICIONAL, ver mismo
+// criterio en firestore.rules/isFieldCashier()) y se le crea una cuenta de
+// cajero en 0 si todavía no tiene una activa. Nunca mueve dinero — el
+// saldo queda en 0 hasta que un admin le asigne fondos con
+// asignarFondosCajero, exactamente como cualquier otro cajero.
+//
+// Por qué trigger y no callable: `saveRecord()` (firebaseCandidate.js) es
+// una escritura directa del cliente (addDoc/setDoc), no pasa por ninguna
+// Cloud Function — no hay ningún punto de entrada callable donde enganchar
+// esto sin reescribir ese flujo. Es la PRIMERA Firestore trigger de este
+// proyecto (el resto de Cajeros DD, y casi todo functions/src, son
+// callables) — mismo Admin SDK y mismas invariantes que crearCuentaCajero
+// (1 cuenta activa por responsable), controlado dentro de una transacción
+// igual que el resto de este archivo.
+//
+// Solo corre en el flanco false→true (o creado ya en true) — una vez
+// procesado, ediciones posteriores del mismo registro no vuelven a
+// disparar nada (evita relecturas innecesarias en cada edición del
+// dirigente, la idempotencia real la da el chequeo de cuenta activa
+// existente, igual que en crearCuentaCajero).
+export const onSavedRecordNeedsAssistanceWritten = onDocumentWritten(
+  "candidates/{candidateId}/savedRecords/{recordId}",
+  async (event) => {
+    const after = event.data?.after;
+    if (!after || !after.exists) return; // borrado, nada que hacer
+    const afterData = after.data() as any;
+    if (afterData?.needsAssistance !== true) return;
+
+    const before = event.data?.before;
+    const wasAlreadyTrue = !!before?.exists && (before.data() as any)?.needsAssistance === true;
+    if (wasAlreadyTrue) return;
+
+    const candidateId = event.params.candidateId;
+    const dirigenteUid = afterData.uid;
+    if (!candidateId || !dirigenteUid || typeof dirigenteUid !== "string") return;
+
+    const candidateSnap = await candidateRef(candidateId).get();
+    if (candidateSnap.data()?.cashierFundsAutoEnroll !== true) return;
+
+    await db().runTransaction(async (tx) => {
+      const memberRef = candidateRef(candidateId).collection("users").doc(dirigenteUid);
+      const memberSnap = await tx.get(memberRef);
+      if (!memberSnap.exists) return;
+      const memberData = memberSnap.data()!;
+
+      // Ya tiene acceso completo a Cajeros DD por su rol normal (admin o
+      // cashier de verdad) — no necesita el flag de campo.
+      const roleIds: string[] = Array.isArray(memberData.roleIds) ? memberData.roleIds : [];
+      const yaCubierto = [memberData.role, ...roleIds].some((r) =>
+        [...CASHIER_ADMIN_ROLES, CASHIER_ROLE].includes(r)
+      );
+      if (yaCubierto) return;
+
+      const existingSnap = await tx.get(
+        cashierAccountsCol(candidateId)
+          .where("responsibleUserId", "==", dirigenteUid)
+          .where("status", "==", "active")
+      );
+
+      if (memberData.isFieldCashier !== true) {
+        tx.update(memberRef, { isFieldCashier: true });
+      }
+
+      if (!existingSnap.empty) return; // ya tiene cuenta activa, nada más que hacer
+
+      const ref = cashierAccountsCol(candidateId).doc();
+      const payload = {
+        candidateId,
+        status: "active",
+        name: `Cajero de campo — ${memberData.nombre || dirigenteUid}`,
+        responsibleUserId: dirigenteUid,
+        initialBalance: 0,
+        balance: 0,
+        currency: "PYG",
+        createdBy: dirigenteUid,
+        autoEnrolled: true,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      tx.set(ref, payload);
+      writeAuditInTx(tx, candidateId, {
+        actorUid: dirigenteUid,
+        action: "cashier_account_auto_create",
+        entityType: "cashierAccounts",
+        entityId: ref.id,
+        previousData: null,
+        newData: payload,
+        reason: "Auto-enrolamiento: primer votante marcado 'necesita ayuda'",
+      });
     });
   }
 );
