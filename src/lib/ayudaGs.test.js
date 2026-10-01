@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { computeAyudaGsSummary } from './ayudaGs.js'
+import { computeAyudaGsSummary, resolveAssistanceStatus } from './ayudaGs.js'
 
 // Solo prueba lógica PURA — ayudaGs.js no importa firebase/firestore a
 // propósito (ver su cabecera), así que esta suite corre sin config de
@@ -151,7 +151,9 @@ test('agrupación de usuarios no resolubles — varios uid fantasma DISTINTOS se
 test('dataset vacío — no rompe, devuelve ceros y arrays vacíos', () => {
   const { resumen, porDirigente, registrosConAyuda } = computeAyudaGsSummary([], new Map())
   assert.deepEqual(resumen, {
-    totalRegistrados: 0, necesitanAyuda: 0, conMonto: 0, sinMonto: 0, montoTotal: 0, promedioConMonto: 0
+    totalRegistrados: 0, necesitanAyuda: 0, conMonto: 0, sinMonto: 0, montoTotal: 0, promedioConMonto: 0,
+    pendingAmount: 0, pendingApproval: 0, approved: 0, rejected: 0,
+    totalSolicitado: 0, totalAprobado: 0, diferencia: 0
   })
   assert.deepEqual(porDirigente, [])
   assert.deepEqual(registrosConAyuda, [])
@@ -185,5 +187,75 @@ test('reproduce el caso real de Víctor Isasi — Gustavo Daniel Franco y Cynthi
   assert.deepEqual(
     { registrados: cynthia.registrados, necesitanAyuda: cynthia.necesitanAyuda, conMonto: cynthia.conMonto, sinMonto: cynthia.sinMonto, totalSolicitado: cynthia.totalSolicitado },
     { registrados: 27, necesitanAyuda: 27, conMonto: 0, sinMonto: 27, totalSolicitado: 0 }
+  )
+})
+
+// ══════════════ Fase 2 — control y aprobación ══════════════
+
+test('resolveAssistanceStatus — legacy: needsAssistance=false → sin solicitud (null)', () => {
+  assert.equal(resolveAssistanceStatus(rec({ needsAssistance: false, montoAyuda: 0 })), null)
+})
+
+test('resolveAssistanceStatus — legacy: needsAssistance=true + montoAyuda=0 → pending_amount', () => {
+  assert.equal(resolveAssistanceStatus(rec({ needsAssistance: true, montoAyuda: 0 })), 'pending_amount')
+})
+
+test('resolveAssistanceStatus — legacy: needsAssistance=true + montoAyuda>0 + SIN assistanceStatus → pending_approval (NO aprobado automáticamente)', () => {
+  assert.equal(resolveAssistanceStatus(rec({ needsAssistance: true, montoAyuda: 100000 })), 'pending_approval')
+})
+
+test('resolveAssistanceStatus — si assistanceStatus ya está seteado, se respeta tal cual (no se recalcula)', () => {
+  assert.equal(resolveAssistanceStatus(rec({ needsAssistance: true, montoAyuda: 100000, assistanceStatus: 'approved' })), 'approved')
+  assert.equal(resolveAssistanceStatus(rec({ needsAssistance: true, montoAyuda: 100000, assistanceStatus: 'rejected' })), 'rejected')
+})
+
+test('computeAyudaGsSummary — los 25 casos con monto de Víctor Isasi (legacy) caen en pending_approval, NO quedan aprobados', () => {
+  const records = Array.from({ length: 25 }, () => rec({ needsAssistance: true, montoAyuda: 100000 }))
+  const { resumen } = computeAyudaGsSummary(records, new Map())
+  assert.equal(resumen.pendingApproval, 25)
+  assert.equal(resumen.approved, 0)
+  assert.equal(resumen.totalAprobado, 0)
+  assert.equal(resumen.totalSolicitado, 2500000)
+  assert.equal(resumen.diferencia, 2500000) // nada aprobado todavía → toda la diferencia es lo solicitado
+})
+
+test('computeAyudaGsSummary — un registro approved con approvedAmount distinto de montoAyuda: se conservan ambos valores', () => {
+  const records = [rec({
+    needsAssistance: true, montoAyuda: 100000,
+    assistanceStatus: 'approved', approvedAmount: 80000, approvedBy: 'admin-uid', approvedAt: 'ts'
+  })]
+  const { resumen, registrosConAyuda } = computeAyudaGsSummary(records, new Map())
+  assert.equal(resumen.approved, 1)
+  assert.equal(resumen.totalSolicitado, 100000) // montoAyuda intacto
+  assert.equal(resumen.totalAprobado, 80000)    // approvedAmount, no igual al solicitado
+  assert.equal(resumen.diferencia, 20000)
+  assert.equal(registrosConAyuda[0].montoAyuda, 100000)
+  assert.equal(registrosConAyuda[0].approvedAmount, 80000)
+})
+
+test('computeAyudaGsSummary — un registro rejected no suma a totalAprobado ni a totalSolicitado-pendiente', () => {
+  const records = [rec({
+    needsAssistance: true, montoAyuda: 100000,
+    assistanceStatus: 'rejected', rejectedBy: 'admin-uid', rejectedAt: 'ts', rejectionReason: 'No corresponde'
+  })]
+  const { resumen, registrosConAyuda } = computeAyudaGsSummary(records, new Map())
+  assert.equal(resumen.rejected, 1)
+  assert.equal(resumen.approved, 0)
+  assert.equal(resumen.totalAprobado, 0)
+  assert.equal(registrosConAyuda[0].rejectionReason, 'No corresponde')
+})
+
+test('computeAyudaGsSummary — desglose completo por dirigente: pendingAmount/pendingApproval/approved/rejected/totalAprobado', () => {
+  const records = [
+    rec({ uid: 'd1', needsAssistance: true, montoAyuda: 0 }),                                          // pending_amount
+    rec({ uid: 'd1', needsAssistance: true, montoAyuda: 100000 }),                                      // pending_approval
+    rec({ uid: 'd1', needsAssistance: true, montoAyuda: 100000, assistanceStatus: 'approved', approvedAmount: 100000 }),
+    rec({ uid: 'd1', needsAssistance: true, montoAyuda: 100000, assistanceStatus: 'rejected', rejectionReason: 'x' })
+  ]
+  const { porDirigente } = computeAyudaGsSummary(records, new Map([['d1', { nombre: 'Dirigente Uno' }]]))
+  const d1 = porDirigente.find(d => d.uid === 'd1')
+  assert.deepEqual(
+    { pendingAmount: d1.pendingAmount, pendingApproval: d1.pendingApproval, approved: d1.approved, rejected: d1.rejected, totalAprobado: d1.totalAprobado },
+    { pendingAmount: 1, pendingApproval: 1, approved: 1, rejected: 1, totalAprobado: 100000 }
   )
 })

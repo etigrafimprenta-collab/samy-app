@@ -30,7 +30,7 @@ import {
 import { httpsCallable } from 'firebase/functions'
 import { db, functionsInstance } from './firebase.js'
 import { getGrantedScopes } from './rbac.js'
-import { computeAyudaGsSummary } from './ayudaGs.js'
+import { computeAyudaGsSummary, resolveAssistanceStatus } from './ayudaGs.js'
 
 const DEFAULT_PAGE_SIZE = 50
 const IN_CHUNK_SIZE = 30 // límite de Firestore para el operador "in"
@@ -859,6 +859,137 @@ export async function getAyudaGsSummary(candidateId) {
   }
 
   return computeAyudaGsSummary(records, usuarios)
+}
+
+// ── Ayuda Gs. — Fase 2: control y aprobación ────────────────────────
+// `montoAyuda` NUNCA se toca acá — sigue siendo exclusivamente lo
+// SOLICITADO por el dirigente. Estas funciones escriben únicamente los
+// campos administrativos de la decisión (assistanceStatus/approvedAmount/
+// approvedBy/approvedAt/rejectedBy/rejectedAt/rejectionReason), en un
+// único writeBatch atómico junto con su entrada en financeAuditLogs —
+// nunca una escritura "suelta" sin su rastro de auditoría. firestore.rules
+// exige exactamente esta forma (ver isValidAssistanceDecision/
+// isAssistanceApprovalActor) — un intento de escritura con otra forma
+// (otro uid en approvedBy, sin motivo en el rechazo, etc.) es rechazado
+// por el servidor aunque este código tuviera un bug, no solo por la UI.
+
+export async function approveAssistanceRequest(candidateId, record, approvedAmount, actorUid, actorRole) {
+  const monto = Number(approvedAmount)
+  if (!(monto >= 0)) throw new Error('El monto aprobado debe ser un número válido.')
+  const recordRef = doc(db, ...candidatePath(candidateId, 'savedRecords', record.id))
+  const batch = writeBatch(db)
+  batch.update(recordRef, {
+    assistanceStatus: 'approved',
+    approvedAmount: monto,
+    approvedBy: actorUid,
+    approvedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  })
+  const logRef = doc(collection(db, ...candidatePath(candidateId, 'financeAuditLogs')))
+  batch.set(logRef, {
+    candidateId, entityType: 'ayuda_votante', entityId: record.id, action: 'approve',
+    previousData: { montoAyuda: Number(record.montoAyuda) || 0, assistanceStatus: resolveAssistanceStatus(record), cedula: record.cedula || '' },
+    newData: { assistanceStatus: 'approved', approvedAmount: monto },
+    performedBy: actorUid, performedByRole: actorRole, reason: '',
+    createdAt: serverTimestamp()
+  })
+  await batch.commit()
+}
+
+export async function rejectAssistanceRequest(candidateId, record, motivo, actorUid, actorRole) {
+  const reason = String(motivo || '').trim()
+  if (!reason) throw new Error('El motivo del rechazo es obligatorio.')
+  const recordRef = doc(db, ...candidatePath(candidateId, 'savedRecords', record.id))
+  const batch = writeBatch(db)
+  batch.update(recordRef, {
+    assistanceStatus: 'rejected',
+    rejectedBy: actorUid,
+    rejectedAt: serverTimestamp(),
+    rejectionReason: reason,
+    updatedAt: serverTimestamp()
+  })
+  const logRef = doc(collection(db, ...candidatePath(candidateId, 'financeAuditLogs')))
+  batch.set(logRef, {
+    candidateId, entityType: 'ayuda_votante', entityId: record.id, action: 'reject',
+    previousData: { montoAyuda: Number(record.montoAyuda) || 0, assistanceStatus: resolveAssistanceStatus(record), cedula: record.cedula || '' },
+    newData: { assistanceStatus: 'rejected' },
+    performedBy: actorUid, performedByRole: actorRole, reason,
+    createdAt: serverTimestamp()
+  })
+  await batch.commit()
+}
+
+// Aprobación masiva — SIEMPRE por el monto SOLICITADO de cada registro
+// (nunca un monto global ciego distinto por fila; si se quiere un monto
+// distinto, es aprobación individual). Nunca aprueba algo que el
+// que llama no seleccionó explícitamente — el cálculo de "cuánto se va a
+// aprobar" lo hace y confirma la UI ANTES de llamar a esto (ver
+// propuesta de UI, confirmación "N solicitudes / Gs. X / Confirmar").
+// 400 bytes de operaciones por tanda (2 writes por registro: su update +
+// su log propio — límite real de Firestore es 500 escrituras/batch).
+export async function approveAssistanceRequestsBulk(candidateId, records, actorUid, actorRole) {
+  const CHUNK_SIZE = 200
+  let aplicados = 0
+  for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+    const chunk = records.slice(i, i + CHUNK_SIZE)
+    const batch = writeBatch(db)
+    chunk.forEach(record => {
+      const monto = Number(record.montoAyuda) || 0
+      const recordRef = doc(db, ...candidatePath(candidateId, 'savedRecords', record.id))
+      batch.update(recordRef, {
+        assistanceStatus: 'approved',
+        approvedAmount: monto,
+        approvedBy: actorUid,
+        approvedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+      const logRef = doc(collection(db, ...candidatePath(candidateId, 'financeAuditLogs')))
+      batch.set(logRef, {
+        candidateId, entityType: 'ayuda_votante', entityId: record.id, action: 'approve',
+        previousData: { montoAyuda: monto, assistanceStatus: resolveAssistanceStatus(record), cedula: record.cedula || '' },
+        newData: { assistanceStatus: 'approved', approvedAmount: monto },
+        performedBy: actorUid, performedByRole: actorRole, reason: 'Aprobación masiva por monto solicitado',
+        createdAt: serverTimestamp()
+      })
+    })
+    await batch.commit()
+    aplicados += chunk.length
+  }
+  return aplicados
+}
+
+// Reapertura controlada de una solicitud ya decidida (approved/rejected):
+// el propio dirigente cambia el monto solicitado → vuelve a
+// 'pending_approval', conservando approvedAmount/approvedBy/approvedAt/
+// rejectedBy/rejectedAt/rejectionReason intactos (historial de la
+// decisión anterior). firestore.rules exige esta forma EXACTA
+// (isValidAssistanceReopen) — no hay otra manera de cambiar montoAyuda
+// mientras assistanceStatus=='approved'/'rejected'.
+export async function reopenAssistanceRequest(candidateId, record, nuevoMonto, actorUid) {
+  const monto = Number(nuevoMonto) || 0
+  const estadoPrevio = resolveAssistanceStatus(record)
+  if (!['approved', 'rejected'].includes(estadoPrevio)) {
+    throw new Error('Esta solicitud no tiene una decisión previa que reabrir.')
+  }
+  if (monto === (Number(record.montoAyuda) || 0)) {
+    throw new Error('El nuevo monto debe ser distinto del solicitado actualmente.')
+  }
+  const recordRef = doc(db, ...candidatePath(candidateId, 'savedRecords', record.id))
+  const batch = writeBatch(db)
+  batch.update(recordRef, {
+    montoAyuda: monto,
+    assistanceStatus: 'pending_approval',
+    updatedAt: serverTimestamp()
+  })
+  const logRef = doc(collection(db, ...candidatePath(candidateId, 'financeAuditLogs')))
+  batch.set(logRef, {
+    candidateId, entityType: 'ayuda_votante', entityId: record.id, action: 'reopened_after_edit',
+    previousData: { montoAyuda: Number(record.montoAyuda) || 0, assistanceStatus: estadoPrevio, cedula: record.cedula || '' },
+    newData: { montoAyuda: monto, assistanceStatus: 'pending_approval' },
+    performedBy: actorUid, performedByRole: 'dirigente', reason: '',
+    createdAt: serverTimestamp()
+  })
+  await batch.commit()
 }
 
 export async function updateCandidateUserMesaLocal(candidateId, uid, data) {

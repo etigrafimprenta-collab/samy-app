@@ -154,7 +154,7 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
     if (tab === 'ayudas') {
       body.innerHTML = 'Cargando...'
       const { renderReporteAyuda } = await import('./reportes-ayuda-candidate.js')
-      return renderReporteAyuda(body, candidateId)
+      return renderReporteAyuda(body, candidateId, user, myRole, misRoles)
     }
     if (tab === 'finanzas') {
       body.innerHTML = 'Cargando...'

@@ -26,8 +26,10 @@ import {
   deleteCandidateUser,
   getDrivers,
   searchVoterByCedula,
-  getRecordByCedula
+  getRecordByCedula,
+  reopenAssistanceRequest
 } from '../lib/firebaseCandidate.js'
+import { resolveAssistanceStatus } from '../lib/ayudaGs.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
 import { buildRecordatorioVotoMessage } from '../lib/campaignMessages.js'
 import { can, getGrantedScopes } from '../lib/rbac.js'
@@ -1075,14 +1077,30 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         const nuevoChofer = modal.querySelector('#sel-edit-chofer').value
         const montoAyuda = Number(modal.querySelector('#inp-edit-monto-ayuda').value) || 0
         try {
+          // Ayuda Gs. — Fase 2: si esta solicitud YA fue decidida
+          // (approved/rejected) y el dirigente cambia el monto, NO se
+          // puede pisar directo (firestore.rules lo bloquea a propósito) —
+          // pasa por la reapertura controlada, que conserva el historial
+          // de la decisión anterior. El resto de la edición (teléfono,
+          // nota, chofer, etc.) sigue por el camino normal de siempre.
+          const estadoActual = resolveAssistanceStatus(r)
+          const montoCambio = montoAyuda !== (Number(r.montoAyuda) || 0)
+          const requiereReapertura = ['approved', 'rejected'].includes(estadoActual) && montoCambio
+
+          if (requiereReapertura) {
+            await reopenAssistanceRequest(candidateId, r, montoAyuda, user.uid)
+          }
+
           await updateRecord(candidateId, r.id, {
             telefono: modal.querySelector('#inp-edit-telefono').value.trim(),
             nota: modal.querySelector('#inp-edit-nota').value.trim(),
             chofer_asignado: nuevoChofer || null,
             canBeDriver: modal.querySelector('#chk-edit-driver').checked,
             wantsToBeMesario: modal.querySelector('#chk-edit-mesario').checked,
-            montoAyuda,
-            needsAssistance: montoAyuda > 0,
+            // Si hubo reapertura, montoAyuda/needsAssistance ya quedaron
+            // escritos por reopenAssistanceRequest — no los duplicamos
+            // acá (esta escritura es un update() distinto y separado).
+            ...(requiereReapertura ? {} : { montoAyuda, needsAssistance: montoAyuda > 0 }),
             latitude: ubicacion.latitude,
             longitude: ubicacion.longitude,
             googleMapsUrl: ubicacion.googleMapsUrl,
@@ -1090,8 +1108,10 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
             // el toggle "Transporte" duplicado con "Chofer asignado".
             ...(nuevoChofer ? { requiresPickup: true } : {})
           })
-          msg.innerHTML = '✅ Guardado'
-          setTimeout(() => { modal.remove(); renderMisRegistros(content) }, 600)
+          msg.innerHTML = requiereReapertura
+            ? '✅ Guardado — esta ayuda ya había sido decidida, vuelve a quedar pendiente de aprobación con el nuevo monto (se conserva el historial).'
+            : '✅ Guardado'
+          setTimeout(() => { modal.remove(); renderMisRegistros(content) }, requiereReapertura ? 1800 : 600)
         } catch (err) {
           msg.innerHTML = `❌ ${escapeHtml(err.message)}`
         }

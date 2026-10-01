@@ -302,6 +302,84 @@ service cloud.firestore {
         );
     }
 
+    // ── Ayuda Gs. — Fase 2 (control y aprobación) ───────────────────────
+    // Campos administrativos de la decisión de ayuda — SOLO un actor de
+    // aprobación (ver isAssistanceApprovalActor) puede tocarlos. Ninguna
+    // otra rama de `allow update` de savedRecords (dirigente dueño,
+    // records.edit, scope, assigned) puede escribirlos, aunque hoy sí
+    // pueda escribir el resto del documento — "no quiero seguridad
+    // basada únicamente en botones ocultos" (pedido explícito): esto se
+    // hace cumplir acá, no solo ocultando el botón en la UI.
+    function assistanceAdminFields() {
+      return ['assistanceStatus', 'approvedAmount', 'approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'rejectionReason'];
+    }
+
+    // Mismo criterio de actor que ya rige la aprobación/rechazo de
+    // financeObligations (firestore.rules, match de financeObligations,
+    // `allow update`) — no se inventa un criterio nuevo para Ayuda Gs.
+    //
+    // Versión inline (no via hasEffectivePermission/hasScopedPermission)
+    // a propósito — presupuesto de complejidad de Firestore Rules: la
+    // versión que encadenaba esos 2 helpers (4 llamadas a
+    // candidateUserDoc()/belongsToCandidate() en total) hacía fallar
+    // escrituras reales con "maximum of 1000 expressions to evaluate"
+    // (confirmado contra el emulador). `campaign_admin` no se repite acá
+    // porque el branch de arriba (`hasCandidateRole(['campaign_admin'])`)
+    // ya corta antes de llegar a esta función.
+    function isAssistanceApprovalActor(candidateId) {
+      let sp = candidateUserDoc(candidateId).get('scopedPermissions', {});
+      return isSuperAdmin() ||
+        hasCandidateRole(candidateId, ['finance_admin']) ||
+        'all_candidate' in sp.get('finance.approve', []) ||
+        'all_platform' in sp.get('finance.approve', []) ||
+        'all_candidate' in sp.get('finance.reject', []) ||
+        'all_platform' in sp.get('finance.reject', []);
+    }
+
+    // Forma válida de una escritura de aprobación/rechazo — además de
+    // "quién" (isAssistanceApprovalActor), importa "qué" queda escrito:
+    // aprobar fija approvedBy al que llama y no toca los campos de
+    // rechazo; rechazar exige motivo no vacío, fija rejectedBy al que
+    // llama y no toca los campos de aprobación. Evita que alguien con
+    // permiso de aprobar le "regale" la autoría a otro uid, y evita
+    // mezclar aprobado+rechazado en la misma decisión.
+    function isValidAssistanceDecision(before, after) {
+      return
+        (after.get('assistanceStatus', null) == 'approved' &&
+          after.get('approvedBy', null) == request.auth.uid &&
+          after.get('approvedAmount', null) is number &&
+          after.get('rejectedBy', null) == before.get('rejectedBy', null) &&
+          after.get('rejectedAt', null) == before.get('rejectedAt', null)) ||
+        (after.get('assistanceStatus', null) == 'rejected' &&
+          after.get('rejectedBy', null) == request.auth.uid &&
+          after.get('rejectionReason', '') is string &&
+          after.get('rejectionReason', '') != '' &&
+          after.get('approvedBy', null) == before.get('approvedBy', null) &&
+          after.get('approvedAt', null) == before.get('approvedAt', null) &&
+          after.get('approvedAmount', null) == before.get('approvedAmount', null));
+    }
+
+    // Reapertura controlada (pedido explícito del usuario, punto 2): el
+    // propio dirigente dueño del registro puede modificar `montoAyuda` de
+    // una solicitud YA DECIDIDA (approved/rejected) — pero SOLO si, en la
+    // MISMA escritura, `assistanceStatus` pasa a 'pending_approval' y los
+    // demás campos administrativos quedan EXACTAMENTE IGUAL (se
+    // conservan como historial, no se limpian). Cualquier otro intento de
+    // tocar `montoAyuda` mientras assistanceStatus=='approved' sin esta
+    // forma exacta es rechazado por la regla — no hay forma de bypassear
+    // esto escribiendo directo, tiene que pasar por esta forma validada.
+    function isValidAssistanceReopen(before, after) {
+      return before.get('assistanceStatus', null) in ['approved', 'rejected'] &&
+        after.montoAyuda != before.get('montoAyuda', null) &&
+        after.get('assistanceStatus', null) == 'pending_approval' &&
+        after.get('approvedAmount', null) == before.get('approvedAmount', null) &&
+        after.get('approvedBy', null) == before.get('approvedBy', null) &&
+        after.get('approvedAt', null) == before.get('approvedAt', null) &&
+        after.get('rejectedBy', null) == before.get('rejectedBy', null) &&
+        after.get('rejectedAt', null) == before.get('rejectedAt', null) &&
+        after.get('rejectionReason', null) == before.get('rejectionReason', null);
+    }
+
     // Un mesario solo puede tocar votos de la mesa que tiene asignada,
     // ya sea vía (seccional+mesa) fija o vía la lista mesasAsignadas.
     //
@@ -735,18 +813,58 @@ service cloud.firestore {
         (canAccessSavedRecordByScope(candidateId, 'search_voter.create', request.resource.data) &&
           request.resource.data.uid == request.auth.uid);
 
+      // Ayuda Gs. — Fase 2.1 (cierre del gap de permisos): reestructurado
+      // en 2 grupos para mantener el presupuesto de complejidad de
+      // Firestore Rules (ver nota de rendimiento más abajo).
+      //
+      // Grupo A — actores de aprobación: ÚNICO camino para tocar
+      // assistanceStatus/approvedAmount/approvedBy/approvedAt/
+      // rejectedBy/rejectedAt/rejectionReason (fuera de campaign_admin/
+      // superadmin, que ya tienen paso libre a todo el documento, mismo
+      // criterio que el resto de este archivo).
+      //
+      // Grupo B — editores "ordinarios" (records.edit genérico, scope,
+      // assigned, dirigente dueño, coordinator): TODOS comparten un único
+      // candado (`puedeEditarCamposOrdinarios`, calculado UNA sola vez)
+      // que bloquea cualquier escritura que toque un campo administrativo
+      // de ayuda O cambie `montoAyuda` mientras la solicitud ya fue
+      // decidida — sin este candado compartido, antes solo `dirigente`
+      // estaba protegido; `records.edit`/scope/assigned podían tocar esos
+      // campos sin tener finance.approve/finance.reject.
+      //
+      // RENDIMIENTO: agregar este mismo chequeo DENTRO de cada una de las
+      // 3 ramas de abajo (en vez de una sola vez acá arriba) hacía fallar
+      // escrituras reales con "maximum of 1000 expressions to evaluate"
+      // (confirmado contra el emulador) — por eso se calcula una sola vez
+      // y se aplica como AND al grupo completo, no repetido por rama.
       allow update: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
-        hasEffectivePermission(candidateId, 'records.edit') ||
-        canAccessSavedRecordByScope(candidateId, 'records.edit', resource.data) ||
-        isAssignedToSavedRecord(candidateId, 'records.edit', recordId) ||
-        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid) ||
-        // coordinator ya puede crear/editar callAssignments (ver abajo);
-        // esto solo le deja espejar ese mismo dato en el propio
-        // savedRecords (ccAssignedUserId) al asignar/reasignar en Centro
-        // de Contacto — ningún otro campo del registro.
-        (hasCandidateRole(candidateId, ['coordinator']) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ccAssignedUserId', 'updatedAt']));
+        (isAssistanceApprovalActor(candidateId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(assistanceAdminFields().concat(['updatedAt'])) &&
+          isValidAssistanceDecision(resource.data, request.resource.data)) ||
+        // Reapertura controlada: único caso en que un dirigente SÍ puede
+        // tocar un campo administrativo (assistanceStatus→pending_approval)
+        // Y cambiar montoAyuda en la misma escritura — la forma exacta la
+        // valida isValidAssistanceReopen, no hay otra vía.
+        (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid &&
+          isValidAssistanceReopen(resource.data, request.resource.data)) ||
+        (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(assistanceAdminFields()) &&
+          !(resource.data.get('assistanceStatus', null) in ['approved', 'rejected'] &&
+            request.resource.data.montoAyuda != resource.data.get('montoAyuda', null)) &&
+          (
+            hasEffectivePermission(candidateId, 'records.edit') ||
+            canAccessSavedRecordByScope(candidateId, 'records.edit', resource.data) ||
+            isAssignedToSavedRecord(candidateId, 'records.edit', recordId) ||
+            (hasCandidateRole(candidateId, ['dirigente']) && resource.data.uid == request.auth.uid) ||
+            // coordinator ya puede crear/editar callAssignments (ver abajo);
+            // esto solo le deja espejar ese mismo dato en el propio
+            // savedRecords (ccAssignedUserId) al asignar/reasignar en
+            // Centro de Contacto — ningún otro campo del registro.
+            (hasCandidateRole(candidateId, ['coordinator']) &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ccAssignedUserId', 'updatedAt']))
+          )
+        );
 
       allow delete: if isSuperAdmin() ||
         hasCandidateRole(candidateId, ['campaign_admin']) ||
@@ -951,7 +1069,22 @@ service cloud.firestore {
 
       allow create: if isSuperAdmin() ||
         (hasCandidateRole(candidateId, ['campaign_admin', 'finance_admin', 'finance_operator', 'cashier']) &&
-          request.resource.data.performedBy == request.auth.uid);
+          request.resource.data.performedBy == request.auth.uid) ||
+        // Ayuda Gs. — Fase 2: un actor de aprobación RBAC (no solo los
+        // roles legacy de arriba) también puede dejar constancia de su
+        // propia decisión.
+        ((hasEffectivePermission(candidateId, 'finance.approve') || hasEffectivePermission(candidateId, 'finance.reject')) &&
+          request.resource.data.performedBy == request.auth.uid) ||
+        // Reapertura: el propio dirigente deja constancia de que
+        // modificó una solicitud ya decidida — mismo criterio de
+        // pertenencia que el `allow update` de su propio savedRecord
+        // (resource.data.uid == quien llama), vía get() al registro.
+        (hasCandidateRole(candidateId, ['dirigente']) &&
+          request.resource.data.action == 'reopened_after_edit' &&
+          request.resource.data.entityType == 'ayuda_votante' &&
+          request.resource.data.performedBy == request.auth.uid &&
+          exists(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(request.resource.data.entityId)) &&
+          get(/databases/$(database)/documents/candidates/$(candidateId)/savedRecords/$(request.resource.data.entityId)).data.uid == request.auth.uid);
 
       allow update, delete: if false;
     }
