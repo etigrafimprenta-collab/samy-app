@@ -43,6 +43,7 @@ const TABS = [
   { id: 'choferes', label: '🚗 Choferes', ready: true },
   { id: 'mesarios', label: '🪑 Mesarios', ready: true },
   { id: 'dirigentes', label: '🧭 Dirigentes', ready: true },
+  { id: 'ayudas', label: '🆘 Ayudas', ready: true },
   // roles: ninguna colección de Finanzas ni auditLogs permite lectura a
   // coordinator en firestore.rules (solo campaign_admin/auditor, mismo
   // criterio que TAB_ROLES.auditoria en campaign.js) — sin este filtro,
@@ -149,6 +150,11 @@ export async function renderReportesCandidate(container, candidateId, user, myRo
       body.innerHTML = 'Cargando...'
       const { renderReporteDirigentes } = await import('./reportes-dirigentes-candidate.js')
       return renderReporteDirigentes(body, candidateId, user, myRole, misRoles)
+    }
+    if (tab === 'ayudas') {
+      body.innerHTML = 'Cargando...'
+      const { renderReporteAyuda } = await import('./reportes-ayuda-candidate.js')
+      return renderReporteAyuda(body, candidateId)
     }
     if (tab === 'finanzas') {
       body.innerHTML = 'Cargando...'

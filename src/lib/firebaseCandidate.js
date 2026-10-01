@@ -30,6 +30,7 @@ import {
 import { httpsCallable } from 'firebase/functions'
 import { db, functionsInstance } from './firebase.js'
 import { getGrantedScopes } from './rbac.js'
+import { computeAyudaGsSummary } from './ayudaGs.js'
 
 const DEFAULT_PAGE_SIZE = 50
 const IN_CHUNK_SIZE = 30 // límite de Firestore para el operador "in"
@@ -817,6 +818,47 @@ export async function getDuplicateCedulas(candidateId) {
 export async function getAllCandidateUsers(candidateId) {
   const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'users')))
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// ── Ayuda Gs. (Reportes > Ayudas) — Etapa 1: solo consulta/agregación ──
+// Wrapper fino: pagina savedRecords/users (nunca getAllRecords/
+// getAllCandidateUsers sin acotar, ver cabecera de reportes-candidate.js)
+// y delega el cálculo a computeAyudaGsSummary (lib/ayudaGs.js) — lógica
+// PURA, sin Firestore, para poder testearla con node:test (mismo criterio
+// que offlineQueue.js/offlineQueue.test.js: este archivo importa
+// firebase/firestore, así que nunca es importable en una suite de tests
+// sin un config real de Firebase).
+//
+// Deliberadamente el único eslabón implementado hoy de la futura cadena
+// Necesita ayuda → Monto solicitado → Monto aprobado → Pagado — no hay
+// aprobación ni pago acá, y esto NO se conecta con Cajeros DD/Finanzas
+// (cashierAccounts/cashierMovements/financeObligations quedan intactos).
+export async function getAyudaGsSummary(candidateId) {
+  const PAGE_SIZE = 500
+
+  const usuarios = new Map()
+  {
+    let cursor = null
+    while (true) {
+      const { users, lastDoc, hasMore } = await listCandidateUsersPage(candidateId, { cursor, pageSize: PAGE_SIZE })
+      users.forEach(u => usuarios.set(u.id, u))
+      cursor = lastDoc
+      if (!hasMore) break
+    }
+  }
+
+  const records = []
+  {
+    let cursor = null
+    while (true) {
+      const { records: page, lastDoc, hasMore } = await listRecordsPage(candidateId, { cursor, pageSize: PAGE_SIZE })
+      records.push(...page)
+      cursor = lastDoc
+      if (!hasMore) break
+    }
+  }
+
+  return computeAyudaGsSummary(records, usuarios)
 }
 
 export async function updateCandidateUserMesaLocal(candidateId, uid, data) {
