@@ -1405,8 +1405,19 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     const el = document.getElementById('cdd-pendientes')
     if (!el) return
     const esPropia = cuenta.responsibleUserId === user.uid
+    // Fase 3 (Ayuda Gs. -> Cajero de campo): se paga únicamente lo que ya
+    // pasó por la aprobación formal de Finanzas (assistanceStatus ==
+    // 'approved'), con el MONTO APROBADO (approvedAmount) — nunca el monto
+    // originalmente solicitado (montoAyuda), que puede diferir. 'approved'
+    // nunca es un valor derivado/implícito de resolveAssistanceStatus(),
+    // solo lo setea una decisión real de un admin (approveAssistanceRequest
+    // en firebaseCandidate.js), así que es seguro filtrar directo por él
+    // acá. No se tocó registrarEgresoCajero (cashierFunds.ts): su chequeo
+    // de duplicados (beneficiaryVoterId + type=='expense' &&
+    // status=='confirmed') sigue siendo la barrera real contra doble pago;
+    // este filtro solo decide qué se OFRECE pagar en la UI.
     const registros = (await getUserRecords(candidateId, cuenta.responsibleUserId).catch(() => []))
-      .filter(r => r.needsAssistance)
+      .filter(r => r.assistanceStatus === 'approved')
     if (registros.length === 0) { el.innerHTML = ''; return }
     const ciYaPagadas = new Set(
       cddMovimientos.filter(m => m.type === 'expense' && m.status === 'confirmed' && m.beneficiaryCI)
@@ -1419,9 +1430,9 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     const puedePagarEstaCuenta = esPropia ? puedeRegistrarEgresoCajero : puedeGestionarCuentaCajero
     el.innerHTML = `
       <div style="border:1px solid #eee; border-radius:8px; padding:14px; margin-bottom:16px;">
-        <h4 style="margin:0 0 10px; font-size:.9rem;">🧑‍🤝‍🧑 ${esPropia ? 'Votantes que marcaste' : `Votantes que marcó ${escapeHtml(cuenta.name)}`} "necesita ayuda" (${registros.length})</h4>
+        <h4 style="margin:0 0 10px; font-size:.9rem;">🧑‍🤝‍🧑 ${esPropia ? 'Votantes que marcaste' : `Votantes que marcó ${escapeHtml(cuenta.name)}`} con ayuda APROBADA (${registros.length})</h4>
         <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Votante</th><th>CI</th><th>Monto</th><th></th></tr></thead>
+          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Votante</th><th>CI</th><th>Monto aprobado</th><th></th></tr></thead>
           <tbody>
             ${registros.map(r => {
               const ciNorm = String(r.cedula || '').replace(/\D/g, '')
@@ -1429,11 +1440,11 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
               return `<tr style="border-bottom:1px solid #eee;">
                 <td style="padding:6px;">${escapeHtml(r.nombre || '')}</td>
                 <td>${escapeHtml(r.cedula || '')}</td>
-                <td>${money(r.montoAyuda || 0)}</td>
+                <td>${money(r.approvedAmount || 0)}</td>
                 <td>${yaPagado
                   ? '<span style="color:#2e7d32; font-weight:700;">✅ Pagado</span>'
                   : (puedePagarEstaCuenta && cuenta.status === 'active'
-                    ? `<button class="cdd-pend-btn-pagar" data-ci="${escapeHtml(r.cedula || '')}" data-nombre="${escapeHtml(r.nombre || '')}" data-monto="${Number(r.montoAyuda) || 0}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.75rem;">Pagar</button>`
+                    ? `<button class="cdd-pend-btn-pagar" data-ci="${escapeHtml(r.cedula || '')}" data-nombre="${escapeHtml(r.nombre || '')}" data-monto="${Number(r.approvedAmount) || 0}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.75rem;">Pagar</button>`
                     : '')
                 }</td>
               </tr>`
