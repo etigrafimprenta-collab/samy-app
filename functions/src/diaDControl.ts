@@ -58,6 +58,15 @@ const ELECTION_DAY_CONTROL_DEFAULTS = {
   critical: false,
 };
 
+// Día D: instancia siempre caliente para las 3 funciones de este archivo
+// — evita el cold-start (1-3s) en la primera tanda de clicks después de
+// cualquier período sin uso, esperable con 50-100 dirigentes/mesarios/
+// choferes concurrentes el día del evento. Tiene un costo fijo chico
+// mientras esté en 1 (instancia mínima corriendo 24/7) — RECORDATORIO:
+// bajar esto a 0 (o quitar la opción) después del Día D, no hace falta
+// dejarlo prendido el resto del año.
+const DIA_D_OPTS = { minInstances: 1 };
+
 function requireAuth(auth: Auth): string {
   if (!auth) {
     throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
@@ -216,6 +225,7 @@ async function sincronizarDiaDVotes(
 }
 
 export const setDiaDStatusFn = functions.https.onCall(
+  DIA_D_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
     const { candidateId, voterId, newStatus } = request.data ?? {};
     const callerUid = requireAuth(request.auth);
@@ -260,6 +270,7 @@ export const setDiaDStatusFn = functions.https.onCall(
 );
 
 export const setDiaDFlagsFn = functions.https.onCall(
+  DIA_D_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
     const { candidateId, voterId, flags } = request.data ?? {};
     const callerUid = requireAuth(request.auth);
@@ -283,6 +294,7 @@ export const setDiaDFlagsFn = functions.https.onCall(
 );
 
 export const reportarIncidenciaDiaDFn = functions.https.onCall(
+  DIA_D_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
     const { candidateId, voterId, type, description } = request.data ?? {};
     const callerUid = requireAuth(request.auth);
