@@ -676,6 +676,7 @@ async function renderAdminView(container, candidateId, user) {
                   <div style="display:flex; gap:4px; flex-wrap:wrap;">
                     <button class="dd-op-votar" data-id="${r.id}" style="background:#2e7d32; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">✅ Votó</button>
                     <button class="dd-op-noira" data-id="${r.id}" style="background:#999; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">🚫 No irá</button>
+                    ${c?.status === 'voted' ? `<button class="dd-op-revertir" data-id="${r.id}" style="background:#f97316; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">↩️ Revertir</button>` : ''}
                     <button class="dd-op-chofer" data-id="${r.id}" style="background:#c41e3a; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">🚗 Chofer</button>
                     <button class="dd-op-dirigente" data-id="${r.id}" style="background:#9c27b0; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">👤 Dirigente</button>
                     <button class="dd-op-mesario" data-id="${r.id}" style="background:#2196f3; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:.7rem;">🪑 Mesario</button>
@@ -705,6 +706,14 @@ async function renderAdminView(container, candidateId, user) {
       if (!confirm(`¿Marcar a ${r.nombre} como NO IRÁ?`)) return
       try {
         await setDiaDStatus(candidateId, r, 'will_not_vote', user.uid, 'campaign_admin')
+        await cargarDatos(); render()
+      } catch (err) { alert('Error: ' + err.message) }
+    }))
+    box.querySelectorAll('.dd-op-revertir').forEach(btn => btn.addEventListener('click', async () => {
+      const r = records.find(x => x.id === btn.dataset.id)
+      if (!confirm(`¿Revertir el voto de ${r.nombre}? Vuelve a Pendiente.`)) return
+      try {
+        await setDiaDStatus(candidateId, r, 'pending', user.uid, 'campaign_admin')
         await cargarDatos(); render()
       } catch (err) { alert('Error: ' + err.message) }
     }))
