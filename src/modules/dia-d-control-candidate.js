@@ -77,6 +77,15 @@ const STATUS_LABELS = {
   resolved: '✔️ Resuelto'
 }
 
+// Mismo criterio de normalización que ya usa el resto de la app para
+// búsquedas tolerantes a tildes (ver firebaseCandidate.js/superadmin.js)
+// — no hay un helper exportado para esto, se repite la misma técnica
+// mínima acá para no crear una dependencia nueva por una función de 2
+// líneas.
+function normalizarBusqueda(s) {
+  return String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+}
+
 function normalizarTelefono(tel) {
   if (!tel) return ''
   const digits = String(tel).replace(/\D/g, '')
@@ -271,7 +280,10 @@ async function renderDirigenteView(container, candidateId, user) {
   container.innerHTML = headerHtml('Vista dirigente') + '<div id="dd-body" style="color:#999;">Cargando...</div>'
   iniciarReloj('__diaDControlDirigenteInterval')
 
-  async function cargarYPintar() {
+  let records = []
+  let controlByVoterId = {}
+
+  async function cargarDatos() {
     // Une los propios (uid == self, lo de siempre) con los que un admin
     // le reasignó desde Día D Control vía assignedLeaderId — sin esto un
     // dirigente reasignado a un votante que no capturó él mismo no lo vería.
@@ -279,27 +291,56 @@ async function renderDirigenteView(container, candidateId, user) {
       getUserRecords(candidateId, user.uid),
       getElectionDayControlByLeader(candidateId, user.uid)
     ])
-    const controlByVoterId = {}
+    controlByVoterId = {}
     controls.forEach(c => { controlByVoterId[c.voterId] = c })
 
     const idsPropios = new Set(propios.map(r => r.id))
     const idsReasignados = controls.map(c => c.voterId).filter(id => !idsPropios.has(id))
     const reasignados = idsReasignados.length > 0 ? await getRecordsByIds(candidateId, idsReasignados) : []
-    const records = [...propios, ...reasignados]
+    records = [...propios, ...reasignados]
+  }
 
-    const body = document.getElementById('dd-body')
-    body.innerHTML = `
-      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
-        <strong>👤 Mis votantes comprometidos</strong> — ${records.length} total, ${records.filter(r => controlByVoterId[r.id]?.status === 'voted').length} ya votaron
-      </div>
-      <div id="dd-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px;"></div>
-    `
+  // Filtro puro sobre los "comprometidos" ya cargados (NUNCA una consulta
+  // nueva ni otra fuente de datos) — por cédula (parcial o completa) o por
+  // nombre/apellido, tolerante a mayúsculas/minúsculas y tildes vía
+  // normalizarBusqueda(). Mismo criterio de búsqueda que "Mis Registros"
+  // (campaign.js), solo que acotado a esta vista.
+  function filtrarComprometidos(termino) {
+    const t = normalizarBusqueda(termino).trim()
+    if (!t) return records
+    return records.filter(r =>
+      String(r.cedula || '').includes(t) ||
+      normalizarBusqueda(r.nombre).includes(t)
+    )
+  }
+
+  // El shell (encabezado + buscador) se pinta UNA sola vez — solo la
+  // grilla de abajo (#dd-grid) y el contador se vuelven a pintar en cada
+  // tecla/refresh, así el <input> nunca se destruye y nunca pierde el
+  // foco ni la posición del cursor mientras se escribe.
+  function pintarGrid(filtro) {
+    const filtrados = filtrarComprometidos(filtro)
+    const contador = document.getElementById('dd-contador-comprometidos')
+    if (contador) {
+      contador.textContent = filtro.trim()
+        ? `${filtrados.length} encontrados de ${records.length} comprometidos`
+        : `${records.length} comprometidos`
+    }
+    const yaVotaronEl = document.getElementById('dd-ya-votaron')
+    if (yaVotaronEl) {
+      yaVotaronEl.textContent = records.filter(r => controlByVoterId[r.id]?.status === 'voted').length
+    }
+
     const grid = document.getElementById('dd-grid')
     if (records.length === 0) {
       grid.innerHTML = '<div style="color:#999; padding:20px;">Todavía no guardaste ningún votante.</div>'
       return
     }
-    grid.innerHTML = records.map(r => tarjetaAccionRapida({
+    if (filtrados.length === 0) {
+      grid.innerHTML = '<div style="color:#999; padding:20px;">No se encontraron votantes comprometidos con esa búsqueda.</div>'
+      return
+    }
+    grid.innerHTML = filtrados.map(r => tarjetaAccionRapida({
       record: r, control: controlByVoterId[r.id],
       botones: [
         { label: '📞 Contactado', status: 'contacted' },
@@ -314,13 +355,34 @@ async function renderDirigenteView(container, candidateId, user) {
     })).join('')
 
     wireAccionRapida(grid, {
-      candidateId, user, role: 'dirigente', records, controlByVoterId,
+      candidateId, user, role: 'dirigente', records: filtrados, controlByVoterId,
       incidentTypes: ['No encontró transporte', 'Documento perdido', 'Está esperando', 'Otro'],
-      onRefresh: cargarYPintar
+      onRefresh: async () => {
+        await cargarDatos()
+        pintarGrid(document.getElementById('dd-buscar-comprometidos')?.value || '')
+      }
     })
   }
 
-  await cargarYPintar()
+  function pintarShell() {
+    const body = document.getElementById('dd-body')
+    const totalVotaron = records.filter(r => controlByVoterId[r.id]?.status === 'voted').length
+    body.innerHTML = `
+      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
+        <strong>👤 Mis votantes comprometidos</strong> — ${records.length} total, <span id="dd-ya-votaron">${totalVotaron}</span> ya votaron
+        <p style="font-size:.8rem; color:#856404; background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; margin:10px 0 0;">💡 Si buscás por nombre, utilizá el primer apellido.</p>
+        <div class="filter-input-wrap" style="margin-top:8px;"><input id="dd-buscar-comprometidos" class="filter-input" placeholder="🔍 Buscar por cédula o nombre..."></div>
+        <div id="dd-contador-comprometidos" style="font-size:.78rem; color:#666; margin-top:6px;">${records.length} comprometidos</div>
+      </div>
+      <div id="dd-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px;"></div>
+    `
+    document.getElementById('dd-buscar-comprometidos')
+      .addEventListener('input', debounce((e) => pintarGrid(e.target.value), 250))
+    pintarGrid('')
+  }
+
+  await cargarDatos()
+  pintarShell()
 }
 
 // ══════════════════════════════════════════════════════════════════════
