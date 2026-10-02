@@ -19,7 +19,7 @@
  * Día D Control = operación electoral EN VIVO. No confundir con el Centro
  * de Contacto (src/pages/contactCenter.js), que es llamadas PREVIAS.
  */
-import { debounce } from '../lib/debounce.js'
+import { debounce, throttle } from '../lib/debounce.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import {
   getCandidate,
@@ -1081,22 +1081,26 @@ async function renderAdminView(container, candidateId, user) {
   const settings = await getDiaDControlSettings(candidateId)
   reiniciarTimerAutomatico(settings)
 
-  listenAllRecords(candidateId, debounce(async () => {
+  // RENDIMIENTO (auditoría 2026-10-02, 50-100 usuarios concurrentes el
+  // Día D): estos 2 listeners reaccionan a CUALQUIER cambio en TODA la
+  // colección (miles de savedRecords/electionDayControl), y cada reacción
+  // dispara cargarDatos() completo (6 queries "getAll") + un re-render de
+  // toda la tabla. Con 800ms de debounce, el timer se reinicia en cada
+  // escritura nueva — con escritura CONTINUA (esperable con 50-100
+  // dirigentes/mesarios/choferes a la vez) el debounce corto recarga todo
+  // cada pocos segundos (sobrecarga real, encontrada en vivo: errores de
+  // conexión del canal 'Listen' de Firestore + UI lenta), mientras que un
+  // debounce LARGO directamente podría no disparar nunca mientras la
+  // actividad no pare. throttle() (ver src/lib/debounce.js) resuelve las
+  // dos cosas: garantiza como máximo una recarga completa cada 10s, sin
+  // importar cuánta actividad concurrente haya.
+  listenAllRecords(candidateId, throttle(async () => {
     await cargarDatos()
     render()
-  }, 800))
+  }, 10000))
 
-  // Mismo criterio que el listener de arriba, pero sobre electionDayControl
-  // — antes solo savedRecords tenía suscripción en vivo, así que un cambio
-  // de ESTADO (en camino, recogido, etc.) que un chofer/dirigente/mesario
-  // marca desde su propia vista (que escribe directo en electionDayControl,
-  // no en savedRecords) no le llegaba al admin hasta que el timer lento de
-  // arriba corriera (cada `intervaloAlertasMinutos`) o recargara la página
-  // a mano — encontrado probando en vivo. Debounce igual a 800ms para no
-  // relanzar cargarDatos()+render() en cada doc individual si varios
-  // choferes actualizan casi al mismo tiempo.
-  listenAllElectionDayControl(candidateId, debounce(async () => {
+  listenAllElectionDayControl(candidateId, throttle(async () => {
     await cargarDatos()
     render()
-  }, 800))
+  }, 10000))
 }
