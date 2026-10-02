@@ -22,6 +22,16 @@
 // (hasAuthoritativeLinkToVoter / electionDayControl allow create/update)
 // pero evaluada acá, en el servidor — nunca otorga más de lo que las
 // reglas ya permiten.
+//
+// RENDIMIENTO (auditoría 2026-10-02, 50-100 usuarios concurrentes
+// esperados el Día D): la primera versión de este archivo leía
+// savedRecords/electionDayControl más de una vez por invocación (una vez
+// para autorizar, otra para construir el `base` del lazy-create, otra
+// para sincronizar diaD/votes) — hasta 4 round-trips secuenciales para
+// 2 documentos únicos. `resolverContexto()` ahora hace UNA sola tanda de
+// lecturas en paralelo (Promise.all) al principio de cada función, y
+// todo lo que sigue reusa esos mismos snapshots — nunca vuelve a pedir
+// el mismo documento.
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -55,19 +65,18 @@ function requireAuth(auth: Auth): string {
   return auth.uid;
 }
 
-async function callerRoles(candidateId: string, uid: string) {
-  const memberSnap = await candidateRef(candidateId).collection("users").doc(uid).get();
-  const memberData = memberSnap.data();
-  const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
-  const roles = new Set<string>([memberData?.role, ...roleIds].filter(Boolean));
-  return { roles, memberExists: memberSnap.exists, nombre: memberData?.nombre };
+function rolParaRegistro(roles: Set<string>): string {
+  for (const r of ["dirigente", "mesario", "chofer", "operador", "campaign_admin", "coordinator", "superadmin"]) {
+    if (roles.has(r)) return r;
+  }
+  return "desconocido";
 }
 
-async function isSuperAdmin(uid: string): Promise<boolean> {
-  const snap = await db().collection("platformUsers").doc(uid).get();
-  return snap.data()?.globalRole === "superadmin";
-}
-
+// isDriverOwner()/isVoterAssignedToDriver() (chofer) y isOperatorOfVoter()
+// (operador) quedan como reads EXTRA solo cuando el caller tiene ese rol
+// — no son parte de la tanda principal porque dirigente (el camino con
+// más volumen de lejos) nunca los necesita, y agregarlos siempre sería
+// pagar lecturas de más para el caso común.
 async function isDriverOwner(candidateId: string, driverId: string | null, uid: string): Promise<boolean> {
   if (!driverId) return false;
   const snap = await candidateRef(candidateId).collection("drivers").doc(driverId).get();
@@ -79,69 +88,80 @@ async function isOperatorOfVoter(candidateId: string, voterId: string, uid: stri
   return snap.exists && snap.data()?.assignedUserId === uid;
 }
 
-// Mismo criterio que hasAuthoritativeLinkToVoter() en firestore.rules —
-// cubre tanto "ya tiene electionDayControl asignado" como "todavía no
-// existe el doc, pero el votante es genuinamente suyo" (dirigente).
-async function tieneVinculoConVotante(
-  candidateId: string,
-  voterId: string,
-  callerUid: string,
-  roles: Set<string>
-): Promise<boolean> {
-  if (roles.has("dirigente")) {
-    const [controlSnap, recordSnap] = await Promise.all([
-      candidateRef(candidateId).collection("electionDayControl").doc(voterId).get(),
-      candidateRef(candidateId).collection("savedRecords").doc(voterId).get(),
-    ]);
-    if (controlSnap.exists && controlSnap.data()?.assignedLeaderId === callerUid) return true;
-    if (recordSnap.exists && recordSnap.data()?.uid === callerUid) return true;
-  }
-  if (roles.has("mesario")) {
-    const controlSnap = await candidateRef(candidateId).collection("electionDayControl").doc(voterId).get();
-    if (controlSnap.exists && controlSnap.data()?.assignedTableUserId === callerUid) return true;
-  }
-  if (roles.has("chofer")) {
-    const [recordSnap, zoneSnap] = await Promise.all([
-      candidateRef(candidateId).collection("savedRecords").doc(voterId).get(),
-      candidateRef(candidateId).collection("driverZoneVoters").doc(voterId).get(),
-    ]);
-    if (recordSnap.exists && (await isDriverOwner(candidateId, recordSnap.data()?.chofer_asignado ?? null, callerUid))) return true;
-    if (zoneSnap.exists && (await isDriverOwner(candidateId, zoneSnap.data()?.driverId ?? null, callerUid))) return true;
-  }
-  if (roles.has("operador")) {
-    if (await isOperatorOfVoter(candidateId, voterId, callerUid)) return true;
-  }
-  return false;
+interface Contexto {
+  roles: Set<string>;
+  record: FirebaseFirestore.DocumentData | undefined;
+  recordExists: boolean;
+  control: FirebaseFirestore.DocumentData | undefined;
+  controlExists: boolean;
+  controlRef: FirebaseFirestore.DocumentReference;
+  recordRef: FirebaseFirestore.DocumentReference;
 }
 
-async function requireVinculoConVotante(candidateId: string, voterId: string, callerUid: string) {
-  if (await isSuperAdmin(callerUid)) {
-    return { roles: new Set<string>(["superadmin"]) };
+// UNA sola tanda de lecturas (en paralelo) + autorización, reusada por
+// las 3 funciones de abajo. Mismo criterio de autorización que
+// hasAuthoritativeLinkToVoter()/electionDayControl allow create/update
+// en firestore.rules.
+async function resolverContexto(candidateId: string, voterId: string, callerUid: string): Promise<Contexto> {
+  const recordRef = candidateRef(candidateId).collection("savedRecords").doc(voterId);
+  const controlRef = candidateRef(candidateId).collection("electionDayControl").doc(voterId);
+
+  const [platformSnap, memberSnap, recordSnap, controlSnap] = await Promise.all([
+    db().collection("platformUsers").doc(callerUid).get(),
+    candidateRef(candidateId).collection("users").doc(callerUid).get(),
+    recordRef.get(),
+    controlRef.get(),
+  ]);
+
+  const isSuperAdmin = platformSnap.data()?.globalRole === "superadmin";
+  const memberData = memberSnap.data();
+  const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
+  const roles = new Set<string>(isSuperAdmin ? ["superadmin"] : [memberData?.role, ...roleIds].filter(Boolean));
+
+  const ctx: Contexto = {
+    roles,
+    record: recordSnap.data(),
+    recordExists: recordSnap.exists,
+    control: controlSnap.data(),
+    controlExists: controlSnap.exists,
+    controlRef,
+    recordRef,
+  };
+
+  if (isSuperAdmin || roles.has("campaign_admin") || roles.has("coordinator")) {
+    return ctx;
   }
-  const { roles, memberExists } = await callerRoles(candidateId, callerUid);
-  if (!memberExists) {
+  if (!isSuperAdmin && !memberSnap.exists) {
     throw new functions.https.HttpsError("permission-denied", "No pertenecés a este candidato");
   }
-  if (roles.has("campaign_admin") || roles.has("coordinator")) {
-    return { roles };
+
+  let autorizado = false;
+  if (roles.has("dirigente")) {
+    if (ctx.controlExists && ctx.control?.assignedLeaderId === callerUid) autorizado = true;
+    else if (ctx.recordExists && ctx.record?.uid === callerUid) autorizado = true;
   }
-  if (await tieneVinculoConVotante(candidateId, voterId, callerUid, roles)) {
-    return { roles };
+  if (!autorizado && roles.has("mesario")) {
+    if (ctx.controlExists && ctx.control?.assignedTableUserId === callerUid) autorizado = true;
   }
-  throw new functions.https.HttpsError("permission-denied", "No tenés permiso para actualizar este votante");
+  if (!autorizado && roles.has("chofer")) {
+    const [zoneSnap] = await Promise.all([
+      candidateRef(candidateId).collection("driverZoneVoters").doc(voterId).get(),
+    ]);
+    if (ctx.recordExists && (await isDriverOwner(candidateId, ctx.record?.chofer_asignado ?? null, callerUid))) autorizado = true;
+    else if (zoneSnap.exists && (await isDriverOwner(candidateId, zoneSnap.data()?.driverId ?? null, callerUid))) autorizado = true;
+  }
+  if (!autorizado && roles.has("operador")) {
+    if (await isOperatorOfVoter(candidateId, voterId, callerUid)) autorizado = true;
+  }
+  if (!autorizado) {
+    throw new functions.https.HttpsError("permission-denied", "No tenés permiso para actualizar este votante");
+  }
+  return ctx;
 }
 
-function rolParaRegistro(roles: Set<string>): string {
-  for (const r of ["dirigente", "mesario", "chofer", "operador", "campaign_admin", "coordinator", "superadmin"]) {
-    if (roles.has(r)) return r;
-  }
-  return "desconocido";
-}
-
-async function baseElectionDayControl(candidateId: string, voterId: string, existing: boolean) {
-  if (existing) return {};
-  const recordSnap = await candidateRef(candidateId).collection("savedRecords").doc(voterId).get();
-  const record = recordSnap.data() ?? {};
+function baseElectionDayControl(candidateId: string, voterId: string, ctx: Contexto) {
+  if (ctx.controlExists) return {};
+  const record = ctx.record ?? {};
   return {
     candidateId,
     voterId,
@@ -158,17 +178,17 @@ async function baseElectionDayControl(candidateId: string, voterId: string, exis
   };
 }
 
-// Espejo de marcarVoto()/desmarcarVoto() (firebaseCandidate.js) — solo se
-// toca si Día D está habilitado y el votante tiene seccional+mesa.
+// Espejo de marcarVoto()/desmarcarVoto() (firebaseCandidate.js) — reusa
+// el `record` ya leído por resolverContexto(), nunca vuelve a pedirlo.
+// Solo se toca si Día D está habilitado y el votante tiene seccional+mesa.
 async function sincronizarDiaDVotes(
   candidateId: string,
-  voterId: string,
+  ctx: Contexto,
   newStatus: string,
   previousStatus: string | null,
   callerUid: string
 ) {
-  const recordSnap = await candidateRef(candidateId).collection("savedRecords").doc(voterId).get();
-  const record = recordSnap.data();
+  const record = ctx.record;
   if (!record?.seccional || !record?.mesa) return;
 
   const docId = `${record.seccional}_${record.mesa}_${record.cedula}`;
@@ -179,7 +199,7 @@ async function sincronizarDiaDVotes(
     if (!configSnap.exists || configSnap.data()?.enabled !== true) return;
     await votesRef.set({
       voterId: record.voterId ?? null,
-      savedRecordId: voterId,
+      savedRecordId: ctx.recordRef.id,
       cedula: record.cedula,
       seccional: record.seccional,
       mesa: String(record.mesa),
@@ -203,35 +223,37 @@ export const setDiaDStatusFn = functions.https.onCall(
       throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/voterId/newStatus");
     }
 
-    const { roles } = await requireVinculoConVotante(candidateId, voterId, callerUid);
+    const ctx = await resolverContexto(candidateId, voterId, callerUid);
+    const previousStatus = ctx.controlExists ? ctx.control?.status ?? null : null;
+    const base = baseElectionDayControl(candidateId, voterId, ctx);
 
-    const controlRef = candidateRef(candidateId).collection("electionDayControl").doc(voterId);
-    const controlSnap = await controlRef.get();
-    const previousStatus = controlSnap.exists ? controlSnap.data()?.status ?? null : null;
-    const base = await baseElectionDayControl(candidateId, voterId, controlSnap.exists);
-
-    await controlRef.set({
-      ...base,
-      status: newStatus,
-      lastMovementAt: FieldValue.serverTimestamp(),
-      lastUpdatedBy: callerUid,
-      lastUpdatedRole: rolParaRegistro(roles),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-
-    await candidateRef(candidateId).collection("electionDayMovements").add({
-      candidateId,
-      voterId,
-      previousStatus,
-      newStatus,
-      updatedBy: callerUid,
-      role: rolParaRegistro(roles),
-      note: "",
-      location: null,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-
-    await sincronizarDiaDVotes(candidateId, voterId, newStatus, previousStatus, callerUid);
+    // Las 2 escrituras de acá no dependen una de la otra (ambas solo
+    // dependen de lo ya leído en ctx/previousStatus) — van en paralelo.
+    // sincronizarDiaDVotes SÍ puede tocar el mismo doc de diaD/votes que
+    // otra escritura futura, pero nunca el mismo doc que estas dos, así
+    // que también entra en la misma tanda.
+    await Promise.all([
+      ctx.controlRef.set({
+        ...base,
+        status: newStatus,
+        lastMovementAt: FieldValue.serverTimestamp(),
+        lastUpdatedBy: callerUid,
+        lastUpdatedRole: rolParaRegistro(ctx.roles),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }),
+      candidateRef(candidateId).collection("electionDayMovements").add({
+        candidateId,
+        voterId,
+        previousStatus,
+        newStatus,
+        updatedBy: callerUid,
+        role: rolParaRegistro(ctx.roles),
+        note: "",
+        location: null,
+        createdAt: FieldValue.serverTimestamp(),
+      }),
+      sincronizarDiaDVotes(candidateId, ctx, newStatus, previousStatus, callerUid),
+    ]);
 
     return { ok: true };
   }
@@ -245,17 +267,14 @@ export const setDiaDFlagsFn = functions.https.onCall(
       throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/voterId/flags");
     }
 
-    const { roles } = await requireVinculoConVotante(candidateId, voterId, callerUid);
+    const ctx = await resolverContexto(candidateId, voterId, callerUid);
+    const base = baseElectionDayControl(candidateId, voterId, ctx);
 
-    const controlRef = candidateRef(candidateId).collection("electionDayControl").doc(voterId);
-    const controlSnap = await controlRef.get();
-    const base = await baseElectionDayControl(candidateId, voterId, controlSnap.exists);
-
-    await controlRef.set({
+    await ctx.controlRef.set({
       ...base,
       ...flags,
       lastUpdatedBy: callerUid,
-      lastUpdatedRole: rolParaRegistro(roles),
+      lastUpdatedRole: rolParaRegistro(ctx.roles),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
@@ -271,34 +290,32 @@ export const reportarIncidenciaDiaDFn = functions.https.onCall(
       throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/voterId/type");
     }
 
-    const { roles } = await requireVinculoConVotante(candidateId, voterId, callerUid);
+    const ctx = await resolverContexto(candidateId, voterId, callerUid);
+    const base = baseElectionDayControl(candidateId, voterId, ctx);
+    const assignedUid = ctx.controlExists ? ctx.control?.assignedLeaderId : null;
 
-    const controlRef = candidateRef(candidateId).collection("electionDayControl").doc(voterId);
-    const controlSnap = await controlRef.get();
-    const assignedUid = controlSnap.exists ? controlSnap.data()?.assignedLeaderId : null;
-    const recordSnap = await candidateRef(candidateId).collection("savedRecords").doc(voterId).get();
-    const base = await baseElectionDayControl(candidateId, voterId, controlSnap.exists);
-
-    await candidateRef(candidateId).collection("incidents").add({
-      candidateId,
-      voterId,
-      assignedUserId: assignedUid || recordSnap.data()?.uid || null,
-      reportedBy: callerUid,
-      type,
-      description: description || "",
-      status: "open",
-      createdAt: FieldValue.serverTimestamp(),
-      resolvedAt: null,
-      resolvedBy: null,
-    });
-
-    await controlRef.set({
-      ...base,
-      incidentOpen: true,
-      lastUpdatedBy: callerUid,
-      lastUpdatedRole: rolParaRegistro(roles),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    // Independientes entre sí — en paralelo.
+    await Promise.all([
+      candidateRef(candidateId).collection("incidents").add({
+        candidateId,
+        voterId,
+        assignedUserId: assignedUid || ctx.record?.uid || null,
+        reportedBy: callerUid,
+        type,
+        description: description || "",
+        status: "open",
+        createdAt: FieldValue.serverTimestamp(),
+        resolvedAt: null,
+        resolvedBy: null,
+      }),
+      ctx.controlRef.set({
+        ...base,
+        incidentOpen: true,
+        lastUpdatedBy: callerUid,
+        lastUpdatedRole: rolParaRegistro(ctx.roles),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }),
+    ]);
 
     return { ok: true };
   }
