@@ -379,6 +379,9 @@ async function renderAdminView(container, candidateId, user) {
   let controlByVoterId = {}
   let estadoByVoterId = {}
   let filtroCard = null
+  // Para el gate por fecha de computarYGuardarAlertas — se pide una sola
+  // vez, electionDate no cambia durante la sesión.
+  const candidate = await getCandidate(candidateId)
 
   async function cargarDatos() {
     const [regs, eq, chof, ctrl, incs, ests] = await Promise.all([
@@ -793,7 +796,21 @@ async function renderAdminView(container, candidateId, user) {
   }
 
   // ── Alertas ────────────────────────────────────────────────────────
+  // Interruptor manual (settings.alertasHabilitadas) + gate automático por
+  // fecha (no corre antes de candidate.electionDate) + deduplicación
+  // contra las alertas ya abiertas — antes esto se re-creaba entero cada
+  // intervaloAlertasMinutos sin chequear nada, así que un padrón recién
+  // cargado (cientos de "pendientes" por dirigente, normal fuera de Día D)
+  // generaba cientos de alertas duplicadas en loop (ver auditoría
+  // 2026-10-01). No cambia qué condiciones generan alerta, solo cuándo y
+  // cuántas veces.
   async function computarYGuardarAlertas(settings) {
+    if (settings.alertasHabilitadas === false) return 0
+    if (candidate?.electionDate && new Date() < new Date(candidate.electionDate + 'T00:00:00')) return 0
+
+    const abiertas = await getOpenDiaDAlerts(candidateId)
+    const yaAbierta = new Set(abiertas.map(a => `${a.type}|${a.assignedUserId || ''}|${a.voterId || ''}`))
+
     const nuevasAlertas = []
     const porDirigente = {}
     records.forEach(r => {
@@ -820,10 +837,11 @@ async function renderAdminView(container, candidateId, user) {
       }
     })
 
-    for (const a of nuevasAlertas) {
+    const aCrear = nuevasAlertas.filter(a => !yaAbierta.has(`${a.type}|${a.assignedUserId || ''}|${a.voterId || ''}`))
+    for (const a of aCrear) {
       await createDiaDAlert(candidateId, a)
     }
-    return nuevasAlertas.length
+    return aCrear.length
   }
 
   async function renderAlertas() {
@@ -936,6 +954,10 @@ async function renderAdminView(container, candidateId, user) {
           <input id="cfg-umbral-inc" type="number" min="1" value="${settings.umbralIncidenciaMinutos}" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; margin-top:2px;"></label>
         <label style="font-size:.8rem;">Umbral sin movimiento (minutos)
           <input id="cfg-umbral-mov" type="number" min="1" value="${settings.umbralSinMovimientoMinutos}" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; margin-top:2px;"></label>
+        <label style="font-size:.8rem; display:flex; align-items:center; gap:8px; margin-top:4px;">
+          <input id="cfg-alertas-habilitadas" type="checkbox" ${settings.alertasHabilitadas !== false ? 'checked' : ''} style="width:auto;">
+          Alertas activas (además, nunca corren antes del Día D)
+        </label>
       </div>
       <div style="display:flex; gap:8px; margin-top:16px;">
         <button id="btn-guardar-cfg" style="flex:1; background:#455a64; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
@@ -950,7 +972,8 @@ async function renderAdminView(container, candidateId, user) {
         horaFinControl: modal.querySelector('#cfg-hora-fin').value,
         umbralPendientesPorDirigente: Number(modal.querySelector('#cfg-umbral-pend').value) || 10,
         umbralIncidenciaMinutos: Number(modal.querySelector('#cfg-umbral-inc').value) || 30,
-        umbralSinMovimientoMinutos: Number(modal.querySelector('#cfg-umbral-mov').value) || 45
+        umbralSinMovimientoMinutos: Number(modal.querySelector('#cfg-umbral-mov').value) || 45,
+        alertasHabilitadas: modal.querySelector('#cfg-alertas-habilitadas').checked
       }
       try {
         await updateDiaDControlSettings(candidateId, nuevos)

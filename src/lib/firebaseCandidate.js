@@ -2347,7 +2347,15 @@ const DIA_D_CONTROL_SETTINGS_DEFAULTS = {
   horaFinControl: '18:00',
   umbralPendientesPorDirigente: 10,
   umbralIncidenciaMinutos: 30,
-  umbralSinMovimientoMinutos: 45
+  umbralSinMovimientoMinutos: 45,
+  // Interruptor manual del motor de alertas — además del gate automático
+  // por fecha (ver computarYGuardarAlertas en dia-d-control-candidate.js,
+  // que no corre antes de candidate.electionDate): con esto en false no
+  // corre ni siquiera en el Día D. Pedido explícito del usuario para no
+  // recalcular/crear alertas en loop mientras el padrón recién cargado
+  // todavía no tiene sentido evaluar (ver auditoría de alertas duplicadas,
+  // 2026-10-01).
+  alertasHabilitadas: true
 }
 
 export async function getDiaDControlSettings(candidateId) {
