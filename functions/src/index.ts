@@ -1128,7 +1128,27 @@ export const aceptarInvitacion = functions.https.onCall(
 // hardcodeado a una localidad puntual, así que esto corrige el aislamiento
 // para TODOS los candidatos, no solo Asunción. Verificado en sigev-staging
 // contra 2 localidades de prueba distintas antes de este deploy.
+// FIX DE MEMORIA (auditoría 2026-10-02, error "internal" real en prod):
+// sin esto, la función corre con la memoria default de Cloud Functions v2
+// (256MiB) y para localidades grandes revienta por OOM al armar en memoria
+// el snapshot completo de la consulta — confirmado con el log real de
+// producción: "Memory limit of 256 MiB exceeded with 256 MiB used". Asunción
+// es la localidad más grande del padrón (451.197 de 567.213 votantes, ~80%
+// del total), así que es la que lo manifiesta; no es un problema de reglas,
+// índices, auth, App Check ni de nombres de campo (el query ya corría bien
+// hasta leer los docs). 1GiB da margen de sobra para esa escala sin tocar
+// minInstances (no es una función de uso concurrente sostenido como las de
+// Día D — se llama una vez por apertura de modal y el cliente la cachea).
+// concurrency:1 es necesario además de memory — el default de Cloud
+// Functions v2 con availableCpu>=1 es concurrency:80 (hasta 80 llamadas
+// simultáneas COMPARTIENDO la misma instancia/memoria). Esta función ya usa
+// casi todo 1GiB en una sola ejecución (~450k docs), así que sin esto dos
+// personas abriendo el modal al mismo tiempo podrían caer en la misma
+// instancia y volver a producir el mismo OOM que esto corrige.
+const OBTENER_LOCALES_OPTS = { memory: "1GiB" as const, timeoutSeconds: 120, concurrency: 1 };
+
 export const obtenerLocalesMesasPadron = functions.https.onCall(
+  OBTENER_LOCALES_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
     const { candidateId } = request.data ?? {};
     if (!candidateId) {
