@@ -162,7 +162,9 @@ function wireAccionRapida(box, { candidateId, user, role, records, controlByVote
         }
         await onRefresh()
       } catch (err) {
-        alert('Error: ' + err.message)
+        // DIAGNÓSTICO TEMPORAL (2026-10-02) — revertir apenas se encuentre
+        // la causa real del permission-denied reportado por Ester Peralta.
+        alert('Error: ' + err.message + '\n\n[DEBUG] code=' + err.code + ' candidateId=' + candidateId + ' authUid=' + user.uid + ' role=' + role + ' recordId=' + record?.id + ' recordUid=' + record?.uid + ' status=' + btn.dataset.status + ' flag=' + btn.dataset.flag)
       } finally {
         btn.disabled = false
       }
