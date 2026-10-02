@@ -2114,8 +2114,19 @@ export async function setDiaDStatus(candidateId, record, newStatus, actorUid, ac
     ? {}
     : {
         candidateId, voterId,
-        assignedLeaderId: record.uid || null,
+        // BUG REAL (encontrado en auditoría 2026-10-02, probando con un
+        // dirigente real): ...ELECTION_DAY_CONTROL_DEFAULTS tiene que ir
+        // ANTES de los campos explícitos de abajo — ese objeto también
+        // trae assignedLeaderId:null, así que si el spread va después
+        // (como estaba antes) PISA el uid recién calculado y lo deja en
+        // null. El cliente terminaba mandando assignedLeaderId:null al
+        // crear el doc, y firestore.rules lo rechazaba (exige que
+        // coincida con request.auth.uid) — esto rompía el primer click de
+        // CUALQUIER dirigente sobre CUALQUIER votante nunca tocado antes,
+        // sin ningún mensaje que lo delatara (el error genérico
+        // "Missing or insufficient permissions" no decía por qué).
         ...ELECTION_DAY_CONTROL_DEFAULTS,
+        assignedLeaderId: record.uid || null,
         // Si el registro ya tenía chofer_asignado (por ejemplo, asignado
         // desde la pestaña Choferes en vez de Día D Control), hay que
         // heredarlo acá — si no, firestore.rules rechaza este create para
@@ -2166,8 +2177,10 @@ export async function setDiaDFlags(candidateId, record, flags, actorUid, actorRo
     ? {}
     : {
         candidateId, voterId,
-        assignedLeaderId: record.uid || null,
+        // Mismo orden que el fix de setDiaDStatus (ver su comentario) —
+        // ...ELECTION_DAY_CONTROL_DEFAULTS tiene que ir PRIMERO.
         ...ELECTION_DAY_CONTROL_DEFAULTS,
+        assignedLeaderId: record.uid || null,
         assignedDriverId: record.chofer_asignado || null,
         pollingPlace: record.local || '',
         tableNumber: record.mesa || '',
@@ -2182,6 +2195,28 @@ export async function setDiaDFlags(candidateId, record, flags, actorUid, actorRo
   }, { merge: true })
 }
 
+// ── Camino alternativo vía Cloud Function (dirigente/mesario/chofer) ──
+// Mismo resultado que setDiaDStatus/setDiaDFlags/createIncident+
+// setDiaDFlags, pero por HTTPS Callable en vez de escritura directa de
+// Firestore (WebChannel) — ver cabecera de functions/src/diaDControl.ts
+// para el contexto completo. Usado SOLO por las vistas operativas
+// (dirigente/chofer, vía wireAccionRapida); la vista de administrador
+// sigue usando setDiaDStatus/setDiaDFlags directo, sin cambios.
+export async function setDiaDStatusViaFn(candidateId, record, newStatus) {
+  const fn = httpsCallable(functionsInstance, 'setDiaDStatusFn')
+  await fn({ candidateId, voterId: record.id, newStatus })
+}
+
+export async function setDiaDFlagsViaFn(candidateId, record, flags) {
+  const fn = httpsCallable(functionsInstance, 'setDiaDFlagsFn')
+  await fn({ candidateId, voterId: record.id, flags })
+}
+
+export async function reportarIncidenciaDiaDViaFn(candidateId, record, type, description) {
+  const fn = httpsCallable(functionsInstance, 'reportarIncidenciaDiaDFn')
+  await fn({ candidateId, voterId: record.id, type, description })
+}
+
 // Reasignación — exclusiva de campaign_admin/coordinator (ver firestore.
 // rules). Mirror a savedRecords.chofer_asignado para que Día D Admin siga
 // mostrando "faltantes por chofer" correctamente sin tener que migrarlo.
@@ -2190,7 +2225,7 @@ export async function assignDriverToVoter(candidateId, record, driverId, actorUi
   const existing = await getDoc(ref)
   const base = existing.exists()
     ? {}
-    : { candidateId, voterId: record.id, assignedLeaderId: record.uid || null, ...ELECTION_DAY_CONTROL_DEFAULTS, pollingPlace: record.local || '', tableNumber: record.mesa || '', createdAt: serverTimestamp() }
+    : { candidateId, voterId: record.id, ...ELECTION_DAY_CONTROL_DEFAULTS, assignedLeaderId: record.uid || null, pollingPlace: record.local || '', tableNumber: record.mesa || '', createdAt: serverTimestamp() }
   await setDoc(ref, {
     ...base,
     assignedDriverId: driverId,
@@ -2235,7 +2270,7 @@ export async function assignTableUserToVoter(candidateId, record, tableUserUid, 
   const existing = await getDoc(ref)
   const base = existing.exists()
     ? {}
-    : { candidateId, voterId, assignedLeaderId: record.uid || null, ...ELECTION_DAY_CONTROL_DEFAULTS, createdAt: serverTimestamp() }
+    : { candidateId, voterId, ...ELECTION_DAY_CONTROL_DEFAULTS, assignedLeaderId: record.uid || null, createdAt: serverTimestamp() }
   await setDoc(ref, {
     ...base,
     assignedTableUserId: tableUserUid,

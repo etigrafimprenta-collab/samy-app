@@ -39,7 +39,9 @@ import {
   getElectionDayControlByDriver,
   getDriverByUsuario,
   setDiaDStatus,
-  setDiaDFlags,
+  setDiaDStatusViaFn,
+  setDiaDFlagsViaFn,
+  reportarIncidenciaDiaDViaFn,
   assignDriverToVoter,
   assignLeaderToVoter,
   assignTableUserToVoter,
@@ -53,7 +55,6 @@ import {
   getRecentDiaDReports,
   getDiaDControlSettings,
   updateDiaDControlSettings,
-  createIncident,
   getAllIncidents,
   updateIncidentStatus
 } from '../lib/firebaseCandidate.js'
@@ -155,10 +156,18 @@ function wireAccionRapida(box, { candidateId, user, role, records, controlByVote
       const control = controlByVoterId[record.id]
       btn.disabled = true
       try {
+        // Vía Cloud Function (HTTPS normal, no WebChannel) — ver cabecera
+        // de functions/src/diaDControl.ts. Mismo resultado y misma
+        // autorización que setDiaDStatus/setDiaDFlags, por un transporte
+        // distinto al que venía fallando de forma intermitente para
+        // algunos dirigentes reales sin causa identificable (auditoría
+        // 2026-10-02) — causa real ya encontrada y corregida aparte (bug
+        // de orden en el spread de ELECTION_DAY_CONTROL_DEFAULTS), esto
+        // queda como capa extra de robustez.
         if (btn.dataset.status) {
-          await setDiaDStatus(candidateId, record, btn.dataset.status, user.uid, role)
+          await setDiaDStatusViaFn(candidateId, record, btn.dataset.status)
         } else if (btn.dataset.flag) {
-          await setDiaDFlags(candidateId, record, { [btn.dataset.flag]: true }, user.uid, role)
+          await setDiaDFlagsViaFn(candidateId, record, { [btn.dataset.flag]: true })
         }
         await onRefresh()
       } catch (err) {
@@ -174,11 +183,8 @@ function wireAccionRapida(box, { candidateId, user, role, records, controlByVote
       const tipo = prompt(`Tipo de incidencia para ${record.nombre}:\n(${incidentTypes.join(', ')})`, incidentTypes[0])
       if (!tipo) return
       const descripcion = prompt('Descripción (opcional):', '') || ''
-      const control = controlByVoterId[record.id]
-      Promise.all([
-        createIncident(candidateId, record.id, control?.assignedLeaderId || record.uid || null, user.uid, { type: tipo, description: descripcion }),
-        setDiaDFlags(candidateId, record, { incidentOpen: true }, user.uid, role)
-      ]).then(onRefresh).catch(err => alert('Error: ' + err.message))
+      reportarIncidenciaDiaDViaFn(candidateId, record, tipo, descripcion)
+        .then(onRefresh).catch(err => alert('Error: ' + err.message))
     })
   })
 }

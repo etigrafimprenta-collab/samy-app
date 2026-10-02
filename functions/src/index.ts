@@ -1110,3 +1110,9 @@ export * from "./driverZones";
 // Cajeros DD (Finanzas → 💵 Cajeros DD) — ver functions/src/cashierFunds.ts.
 // Reexportado igual que driverZones arriba, mismo criterio.
 export * from "./cashierFunds";
+
+// Día D Control — camino alternativo vía Cloud Function para los roles
+// operativos (dirigente/mesario/chofer/operador), ver cabecera de
+// diaDControl.ts. Mismo criterio de separación. No modifica ninguna
+// función existente de Día D Admin/Control.
+export * from "./diaDControl";
