@@ -1571,6 +1571,10 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     // libre (no pedido, y es informativo — ver comentario de
     // mesario-candidate.js sobre seccional inconsistente por votante).
     async function modalAsignarMesa(u) {
+      // Asunción no usa Seccional (pedido explícito del usuario, 2026-10-02):
+      // se oculta del todo el campo para esta localidad — no se toca nada
+      // para ninguna otra localidad, donde el campo sigue exactamente igual.
+      const ocultarSeccional = candidate.localidad === 'asuncion'
       const cargando = document.createElement('div')
       cargando.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
       cargando.innerHTML = '<div style="background:white; padding:24px 32px; border-radius:8px; font-weight:700; color:#1976d2;">🔎 Cargando locales de votación reales...</div>'
@@ -1602,16 +1606,16 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
       const modal = abrirModal(`
         <h3 style="margin:0 0 16px;">Mesa/Local de ${escapeHtml(u.nombre || u.email)}</h3>
-        <input id="inp-seccional" value="${escapeHtml(u.seccional || '')}" placeholder="Seccional" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
+        ${ocultarSeccional ? '' : `<input id="inp-seccional" value="${escapeHtml(u.seccional || '')}" placeholder="Seccional" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">`}
         <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Local de votación:</label>
         <select id="sel-local" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
-          <option value="">-- Seleccioná un local --</option>
+          <option value="">Seleccionar Local</option>
           ${!localCanonical && u.local ? `<option value="${escapeHtml(u.local)}" selected>${escapeHtml(u.local)} (actual, fuera del padrón)</option>` : ''}
           ${padronLocales.map(l => `<option value="${escapeHtml(l.local)}" ${localCanonical === l.local ? 'selected' : ''}>${escapeHtml(l.local)}</option>`).join('')}
         </select>
         <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Mesa:</label>
-        <select id="sel-mesa" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
-          <option value="">-- Elegí el local primero --</option>
+        <select id="sel-mesa" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;" disabled>
+          <option value="">Seleccionar Mesa</option>
         </select>
         ${padronLocales.length === 0 ? '<div style="font-size:.75rem; color:#c62828; margin-bottom:8px;">No se encontraron locales en el padrón — verificá que esté cargado.</div>' : ''}
         <div style="display:flex; gap:8px; margin-top:8px;">
@@ -1625,14 +1629,14 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         const entry = entradaLocal(localValue)
         if (entry) {
           const mesaNorm = String(mesaPreseleccionada || '').trim()
-          selMesa.innerHTML = '<option value="">-- Seleccioná una mesa --</option>' +
+          selMesa.innerHTML = '<option value="">Seleccionar Mesa</option>' +
             entry.mesas.map(m => `<option value="${escapeHtml(m)}" ${mesaNorm === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')
           selMesa.disabled = false
         } else if (localValue && u.local && String(localValue).trim().toUpperCase() === String(u.local).trim().toUpperCase() && !mesaCanonical && u.mesa) {
           selMesa.innerHTML = `<option value="${escapeHtml(u.mesa)}" selected>${escapeHtml(u.mesa)} (actual, fuera del padrón)</option>`
           selMesa.disabled = false
         } else {
-          selMesa.innerHTML = '<option value="">-- Elegí el local primero --</option>'
+          selMesa.innerHTML = '<option value="">Seleccionar Mesa</option>'
           selMesa.disabled = true
         }
       }
@@ -1643,7 +1647,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       modal.querySelector('#btn-confirmar').addEventListener('click', async () => {
         try {
           await updateCandidateUserMesaLocal(candidateId, u.id, {
-            seccional: modal.querySelector('#inp-seccional').value.trim(),
+            // Asunción: nunca se carga/infiere un valor — queda null (ver
+            // updateCandidateUserMesaLocal, trata '' igual que ausente).
+            seccional: ocultarSeccional ? '' : modal.querySelector('#inp-seccional').value.trim(),
             local: modal.querySelector('#sel-local').value.trim(),
             mesa: modal.querySelector('#sel-mesa').value.trim()
           })

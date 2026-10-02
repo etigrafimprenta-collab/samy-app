@@ -1100,6 +1100,71 @@ export const aceptarInvitacion = functions.https.onCall(
   }
 );
 
+// NOTA (auditoría 2026-10-02): esta función ya estaba viva en producción
+// desde 2026-09-11 (usada por la pantalla "Mesarios"), pero nunca había
+// quedado commiteada en git — se agrega acá ahora, junto con el fix de
+// aislamiento por localidad de la misma fecha, para que el código fuente
+// deje de estar desincronizado de lo que realmente corre en producción.
+//
+// Devuelve la lista REAL de locales de votación y sus mesas, agregada
+// server-side desde el padrón completo (/voters) — el cliente no puede
+// hacer esto solo: traer los 100k+ documentos completos al navegador para
+// armar un simple selector Local→Mesa sería carísimo en datos móviles, y
+// el SDK web de Firestore no soporta proyección de campos (select) como sí
+// hace el Admin SDK acá. Se agrupa SOLO por local+mesa — nunca por
+// seccional, que viene inconsistente por votante dentro de la misma mesa
+// física (ver bug real documentado en getVotersByMesa/isMesarioOfMesa) y
+// agruparía el mismo local varias veces si se usara como parte de la clave.
+// Requiere campaign_admin/coordinator de ESE candidato — es la única
+// acción (asignar local/mesa a un mesario) que la necesita hoy.
+//
+// FIX DE AISLAMIENTO (auditoría 2026-10-02): esto leía TODO /voters sin
+// filtrar por localidad — el padrón es compartido entre candidatos de
+// localidades distintas (ver comentario de /voters en firestore.rules),
+// así que un candidato de Asunción veía acá mezclados también los
+// locales/mesas de Fernando de la Mora (y cualquier otra localidad
+// cargada). Se filtra por candidate.localidad, igual criterio que ya usa
+// el resto de la app (searchVoterByCedula, getVotersByMesa, etc.) — nunca
+// hardcodeado a una localidad puntual, así que esto corrige el aislamiento
+// para TODOS los candidatos, no solo Asunción. Verificado en sigev-staging
+// contra 2 localidades de prueba distintas antes de este deploy.
+export const obtenerLocalesMesasPadron = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId } = request.data ?? {};
+    if (!candidateId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
+    }
+    await requireCandidateRole(request.auth, candidateId, ["campaign_admin", "coordinator"]);
+
+    const candidateSnap = await admin.firestore().collection("candidates").doc(candidateId).get();
+    const localidad = candidateSnap.data()?.localidad;
+    let votersQuery: FirebaseFirestore.Query = admin.firestore().collection("voters");
+    if (localidad) {
+      votersQuery = votersQuery.where("localidad", "==", localidad);
+    }
+    const snap = await votersQuery.select("local", "mesa").get();
+    const porLocal = new Map<string, { local: string; mesas: Set<string> }>();
+    snap.forEach((doc) => {
+      const data = doc.data();
+      const localCrudo = String(data.local || "").trim().replace(/\s+/g, " ");
+      const mesaCrudo = String(data.mesa || "").trim();
+      if (!localCrudo || !mesaCrudo) return;
+      const clave = localCrudo.toUpperCase();
+      if (!porLocal.has(clave)) porLocal.set(clave, { local: localCrudo, mesas: new Set() });
+      porLocal.get(clave)!.mesas.add(mesaCrudo);
+    });
+
+    const locales = [...porLocal.values()]
+      .sort((a, b) => a.local.localeCompare(b.local))
+      .map(({ local, mesas }) => ({
+        local,
+        mesas: [...mesas].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
+      }));
+
+    return { locales };
+  }
+);
+
 // Zonas de búsqueda (Choferes) — separado en su propio archivo por ser un
 // grupo de 6 funciones con lógica propia (Haversine, transacciones de
 // exclusión mutua). Reexportado acá para que `firebase deploy --only
