@@ -299,6 +299,7 @@ async function renderDirigenteView(container, candidateId, user) {
         { label: '📞 Contactado', status: 'contacted' },
         { label: '🚐 Está yendo', status: 'on_the_way' },
         { label: '📍 Ya llegó', status: 'arrived_polling_place' },
+        { label: '✅ Votó', status: 'voted' },
         { label: '🔇 No responde', status: 'no_answer' },
         { label: '🚏 Necesita transporte', flag: 'requiresPickup' },
         { label: '🚫 No irá', status: 'will_not_vote' }
