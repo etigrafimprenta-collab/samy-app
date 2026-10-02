@@ -62,9 +62,17 @@ const ELECTION_DAY_CONTROL_DEFAULTS = {
 // — evita el cold-start (1-3s) en la primera tanda de clicks después de
 // cualquier período sin uso, esperable con 50-100 dirigentes/mesarios/
 // choferes concurrentes el día del evento. Tiene un costo fijo chico
-// mientras esté en 1 (instancia mínima corriendo 24/7) — RECORDATORIO:
-// bajar esto a 0 (o quitar la opción) después del Día D, no hace falta
-// dejarlo prendido el resto del año.
+// mientras esté en 1 (instancia mínima corriendo 24/7).
+//
+// REVERTIR DESPUÉS DEL DÍA D (elegir una opción, no hace falta las dos):
+//   A) Rápido, sin tocar código ni redeployar (gcloud directo):
+//        gcloud functions deploy setDiaDStatusFn --project=samy-fidabel --region=us-central1 --gen2 --min-instances=0
+//        gcloud functions deploy setDiaDFlagsFn --project=samy-fidabel --region=us-central1 --gen2 --min-instances=0
+//        gcloud functions deploy reportarIncidenciaDiaDFn --project=samy-fidabel --region=us-central1 --gen2 --min-instances=0
+//   B) Por código (deja constancia en el historial de git): cambiar la
+//      línea de abajo a `{ minInstances: 0 }` (o borrar DIA_D_OPTS y sus
+//      3 usos) y volver a desplegar con:
+//        firebase deploy --only functions:setDiaDStatusFn,functions:setDiaDFlagsFn,functions:reportarIncidenciaDiaDFn --project samy-fidabel --force
 const DIA_D_OPTS = { minInstances: 1 };
 
 function requireAuth(auth: Auth): string {
