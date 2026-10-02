@@ -1175,6 +1175,21 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     // loadUsersList() dentro de esta misma visita a la pestaña (crear
     // usuario, cambiar rol, etc. no deben volver a cerrar todo).
     const rolesEquipoExpandidos = new Set()
+
+    // Local→mesa REAL, sacado del padrón server-side — mismo mecanismo
+    // (y misma Cloud Function) que ya usa y tiene probado la pantalla
+    // dedicada "Mesarios" (ver mesario-candidate.js, obtenerLocalesPadron).
+    // Se cachea una sola vez por visita a esta pestaña.
+    let padronLocalesPromise = null
+    function obtenerLocalesPadron() {
+      if (!padronLocalesPromise) {
+        const fn = httpsCallable(functionsInstance, 'obtenerLocalesMesasPadron')
+        padronLocalesPromise = fn({ candidateId })
+          .then(result => result.data.locales)
+          .catch(err => { padronLocalesPromise = null; throw err })
+      }
+      return padronLocalesPromise
+    }
     content.innerHTML = `
       <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:20px; margin-bottom:16px;">
         <h2 style="margin:0 0 12px; font-size:1.05rem;">➕ Crear usuario</h2>
@@ -1549,24 +1564,88 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       })
     }
 
-    function modalAsignarMesa(u) {
+    // Local/Mesa ahora se eligen de un selector con los datos REALES del
+    // padrón (mismo criterio/mecanismo que mesario-candidate.js) en vez
+    // de texto libre — evita typos/variantes que después no calzan con
+    // isMesarioOfMesa()/getVotersByMesa(). Seccional queda como texto
+    // libre (no pedido, y es informativo — ver comentario de
+    // mesario-candidate.js sobre seccional inconsistente por votante).
+    async function modalAsignarMesa(u) {
+      const cargando = document.createElement('div')
+      cargando.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+      cargando.innerHTML = '<div style="background:white; padding:24px 32px; border-radius:8px; font-weight:700; color:#1976d2;">🔎 Cargando locales de votación reales...</div>'
+      document.body.appendChild(cargando)
+
+      let padronLocales
+      try {
+        padronLocales = await obtenerLocalesPadron()
+      } catch (err) {
+        cargando.remove()
+        alert('Error cargando los locales de votación: ' + err.message)
+        return
+      }
+      cargando.remove()
+
+      function entradaLocal(localValue) {
+        const norm = String(localValue || '').trim().toUpperCase()
+        return padronLocales.find(l => l.local.toUpperCase() === norm)
+      }
+      // Si el local/mesa que ya tenía esta persona no calza con ninguna
+      // entrada real del padrón (dato legado de texto libre de antes de
+      // este cambio), se conserva como opción "actual" propia — así no
+      // se pierde en silencio si se guarda sin tocar los selects.
+      const localEntryActual = u.local ? entradaLocal(u.local) : null
+      const localCanonical = localEntryActual?.local || null
+      const mesaCanonical = localEntryActual && u.mesa
+        ? (localEntryActual.mesas.find(m => m === String(u.mesa).trim()) || null)
+        : null
+
       const modal = abrirModal(`
         <h3 style="margin:0 0 16px;">Mesa/Local de ${escapeHtml(u.nombre || u.email)}</h3>
         <input id="inp-seccional" value="${escapeHtml(u.seccional || '')}" placeholder="Seccional" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
-        <input id="inp-local" value="${escapeHtml(u.local || '')}" placeholder="Local" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
-        <input id="inp-mesa" value="${escapeHtml(u.mesa || '')}" placeholder="Mesa" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:16px; box-sizing:border-box;">
-        <div style="display:flex; gap:8px;">
+        <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Local de votación:</label>
+        <select id="sel-local" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
+          <option value="">-- Seleccioná un local --</option>
+          ${!localCanonical && u.local ? `<option value="${escapeHtml(u.local)}" selected>${escapeHtml(u.local)} (actual, fuera del padrón)</option>` : ''}
+          ${padronLocales.map(l => `<option value="${escapeHtml(l.local)}" ${localCanonical === l.local ? 'selected' : ''}>${escapeHtml(l.local)}</option>`).join('')}
+        </select>
+        <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Mesa:</label>
+        <select id="sel-mesa" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
+          <option value="">-- Elegí el local primero --</option>
+        </select>
+        ${padronLocales.length === 0 ? '<div style="font-size:.75rem; color:#c62828; margin-bottom:8px;">No se encontraron locales en el padrón — verificá que esté cargado.</div>' : ''}
+        <div style="display:flex; gap:8px; margin-top:8px;">
           <button id="btn-confirmar" style="flex:1; background:#4caf50; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
           <button id="btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
         </div>
       `)
+
+      function poblarMesas(localValue, mesaPreseleccionada) {
+        const selMesa = modal.querySelector('#sel-mesa')
+        const entry = entradaLocal(localValue)
+        if (entry) {
+          const mesaNorm = String(mesaPreseleccionada || '').trim()
+          selMesa.innerHTML = '<option value="">-- Seleccioná una mesa --</option>' +
+            entry.mesas.map(m => `<option value="${escapeHtml(m)}" ${mesaNorm === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')
+          selMesa.disabled = false
+        } else if (localValue && u.local && String(localValue).trim().toUpperCase() === String(u.local).trim().toUpperCase() && !mesaCanonical && u.mesa) {
+          selMesa.innerHTML = `<option value="${escapeHtml(u.mesa)}" selected>${escapeHtml(u.mesa)} (actual, fuera del padrón)</option>`
+          selMesa.disabled = false
+        } else {
+          selMesa.innerHTML = '<option value="">-- Elegí el local primero --</option>'
+          selMesa.disabled = true
+        }
+      }
+      poblarMesas(localCanonical || u.local || '', mesaCanonical || u.mesa || '')
+      modal.querySelector('#sel-local').addEventListener('change', (e) => poblarMesas(e.target.value, ''))
+
       modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
       modal.querySelector('#btn-confirmar').addEventListener('click', async () => {
         try {
           await updateCandidateUserMesaLocal(candidateId, u.id, {
             seccional: modal.querySelector('#inp-seccional').value.trim(),
-            local: modal.querySelector('#inp-local').value.trim(),
-            mesa: modal.querySelector('#inp-mesa').value.trim()
+            local: modal.querySelector('#sel-local').value.trim(),
+            mesa: modal.querySelector('#sel-mesa').value.trim()
           })
           modal.remove()
           loadUsersList()
