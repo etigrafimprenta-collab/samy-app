@@ -444,7 +444,19 @@ export const buscarBeneficiarioCajero = functions.https.onCall(
           dirigenteNombre,
         };
       }
-      return { scenario: "B", nombre: data.nombre || "", cedula: data.cedula, dirigenteNombre };
+      // AUDITORÍA 2026-10-03: el monto SUGERIDO para aprobar-y-pagar en
+      // un solo paso (aprobarYPagarAyudaCajero) es el mismo default de
+      // Finanzas > Configuración — se devuelve acá para que el cajero
+      // lo vea ANTES de confirmar, nunca lo escribe él.
+      const settingsSnap = await candidateRef(candidateId).collection("config").doc("financeSettings").get();
+      return {
+        scenario: "B",
+        recordId: rec.id,
+        nombre: data.nombre || "",
+        cedula: data.cedula,
+        dirigenteNombre,
+        maxVoterAssistanceAmount: Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0,
+      };
     }
 
     // C/D: no es "nuestro" — ver si existe en el padrón completo de la
@@ -787,6 +799,194 @@ export const registrarEgresoCajero = functions.https.onCall(
         newData: { balance: nuevoBalance, amount: montoNum, beneficiaryVoterId },
       });
       return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName };
+    });
+  }
+);
+
+// ── 3b. aprobarYPagarAyudaCajero ─────────────────────────────────────────
+// AUDITORÍA 2026-10-03 (escenario B — "nuestro" votante sin ayuda
+// individual todavía): antes esto solo mostraba un mensaje y "Volver" —
+// ahora el cajero puede, en UNA sola operación atómica, aprobar la
+// ayuda de ese votante con el monto DEFAULT (Finanzas > Configuración >
+// "Ayuda máxima por votante") y pagarla. A propósito, esta función NO
+// recibe ningún `amount` del cliente — el monto SIEMPRE lo calcula el
+// servidor, así que no hay forma de que el cajero lo module ("el cajero
+// no puede modificar el monto").
+//
+// Carrera (2 cajeros, o 2 pestañas, confirmando casi al mismo tiempo
+// para el MISMO beneficiario): ambas llamadas corren como transacción
+// de Firestore sobre los MISMOS documentos (savedRecords del votante +
+// cashierMovements/cashierAccounts) — Firestore serializa: la que gana
+// escribe assistanceStatus:'approved' + el movimiento confirmado; la
+// que pierde se reintenta automáticamente con una lectura FRESCA, que
+// ya ve esos cambios, y queda rechazada por los mismos 2 chequeos que
+// ya existían (ya aprobada / ya tiene un egreso confirmado) — nunca
+// hizo falta un mecanismo nuevo para esto, la transacción ya lo cubre.
+export const aprobarYPagarAyudaCajero = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cashAccountId, beneficiaryCI, operationId } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId || !cashAccountId || !beneficiaryCI || !operationId) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/cashAccountId/beneficiaryCI/operationId");
+    }
+
+    return withIdempotency(candidateId, "aprobarYPagarAyudaCajero", operationId, { cashAccountId, beneficiaryCI }, async (tx) => {
+      const ci = String(beneficiaryCI).trim();
+
+      // 1ra tanda de lecturas.
+      const [accountSnap, candidateSnap, settingsSnap, callerRoles, recordSnap] = await Promise.all([
+        tx.get(cashierAccountsCol(candidateId).doc(cashAccountId)),
+        tx.get(candidateRef(candidateId)),
+        tx.get(candidateRef(candidateId).collection("config").doc("financeSettings")),
+        readCallerRoles(tx, candidateId, callerUid),
+        tx.get(candidateRef(candidateId).collection("savedRecords").where("cedula", "==", ci).limit(1)),
+      ]);
+
+      if (!accountSnap.exists) {
+        throw new functions.https.HttpsError("not-found", "Cuenta de cajero no encontrada");
+      }
+      const account = accountSnap.data()!;
+      if (account.status !== "active") {
+        throw new functions.https.HttpsError("failed-precondition", "La cuenta está cerrada — no admite egresos");
+      }
+      const isOwner = account.responsibleUserId === callerUid;
+      if (!callerRoles.isAdmin && !isOwner) {
+        throw new functions.https.HttpsError(
+          "permission-denied",
+          "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede registrar egresos acá"
+        );
+      }
+
+      if (recordSnap.empty) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Este beneficiario no es uno de nuestros votantes — esta operación no aplica (ver solicitud de excepción)"
+        );
+      }
+      const recordDoc = recordSnap.docs[0];
+      const record = recordDoc.data();
+      // Esta función es SOLO para el caso "sin ayuda previa" — si ya
+      // tiene una aprobada, el camino correcto es registrarEgresoCajero
+      // directo (o, si ya fue pagada, reasistencia con excepción).
+      if (record.assistanceStatus === "approved" && Number(record.approvedAmount) > 0) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Este votante ya tiene una ayuda aprobada — usá el pago normal, no esta operación"
+        );
+      }
+
+      // 2da tanda — ya con localidad real (candidateSnap) para resolver
+      // el votante en el padrón compartido.
+      const localidad = candidateSnap.data()?.localidad || "";
+      const voterSnap = await tx.get(
+        db().collection("voters").where("cedula", "==", ci).where("localidad", "==", localidad).limit(1)
+      );
+      if (voterSnap.empty) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          `CI ${ci} no encontrada en el padrón de la localidad de este candidato (${localidad || "sin localidad configurada"})`
+        );
+      }
+      const beneficiaryVoterId = voterSnap.docs[0].id;
+      const beneficiaryName = voterSnap.docs[0].data().nombre || record.nombre || "";
+
+      // Doble pago — mismo chequeo que registrarEgresoCajero, es lo que
+      // defiende la carrera descrita en la cabecera de arriba.
+      const dupSnap = await tx.get(
+        cashierMovementsCol(candidateId)
+          .where("beneficiaryVoterId", "==", beneficiaryVoterId)
+          .where("type", "==", "expense")
+          .where("status", "==", "confirmed")
+          .limit(1)
+      );
+      if (!dupSnap.empty) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Este beneficiario ya recibió un aporte — no se puede pagar de nuevo por esta vía"
+        );
+      }
+
+      // Defensa en profundidad para la carrera descrita en la cabecera:
+      // re-leer el MISMO doc por REFERENCIA directa (recordDoc se
+      // encontró vía query más arriba) justo antes de escribir — barato
+      // (un get() más dentro de la misma transacción) y hace explícito
+      // que el chequeo final de "¿ya está aprobada?" se apoya en una
+      // lectura por referencia directa de ESE documento puntual, no solo
+      // en el resultado de una query. Confirmado con una prueba de
+      // carrera real (2 cuentas de cajero distintas, mismo beneficiario,
+      // llamadas concurrentes): Firestore ya detecta el conflicto
+      // correctamente vía la query también — esto es cinturón y tiradores,
+      // no una corrección de un bug encontrado.
+      const recordRecheckSnap = await tx.get(recordDoc.ref);
+      const recordRecheck = recordRecheckSnap.data()!;
+      if (recordRecheck.assistanceStatus === "approved" && Number(recordRecheck.approvedAmount) > 0) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Este votante ya tiene una ayuda aprobada — usá el pago normal, no esta operación"
+        );
+      }
+
+      const monto = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      if (!(monto > 0)) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "No hay un monto de ayuda configurado — pedile al administrador que lo fije en Finanzas > Configuración"
+        );
+      }
+      const saldoActual = Number(account.balance || 0);
+      if (monto > saldoActual) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          `Saldo insuficiente (disponible: ${saldoActual}, requerido: ${monto})`
+        );
+      }
+      const nuevoBalance = saldoActual - monto;
+
+      // ── ESCRITURAS ───────────────────────────────────────────────────
+      tx.update(recordDoc.ref, {
+        needsAssistance: true,
+        montoAyuda: monto,
+        assistanceStatus: "approved",
+        approvedAmount: monto,
+        approvedBy: callerUid,
+        approvedAt: FieldValue.serverTimestamp(),
+      });
+      const movRef = cashierMovementsCol(candidateId).doc();
+      const movPayload = {
+        candidateId,
+        cashAccountId,
+        responsibleUserId: account.responsibleUserId,
+        type: "expense",
+        amount: monto,
+        currency: account.currency || "PYG",
+        concept: `Ayuda a votante — ${beneficiaryName}`,
+        description: "",
+        beneficiaryVoterId,
+        beneficiaryCI: ci,
+        beneficiaryName,
+        receiptUrl: null,
+        status: "confirmed",
+        balanceAfter: nuevoBalance,
+        operationId,
+        exceptionAuthorization: null,
+        createdBy: callerUid,
+        createdByRole: isOwner ? "cashier" : "admin",
+        createdAt: FieldValue.serverTimestamp(),
+      };
+      tx.set(movRef, movPayload);
+      tx.update(cashierAccountsCol(candidateId).doc(cashAccountId), {
+        balance: nuevoBalance,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      writeAuditInTx(tx, candidateId, {
+        actorUid: callerUid,
+        action: "cashier_expense_auto_approve",
+        entityType: "cashierMovements",
+        entityId: movRef.id,
+        previousData: { balance: saldoActual, recordAssistanceStatus: record.assistanceStatus ?? null },
+        newData: { balance: nuevoBalance, amount: monto, beneficiaryVoterId, approvedAmount: monto },
+      });
+      return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName, approvedAmount: monto };
     });
   }
 );

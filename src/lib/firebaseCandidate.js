@@ -3384,6 +3384,16 @@ export async function buscarBeneficiarioCajero(candidateId, cashAccountId, ci) {
   return result.data
 }
 
+// AUDITORÍA 2026-10-03 (escenario B — "nuestro" votante sin ayuda
+// previa): aprueba con el monto DEFAULT de Finanzas > Configuración y
+// paga, las 2 cosas en una sola operación atómica — nunca recibe un
+// `amount` del cliente, el cajero no tiene forma de modificarlo.
+export async function aprobarYPagarAyudaCajero(candidateId, cashAccountId, beneficiaryCI, operationId) {
+  const fn = httpsCallable(functionsInstance, 'aprobarYPagarAyudaCajero')
+  const result = await fn({ candidateId, cashAccountId, beneficiaryCI, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
 export async function solicitarExcepcionBeneficiario(candidateId, cashAccountId, beneficiaryCI, operationId) {
   const fn = httpsCallable(functionsInstance, 'solicitarExcepcionBeneficiario')
   const result = await fn({ candidateId, cashAccountId, beneficiaryCI, operationId: operationId || generateCashierOperationId() })

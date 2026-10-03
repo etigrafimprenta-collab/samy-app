@@ -22,6 +22,7 @@ import {
   getAllCandidateUsers,
   getRecordByCedula,
   buscarBeneficiarioCajero,
+  aprobarYPagarAyudaCajero,
   solicitarExcepcionBeneficiario,
   resolverExcepcionBeneficiario,
   getPendingBeneficiaryExceptions,
@@ -1625,15 +1626,50 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       })
     }
 
-    // ── Escenario B: nuestro votante, sin ayuda aprobada ────────────────
-    function pintarSinAyudaAprobada({ nombre }) {
+    // ── Escenario B: "nuestro" votante, sin ayuda individual todavía ───
+    // AUDITORÍA 2026-10-03: antes esto solo mostraba un mensaje y
+    // "Volver" — ahora el cajero puede aprobar (monto DEFAULT, nunca
+    // editable) y pagar en un solo paso. aprobarYPagarAyudaCajero hace
+    // las 2 cosas en UNA transacción atómica — nunca manda `amount`
+    // desde el cliente.
+    function pintarSinAyudaAprobada({ nombre, ci, recordId, maxVoterAssistanceAmount }) {
+      if (!(Number(maxVoterAssistanceAmount) > 0)) {
+        resultadoEl.innerHTML = `
+          <div style="background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+            ${escapeHtml(nombre || 'Este votante')} pertenece a nuestros registros, pero no tiene una ayuda autorizada para cobrar — y Finanzas todavía no configuró un monto por defecto (Finanzas → Configuración → "Ayuda máxima por votante").
+          </div>
+          <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+        `
+        resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+        return
+      }
       resultadoEl.innerHTML = `
-        <div style="background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
-          ${escapeHtml(nombre || 'Este votante')} pertenece a nuestros registros, pero no tiene una ayuda autorizada para cobrar.
+        <div style="background:#f5f5f5; border-radius:6px; padding:12px; margin-bottom:14px; font-size:.9rem; display:grid; gap:4px;">
+          <div><strong>Beneficiario:</strong> ${escapeHtml(nombre || '—')}</div>
+          <div><strong>CI:</strong> ${escapeHtml(String(ci))}</div>
+          <div style="margin-top:4px; font-size:1.05rem;"><strong>Monto sugerido:</strong> <span style="color:#c62828; font-weight:700;">${money(maxVoterAssistanceAmount, cuenta.currency)}</span></div>
         </div>
-        <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+        <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:8px;">
+          <button id="cdd-eg-btn-confirmar-b" style="flex:1; background:#2e7d32; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">✅ CONFIRMAR PAGO</button>
+          <button id="cdd-eg-btn-volver" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">↩ VOLVER</button>
+        </div>
       `
       resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+      const btnConfirmar = resultadoEl.querySelector('#cdd-eg-btn-confirmar-b')
+      btnConfirmar.addEventListener('click', async () => {
+        const msg = resultadoEl.querySelector('#cdd-eg-msg')
+        btnConfirmar.disabled = true
+        msg.textContent = 'Registrando...'
+        try {
+          await aprobarYPagarAyudaCajero(candidateId, cuenta.id, ci, operationId)
+          modal.remove()
+          await pintarCajerosDiaDPropio(document.getElementById('fin-body'))
+        } catch (err) {
+          btnConfirmar.disabled = false
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
     }
 
     // ── Escenario C sin excepción (o rechazada): ofrecer solicitarla ───
@@ -1694,7 +1730,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       if (r.scenario === 'A') {
         pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.approvedAmount, dirigenteNombre: r.dirigenteNombre })
       } else if (r.scenario === 'B') {
-        pintarSinAyudaAprobada({ nombre: r.nombre })
+        pintarSinAyudaAprobada({ nombre: r.nombre, ci: r.cedula, recordId: r.recordId, maxVoterAssistanceAmount: r.maxVoterAssistanceAmount })
       } else if (r.scenario === 'C') {
         if (r.excepcion?.status === 'approved') {
           pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.excepcion.approvedAmount, exceptionAuthorizationId: r.excepcion.id })
