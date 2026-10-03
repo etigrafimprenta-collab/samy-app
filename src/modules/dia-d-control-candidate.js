@@ -450,6 +450,22 @@ async function renderMesarioView(container, candidateId, user) {
   // criterio/color que ya usa el sistema legacy (mesario-control.js) y
   // Día D Admin, para no inventar una convención visual nueva.
   let nuestros = new Set()
+  // AUDITORÍA 2026-10-03 (sincronización Control Día D): el dashboard del
+  // administrador (renderAdminView/renderDashboard) cuenta "Ya votaron"/
+  // "Pendientes" EXCLUSIVAMENTE sobre electionDayControl, indexado por el
+  // id de savedRecords — nunca lee diaD/votes. marcarVoto()/desmarcarVoto()
+  // (abajo) solo escriben diaD/votes, así que un voto marcado desde esta
+  // vista para uno de los 4742 "nuestros" no se reflejaba nunca en el
+  // admin. Fix: para un votante que SÍ es "nuestro" (está en savedRecords
+  // de esta mesa), usar setDiaDStatus (mismo mecanismo que ya usan
+  // dirigente/chofer/admin) en vez de marcarVoto/desmarcarVoto directo —
+  // setDiaDStatus actualiza electionDayControl Y llama internamente a
+  // marcarVoto/desmarcarVoto, así que diaD/votes queda igual de
+  // actualizado. Para un votante del padrón que NO es "nuestro" no hay
+  // savedRecords/electionDayControl que actualizar — sigue exactamente
+  // igual que antes (solo diaD/votes), a propósito: "Comprometidos" sigue
+  // acotado a los 4742, no se mezcla con el padrón completo de la mesa.
+  let nuestrosPorCedula = new Map()
 
   async function cargarDatos() {
     const [padron, votos, nuestrosRecords] = await Promise.all([
@@ -463,6 +479,7 @@ async function renderMesarioView(container, candidateId, user) {
     votantes = padron.sort((a, b) => (parseInt(a.orden) || 999999) - (parseInt(b.orden) || 999999))
     votados = new Set(votos.filter(v => v.voted).map(v => v.cedula))
     nuestros = new Set(nuestrosRecords.map(r => r.cedula))
+    nuestrosPorCedula = new Map(nuestrosRecords.map(r => [r.cedula, r]))
   }
 
   function pintar(filtro = '') {
@@ -526,7 +543,24 @@ async function renderMesarioView(container, candidateId, user) {
         btn.disabled = true
         btn.textContent = 'Guardando...'
         try {
-          await marcarVoto(candidateId, { savedRecordId: null, cedula, seccional, mesa, local: btn.dataset.local, markedBy: user.uid })
+          const record = nuestrosPorCedula.get(cedula)
+          if (record) {
+            // "Nuestro" — igual mecanismo que dirigente/chofer: vía
+            // Cloud Function (setDiaDStatusFn), NO escritura directa.
+            // firestore.rules no permite que un mesario CREE
+            // electionDayControl por local+mesa (solo por
+            // assignedTableUserId ya existente, a propósito — ver
+            // auditoría de seguridad en firestore.rules) y este es
+            // siempre el primer toque para estos votantes (nadie los
+            // asigna a mano en este flujo). La función server-side sí
+            // autoriza por local+mesa del perfil (ver resolverContexto
+            // en diaDControl.ts) y además actualiza electionDayControl
+            // (lo que lee el admin) Y diaD/votes (lo que lee esta vista)
+            // en un solo paso.
+            await setDiaDStatusViaFn(candidateId, record, 'voted')
+          } else {
+            await marcarVoto(candidateId, { savedRecordId: null, cedula, seccional, mesa, local: btn.dataset.local, markedBy: user.uid })
+          }
           await cargarDatos()
           pintar(document.getElementById('mesario-buscar')?.value || '')
         } catch (err) {
@@ -544,7 +578,12 @@ async function renderMesarioView(container, candidateId, user) {
         btn.disabled = true
         btn.textContent = 'Revirtiendo...'
         try {
-          await desmarcarVoto(candidateId, { seccional, mesa, cedula, actorUid: user.uid })
+          const record = nuestrosPorCedula.get(cedula)
+          if (record) {
+            await setDiaDStatusViaFn(candidateId, record, 'pending')
+          } else {
+            await desmarcarVoto(candidateId, { seccional, mesa, cedula, actorUid: user.uid })
+          }
           await cargarDatos()
           pintar(document.getElementById('mesario-buscar')?.value || '')
         } catch (err) {

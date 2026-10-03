@@ -159,6 +159,30 @@ async function resolverContexto(candidateId: string, voterId: string, callerUid:
   }
   if (!autorizado && roles.has("mesario")) {
     if (ctx.controlExists && ctx.control?.assignedTableUserId === callerUid) autorizado = true;
+    // AUDITORÍA 2026-10-03 (sincronización Control Día D): mecanismo
+    // NUEVO en paralelo al de arriba — un mesario de la vista de Día D
+    // Control que opera por local+mesa (renderMesarioView, el padrón
+    // completo de su mesa) nunca tiene un electionDayControl.
+    // assignedTableUserId seteado (nadie lo asigna a mano en ese flujo),
+    // así que sin esto quedaba sin forma de marcar "voted" para ninguno
+    // de sus votantes "nuestros" (los que SÍ están en savedRecords).
+    // Seguro porque memberData (el perfil del propio caller, leído acá
+    // server-side con Admin SDK) es admin-only/no autoeditable por el
+    // cliente — comparar record.local/mesa contra ESE perfil no es un
+    // auto-reclamo del cliente (a diferencia del hueco de seguridad ya
+    // documentado en firestore.rules para la creación de
+    // electionDayControl, que comparaba contra un campo de la MISMA
+    // escritura). Mismo criterio exacto que isMesarioOfMesa()
+    // (firestore.rules) y getVotersByMesa() (firebaseCandidate.js):
+    // local+mesa es la fuente de verdad cuando el perfil tiene `local`;
+    // sin `local`, cae a seccional+mesa para perfiles legado.
+    else if (ctx.recordExists && memberData?.mesa && String(memberData.mesa) === String(ctx.record?.mesa)) {
+      if (memberData?.local) {
+        if (memberData.local === ctx.record?.local) autorizado = true;
+      } else if (memberData?.seccional && memberData.seccional === ctx.record?.seccional) {
+        autorizado = true;
+      }
+    }
   }
   if (!autorizado && roles.has("chofer")) {
     const [zoneSnap] = await Promise.all([
@@ -206,7 +230,14 @@ async function sincronizarDiaDVotes(
   callerUid: string
 ) {
   const record = ctx.record;
-  if (!record?.seccional || !record?.mesa) return;
+  // BUG REAL (encontrado probando la sincronización de mesario por
+  // local+mesa): esto exigía `seccional` SIEMPRE, igual que marcarVoto()
+  // ya corrigió en firebaseCandidate.js — `seccional` queda vacío a
+  // propósito para perfiles/votantes del mecanismo nuevo (local es la
+  // fuente de verdad). Sin este fix, un mesario por local+mesa nunca
+  // sincronizaba su voto a diaD/votes (el guard devolvía antes de
+  // escribir nada), aunque electionDayControl sí quedara bien.
+  if (!record?.mesa || (!record?.seccional && !record?.local)) return;
 
   const docId = `${record.seccional}_${record.mesa}_${record.cedula}`;
   const votesRef = candidateRef(candidateId).collection("diaD").doc("current").collection("votes").doc(docId);
