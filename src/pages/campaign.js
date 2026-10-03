@@ -27,7 +27,8 @@ import {
   getDrivers,
   searchVoterByCedula,
   getRecordByCedula,
-  reopenAssistanceRequest
+  reopenAssistanceRequest,
+  getFinanceSettings
 } from '../lib/firebaseCandidate.js'
 import { resolveAssistanceStatus } from '../lib/ayudaGs.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
@@ -148,6 +149,18 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
   // candidato tiene cashierFundsAutoEnroll:true — para el resto (el 100%
   // de candidatos hoy) este flag nunca existe y no cambia nada.
   const isFieldCashier = opts.asSuperAdmin ? false : candidateUserDoc?.isFieldCashier === true
+
+  // Ayuda Gs. — "Ayuda máxima por votante" (Finanzas > Configuración) es
+  // el valor INICIAL que se precarga al asignar/editar la ayuda de un
+  // votante, nunca un límite rígido: el dirigente lo puede reemplazar
+  // libremente por el monto real de ese votante. Compartido por las 3
+  // pantallas que lo usan (Buscar votante, Mis Registros, Registros) —
+  // se pide una sola vez por visita a este panel, no una vez por pestaña.
+  let maxAyudaPromise = null
+  function obtenerMaxAyuda() {
+    if (!maxAyudaPromise) maxAyudaPromise = getFinanceSettings(candidateId).then(s => Number(s.maxVoterAssistanceAmount) || 0)
+    return maxAyudaPromise
+  }
 
   // Modo compatibilidad: si hay roleIds asignados y esos roles existen de
   // verdad en Firestore, se resuelve la visibilidad con el motor nuevo
@@ -697,9 +710,14 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         </div>
       `
 
-      modal.querySelector('#chk-assistance').addEventListener('change', (e) => {
+      modal.querySelector('#chk-assistance').addEventListener('change', async (e) => {
         modal.querySelector('#wrap-monto-ayuda').style.display = e.target.checked ? 'block' : 'none'
-        if (!e.target.checked) modal.querySelector('#inp-monto-ayuda').value = ''
+        const inpMonto = modal.querySelector('#inp-monto-ayuda')
+        if (!e.target.checked) { inpMonto.value = ''; return }
+        // Precarga el valor inicial configurado por el admin — el
+        // dirigente lo ve ya puesto pero sigue siendo 100% editable.
+        const max = await obtenerMaxAyuda()
+        if (max > 0 && !inpMonto.value) inpMonto.value = max
       })
       document.body.appendChild(modal)
       modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
@@ -1026,6 +1044,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         </div>
       `
       document.body.appendChild(modal)
+      // Si este votante todavía no tiene un monto propio asignado, se
+      // precarga con el valor configurado por el admin — nunca pisa un
+      // monto que el dirigente ya haya personalizado para esta persona.
+      if (!(Number(r.montoAyuda) > 0)) {
+        obtenerMaxAyuda().then(max => { if (max > 0) modal.querySelector('#inp-edit-monto-ayuda').value = max })
+      }
       modal.querySelector('#btn-cancelar-edit').addEventListener('click', () => modal.remove())
 
       modal.querySelector('#btn-edit-ubicacion-actual').addEventListener('click', () => {
@@ -1903,6 +1927,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         </div>
       `
       document.body.appendChild(modal)
+      // Si este votante todavía no tiene un monto propio asignado, se
+      // precarga con el valor configurado por el admin — nunca pisa un
+      // monto que ya haya sido personalizado para esta persona.
+      if (!(Number(r.montoAyuda) > 0)) {
+        obtenerMaxAyuda().then(max => { if (max > 0) modal.querySelector('#inp-editreg-monto-ayuda').value = max })
+      }
       modal.querySelector('#btn-cancelar-editreg').addEventListener('click', () => modal.remove())
 
       modal.querySelector('#btn-confirmar-editreg').addEventListener('click', async () => {

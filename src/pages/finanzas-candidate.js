@@ -21,6 +21,7 @@ import {
   getDrivers,
   getAllCandidateUsers,
   getRecordByCedula,
+  getOwnRecordByCedula,
   searchVoterByCedula,
   createFinanceObligation,
   updateFinanceObligation,
@@ -1456,59 +1457,119 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     el.querySelectorAll('.cdd-pend-btn-pagar').forEach(btn => {
       btn.addEventListener('click', () => mostrarModalRegistrarEgreso(cuenta, {
         ci: btn.dataset.ci,
-        monto: btn.dataset.monto,
-        concept: `Ayuda a votante — ${btn.dataset.nombre}`
+        nombre: btn.dataset.nombre,
+        monto: Number(btn.dataset.monto)
       }))
     })
   }
 
-  function mostrarModalRegistrarEgreso(cuenta, prefill = null) {
+  // AUDITORÍA 2026-10-03 (simplificar Ayuda Gs. -> Cajero): el cajero ya
+  // no completa monto/concepto/excepción a mano — ingresa la CI, el
+  // sistema busca el registro de ESE votante en savedRecords y usa
+  // `approvedAmount` (el monto que Finanzas ya aprobó, NUNCA lo
+  // solicitado sin aprobar — mismo criterio de seguridad que
+  // pintarPendientesDePago) como "monto a entregar". Si viene con
+  // `prefillConfirmado` (desde el botón "Pagar" de la lista de
+  // pendientes, que ya hizo esta búsqueda) se salta directo al paso de
+  // confirmación. No se agrega ningún campo de autorización excepcional
+  // acá a propósito — ese caso (un segundo aporte al mismo beneficiario)
+  // sigue bloqueado por el servidor (registrarEgresoCajero,
+  // cashierFunds.ts) con un mensaje claro; es un caso excepcional real,
+  // no el flujo simplificado que se pidió acá.
+  function mostrarModalRegistrarEgreso(cuenta, prefillConfirmado = null) {
     const modal = document.createElement('div')
     modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px; overflow-y:auto;'
     modal.innerHTML = `
-      <div style="background: white; border-radius: 8px; max-width: 460px; width: 100%; padding: 24px; margin: 20px 0;">
+      <div style="background: white; border-radius: 8px; max-width: 420px; width: 100%; padding: 24px; margin: 20px 0;">
         <h3 style="margin:0 0 6px;">➖ Registrar egreso</h3>
         <p style="margin:0 0 14px; font-size:.85rem; color:#666;">Saldo disponible: ${money(cuenta.balance, cuenta.currency)}</p>
-        <div style="display:grid; gap:10px;">
-          <input id="cdd-eg-monto" type="number" placeholder="Monto" value="${prefill?.monto ? escapeHtml(String(prefill.monto)) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <input id="cdd-eg-concepto" placeholder="Concepto (obligatorio)" value="${prefill?.concept ? escapeHtml(prefill.concept) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <input id="cdd-eg-ci" placeholder="CI del beneficiario (opcional)" value="${prefill?.ci ? escapeHtml(prefill.ci) : ''}" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <input id="cdd-eg-excepcion" placeholder="ID de autorización excepcional (solo si aplica)" style="padding:10px; border:1px solid #ddd; border-radius:4px;">
-          <div id="cdd-eg-msg" style="font-size:.85rem;"></div>
+        <div id="cdd-eg-paso-ci" style="${prefillConfirmado ? 'display:none;' : ''}">
+          <label style="font-weight:700; display:block; margin-bottom:6px; font-size:.85rem;">CI del votante beneficiario:</label>
+          <input id="cdd-eg-ci" type="text" inputmode="numeric" placeholder="Cédula" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:4px; box-sizing:border-box;">
+          <div id="cdd-eg-ci-msg" style="font-size:.85rem; margin-top:8px;"></div>
+          <div style="display:flex; gap:8px; margin-top:14px;">
+            <button id="cdd-eg-btn-buscar" style="flex:1; background:#1976d2; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">🔍 Buscar</button>
+            <button id="cdd-eg-btn-cancelar1" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+          </div>
+        </div>
+        <div id="cdd-eg-paso-confirmar" style="${prefillConfirmado ? '' : 'display:none;'}">
+          <div style="background:#f5f5f5; border-radius:6px; padding:12px; margin-bottom:14px; font-size:.9rem; display:grid; gap:4px;">
+            <div><strong>Nombre:</strong> <span id="cdd-eg-conf-nombre"></span></div>
+            <div><strong>CI:</strong> <span id="cdd-eg-conf-ci"></span></div>
+            <div style="margin-top:4px; font-size:1.05rem;"><strong>Monto a entregar:</strong> <span id="cdd-eg-conf-monto" style="color:#c62828; font-weight:700;"></span></div>
+          </div>
+          <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
           <div style="display:flex; gap:8px;">
-            <button id="cdd-eg-btn-guardar" style="flex:1; background:#c62828; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Registrar</button>
-            <button id="cdd-eg-btn-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+            <button id="cdd-eg-btn-confirmar" style="flex:1; background:#2e7d32; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">✅ Confirmar pago</button>
+            <button id="cdd-eg-btn-cancelar2" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
           </div>
         </div>
       </div>
     `
     document.body.appendChild(modal)
-    modal.querySelector('#cdd-eg-btn-cancelar').addEventListener('click', () => modal.remove())
+    modal.querySelectorAll('#cdd-eg-btn-cancelar1, #cdd-eg-btn-cancelar2').forEach(b => b.addEventListener('click', () => modal.remove()))
+
+    let datosConfirmados = prefillConfirmado ? { ...prefillConfirmado } : null
+
+    function pintarConfirmacion() {
+      modal.querySelector('#cdd-eg-conf-nombre').textContent = datosConfirmados.nombre || '—'
+      modal.querySelector('#cdd-eg-conf-ci').textContent = datosConfirmados.ci
+      modal.querySelector('#cdd-eg-conf-monto').textContent = money(datosConfirmados.monto, cuenta.currency)
+    }
+    if (prefillConfirmado) pintarConfirmacion()
+
+    const btnBuscar = modal.querySelector('#cdd-eg-btn-buscar')
+    if (btnBuscar) {
+      btnBuscar.addEventListener('click', async () => {
+        const ci = modal.querySelector('#cdd-eg-ci').value.trim()
+        const msgCi = modal.querySelector('#cdd-eg-ci-msg')
+        if (!ci) { msgCi.innerHTML = '<span style="color:#c62828;">Ingresá una CI.</span>'; return }
+        btnBuscar.disabled = true
+        msgCi.innerHTML = 'Buscando...'
+        try {
+          const registro = await getOwnRecordByCedula(candidateId, cuenta.responsibleUserId, ci)
+          if (!registro) {
+            msgCi.innerHTML = '<span style="color:#c62828;">No se encontró esa CI entre tus registros.</span>'
+            return
+          }
+          if (registro.assistanceStatus !== 'approved' || !(Number(registro.approvedAmount) > 0)) {
+            msgCi.innerHTML = `<span style="color:#c62828;">${escapeHtml(registro.nombre || 'Este votante')} todavía no tiene una ayuda APROBADA por Finanzas.</span>`
+            return
+          }
+          datosConfirmados = { ci: registro.cedula, nombre: registro.nombre, monto: Number(registro.approvedAmount) }
+          pintarConfirmacion()
+          modal.querySelector('#cdd-eg-paso-ci').style.display = 'none'
+          modal.querySelector('#cdd-eg-paso-confirmar').style.display = 'block'
+        } catch (err) {
+          msgCi.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        } finally {
+          btnBuscar.disabled = false
+        }
+      })
+    }
+
     // Mismo criterio que mostrarModalAsignarFondos: UN operationId por
-    // apertura del modal, reusado en cada click de "Registrar" mientras
-    // el modal siga abierto (doble clic == mismo operationId == mismo
-    // resultado idempotente, nunca un movimiento duplicado).
+    // apertura del modal, reusado en cada click de "Confirmar pago"
+    // mientras el modal siga abierto (doble clic == mismo operationId ==
+    // mismo resultado idempotente, nunca un movimiento duplicado).
     const operationId = generateCashierOperationId()
-    const btnGuardar = modal.querySelector('#cdd-eg-btn-guardar')
-    btnGuardar.addEventListener('click', async () => {
-      const monto = Number(modal.querySelector('#cdd-eg-monto').value)
-      const concept = modal.querySelector('#cdd-eg-concepto').value.trim()
+    const btnConfirmar = modal.querySelector('#cdd-eg-btn-confirmar')
+    btnConfirmar.addEventListener('click', async () => {
       const msg = modal.querySelector('#cdd-eg-msg')
-      if (!(monto > 0) || !concept) { msg.innerHTML = '<span style="color:#c62828;">Monto y concepto son obligatorios.</span>'; return }
-      btnGuardar.disabled = true
+      if (!datosConfirmados) return
+      btnConfirmar.disabled = true
       msg.textContent = 'Registrando...'
       try {
         await registrarEgresoCajero(candidateId, {
           cashAccountId: cuenta.id,
-          amount: monto,
-          concept,
-          beneficiaryCI: modal.querySelector('#cdd-eg-ci').value.trim() || null,
-          exceptionAuthorizationId: modal.querySelector('#cdd-eg-excepcion').value.trim() || null
+          amount: datosConfirmados.monto,
+          concept: `Ayuda a votante — ${datosConfirmados.nombre || datosConfirmados.ci}`,
+          beneficiaryCI: datosConfirmados.ci
         }, operationId)
         modal.remove()
         await pintarCajerosDiaDPropio(document.getElementById('fin-body'))
       } catch (err) {
-        btnGuardar.disabled = false
+        btnConfirmar.disabled = false
         msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
       }
     })

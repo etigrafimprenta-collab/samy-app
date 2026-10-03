@@ -839,6 +839,30 @@ export async function getRecordByCedula(candidateId, cedula) {
   return snap.docs.length > 0 ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null
 }
 
+// AUDITORÍA 2026-10-03 (cajero simplificado — buscar por CI): a
+// diferencia de getRecordByCedula (de arriba, solo seguro para
+// campaign_admin/coordinator/auditor/viewer, que tienen lectura
+// incondicional), un cajero/dirigente común SOLO puede leer
+// savedRecords propios (resource.data.uid == request.auth.uid, ver
+// firestore.rules). Firestore exige que el `where` de la consulta
+// "demuestre" esa condición — un where('cedula','==',...) solo, sin
+// filtrar también por uid, queda denegado aunque el doc que devolvería
+// sí sea propio (confirmado probando: list() necesita que la regla se
+// pueda probar a partir de la query, no solo de los datos reales).
+// `ownerUid` es el dueño de la cuenta de cajero (cuenta.responsibleUserId
+// en finanzas-candidate.js) — mismo criterio de alcance que ya usa
+// getUserRecords() para la lista de "pendientes de pago" de esa cuenta.
+export async function getOwnRecordByCedula(candidateId, ownerUid, cedula) {
+  const q = query(
+    collection(db, ...candidatePath(candidateId, 'savedRecords')),
+    where('uid', '==', ownerUid),
+    where('cedula', '==', String(cedula).trim()),
+    limit(1)
+  )
+  const snap = await getDocs(q)
+  return snap.docs.length > 0 ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null
+}
+
 // Todos los registros del candidato — se usa en los dashboards de Día D
 // (ranking/local/mesa), que necesitan agregar sobre el total. No tiene
 // límite explícito porque estos paneles ya son de uso ocasional/admin,
