@@ -1147,10 +1147,33 @@ export const aceptarInvitacion = functions.https.onCall(
 // instancia y volver a producir el mismo OOM que esto corrige.
 const OBTENER_LOCALES_OPTS = { memory: "1GiB" as const, timeoutSeconds: 120, concurrency: 1 };
 
+// FIX DE LENTITUD (auditoría 2026-10-02): el memory/timeout/concurrency de
+// arriba evita que esto se caiga, pero sigue tardando ~70-90s para Asunción.
+// Medido con Query.explain({analyze:true}) directo contra producción (sin
+// cambiar nada): el propio Firestore tarda ~37s de ejecución, leyendo y
+// facturando los 451.197 documentos completos — confirmado con
+// documents_scanned=451197 y billing_details.documents_billable=451197,
+// IGUAL con o sin .select() y IGUAL usando el índice compuesto
+// (localidad,local,mesa) ya existente en firestore.indexes.json (se lo
+// hice elegir agregando un orderBy que calza con él). No es un problema de
+// índices faltantes ni de .select() mal usado: en Firestore (modo Native,
+// a diferencia de Datastore) un .select() NUNCA evita leer el documento
+// completo del disco — solo recorta lo que se transmite por red después de
+// leerlo. Por eso cualquier reescritura de la consulta sigue pagando el
+// mismo costo de lectura: ~450k documentos completos, siempre, en cada
+// llamada. La única forma real de que esto sea rápido es dejar de repetir
+// el escaneo completo en cada apertura del modal — se cachea el resultado
+// ya agregado (locales+mesas) en /localesMesasCache/{localidad} (NO por
+// candidateId: el resultado depende solo de localidad, así que candidatos
+// que comparten localidad comparten cache). Si no existe cache, se calcula
+// como antes y se guarda para la próxima vez — la primera llamada después
+// de cada carga/actualización del padrón paga el costo una sola vez.
+// forceRefresh:true fuerza recalcular (usar después de reimportar el
+// padrón de una localidad).
 export const obtenerLocalesMesasPadron = functions.https.onCall(
   OBTENER_LOCALES_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
-    const { candidateId } = request.data ?? {};
+    const { candidateId, forceRefresh } = request.data ?? {};
     if (!candidateId) {
       throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
     }
@@ -1158,6 +1181,17 @@ export const obtenerLocalesMesasPadron = functions.https.onCall(
 
     const candidateSnap = await admin.firestore().collection("candidates").doc(candidateId).get();
     const localidad = candidateSnap.data()?.localidad;
+    const cacheRef = localidad
+      ? admin.firestore().collection("localesMesasCache").doc(localidad)
+      : null;
+
+    if (cacheRef && !forceRefresh) {
+      const cacheSnap = await cacheRef.get();
+      if (cacheSnap.exists) {
+        return { locales: cacheSnap.data()?.locales ?? [], cached: true };
+      }
+    }
+
     let votersQuery: FirebaseFirestore.Query = admin.firestore().collection("voters");
     if (localidad) {
       votersQuery = votersQuery.where("localidad", "==", localidad);
@@ -1181,7 +1215,15 @@ export const obtenerLocalesMesasPadron = functions.https.onCall(
         mesas: [...mesas].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
       }));
 
-    return { locales };
+    if (cacheRef) {
+      await cacheRef.set({
+        locales,
+        computedAt: admin.firestore.FieldValue.serverTimestamp(),
+        sourceCount: snap.size,
+      });
+    }
+
+    return { locales, cached: false };
   }
 );
 

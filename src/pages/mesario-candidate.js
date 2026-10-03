@@ -20,6 +20,8 @@ import {
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
+import { functionsInstance } from '../lib/firebase.js'
+import { httpsCallable } from 'firebase/functions'
 
 const PAGO_CONCEPTOS = ['Capacitación', 'Día D', 'Movilidad', 'Otro']
 
@@ -46,6 +48,30 @@ export function renderMesarioCandidate(container, candidateId) {
   // Qué locales quedan desplegados en la vista agrupada — sobrevive a los
   // re-renders (editar/eliminar) dentro de esta misma visita al módulo.
   const localesExpandidos = new Set()
+
+  // Local de votación REAL, sacado del padrón server-side (Cloud Function
+  // obtenerLocalesMesasPadron, ya filtrada por candidate.localidad y
+  // cacheada del lado del servidor) — reemplaza el texto libre de antes,
+  // que no calzaba con getVotersByMesa()/reportes por local al tener
+  // variantes/typos. Se pide una sola vez por visita a este módulo
+  // (padronLocalesPromise la cachea) y se dispara ya acá (no se espera a
+  // que alguien abra "Nuevo Mesario") para que, en el caso más común
+  // (cache ya calentado del lado del servidor), el modal abra al instante.
+  let padronLocalesPromise = null
+  function obtenerLocalesPadron() {
+    if (!padronLocalesPromise) {
+      // timeout largo: la primera llamada por localidad (cache miss server-
+      // side) puede tardar ~70-90s escaneando el padrón completo una sola
+      // vez — el default de httpsCallable (70s) cortaba antes de que
+      // terminara y producía "deadline-exceeded" en vez de dejarla terminar.
+      const fn = httpsCallable(functionsInstance, 'obtenerLocalesMesasPadron', { timeout: 150000 })
+      padronLocalesPromise = fn({ candidateId })
+        .then(result => result.data.locales)
+        .catch(err => { padronLocalesPromise = null; throw err })
+    }
+    return padronLocalesPromise
+  }
+  obtenerLocalesPadron().catch(() => {}) // prefetch — el error real se maneja al abrir el modal
 
   function normalizarTelefonoPY(tel) {
     if (!tel) return ''
@@ -275,9 +301,34 @@ export function renderMesarioCandidate(container, candidateId) {
     bindFilaHandlers(filtradas)
   }
 
-  function mostrarModalMesario(fila) {
+  async function mostrarModalMesario(fila) {
     let capsState = (fila?.capacitaciones || []).map(c => ({ ...c }))
     let pagosState = (fila?.pagos || []).map(p => ({ ...p }))
+
+    const cargando = document.createElement('div')
+    cargando.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
+    cargando.innerHTML = '<div style="background:white; padding:24px 32px; border-radius:8px; font-weight:700; color:#1976d2;">🔎 Cargando locales de votación reales...</div>'
+    document.body.appendChild(cargando)
+
+    let padronLocales
+    try {
+      padronLocales = await obtenerLocalesPadron()
+    } catch (err) {
+      cargando.remove()
+      alert('Error cargando los locales de votación: ' + err.message)
+      return
+    }
+    cargando.remove()
+
+    // Si el local que ya tenía esta fila no calza con ninguna entrada real
+    // del padrón (dato legado de texto libre de antes de este cambio), se
+    // conserva como opción "actual" propia — así no se pierde en silencio
+    // si se guarda sin tocar el select.
+    function entradaLocal(localValue) {
+      const norm = String(localValue || '').trim().toUpperCase()
+      return padronLocales.find(l => l.local.toUpperCase() === norm)
+    }
+    const filaLocalCanonical = fila?.local ? (entradaLocal(fila.local)?.local || null) : null
 
     const modal = document.createElement('div')
     modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; overflow-y: auto; padding: 20px;'
@@ -298,7 +349,13 @@ export function renderMesarioCandidate(container, candidateId) {
             <input id="inp-proponente" type="text" value="${escapeHtml(fila?.proponente || '')}" placeholder="Quién lo propuso" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
             <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Local:</label>
-              <input id="inp-local" type="text" value="${escapeHtml(fila?.local || '')}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
+              <select id="sel-mesario-local" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+                <option value="">-- Seleccioná un local --</option>
+                ${!filaLocalCanonical && fila?.local ? `<option value="${escapeHtml(fila.local)}" selected>${escapeHtml(fila.local)} (actual, fuera del padrón)</option>` : ''}
+                ${padronLocales.map(l => `<option value="${escapeHtml(l.local)}" ${filaLocalCanonical === l.local ? 'selected' : ''}>${escapeHtml(l.local)}</option>`).join('')}
+              </select>
+              ${padronLocales.length === 0 ? '<div style="font-size:.72rem; color:#c62828; margin-top:4px;">No se encontraron locales en el padrón para esta localidad.</div>' : ''}
+            </div>
             <div><label style="font-weight: 700; display: block; margin-bottom: 4px;">Mesa:</label>
               <input id="inp-mesa" type="text" value="${escapeHtml(fila?.mesa || '')}" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;"></div>
           </div>
@@ -339,15 +396,29 @@ export function renderMesarioCandidate(container, candidateId) {
 
         const nombreInput = modal.querySelector('#inp-nombre')
         const telefonoInput = modal.querySelector('#inp-telefono')
-        const localInput = modal.querySelector('#inp-local')
+        const localSelect = modal.querySelector('#sel-mesario-local')
         const mesaInput = modal.querySelector('#inp-mesa')
+        // Si el local sugerido no está entre las opciones reales del
+        // padrón (no debería pasar, viene de la misma colección /voters,
+        // pero por las dudas ante variantes de formato), se agrega como
+        // opción "legado" en vez de perder el dato en silencio.
+        function setLocalSugerido(valor) {
+          if (!valor || localSelect.value) return
+          const entrada = entradaLocal(valor)
+          if (entrada) { localSelect.value = entrada.local; return }
+          const opt = document.createElement('option')
+          opt.value = valor
+          opt.textContent = `${valor} (actual, fuera del padrón)`
+          opt.selected = true
+          localSelect.insertBefore(opt, localSelect.options[1] || null)
+        }
         msgEl.textContent = '🔎 Buscando datos de esta CI...'
         try {
           const registro = await getRecordByCedula(candidateId, ci)
           if (registro) {
             if (!nombreInput.value.trim()) nombreInput.value = registro.nombre || ''
             if (!telefonoInput.value.trim()) telefonoInput.value = registro.telefono || ''
-            if (!localInput.value.trim()) localInput.value = registro.local || ''
+            setLocalSugerido(registro.local)
             if (!mesaInput.value.trim()) mesaInput.value = registro.mesa || ''
             msgEl.textContent = '✅ Datos completados desde Registros.'
             return
@@ -356,7 +427,7 @@ export function renderMesarioCandidate(container, candidateId) {
           if (enPadron.length > 0) {
             const v = enPadron[0]
             if (!nombreInput.value.trim()) nombreInput.value = v.nombre || ''
-            if (!localInput.value.trim()) localInput.value = v.local || ''
+            setLocalSugerido(v.local)
             if (!mesaInput.value.trim()) mesaInput.value = v.mesa || ''
             msgEl.textContent = '✅ Datos completados desde el padrón (sin teléfono: el padrón no lo tiene).'
             return
@@ -445,7 +516,7 @@ export function renderMesarioCandidate(container, candidateId) {
       const ci = modal.querySelector('#inp-ci').value.trim()
       const telefono = modal.querySelector('#inp-telefono').value.trim()
       const proponente = modal.querySelector('#inp-proponente').value.trim()
-      const local = modal.querySelector('#inp-local').value.trim()
+      const local = modal.querySelector('#sel-mesario-local').value.trim()
       const mesa = modal.querySelector('#inp-mesa').value.trim()
       const capacitaciones = capsState.filter(c => c.fecha).map(c => ({ fecha: c.fecha, asistio: !!c.asistio }))
       const pagos = pagosState.filter(p => Number(p.monto) > 0).map(p => ({ concepto: p.concepto, monto: Number(p.monto) }))

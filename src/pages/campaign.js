@@ -1183,7 +1183,11 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
     let padronLocalesPromise = null
     function obtenerLocalesPadron() {
       if (!padronLocalesPromise) {
-        const fn = httpsCallable(functionsInstance, 'obtenerLocalesMesasPadron')
+        // timeout largo: la primera llamada por localidad (cache miss server-
+        // side) puede tardar ~70-90s escaneando el padrón completo una sola
+        // vez — el default de httpsCallable (70s) cortaba antes de que
+        // terminara y producía "deadline-exceeded" en vez de dejarla terminar.
+        const fn = httpsCallable(functionsInstance, 'obtenerLocalesMesasPadron', { timeout: 150000 })
         padronLocalesPromise = fn({ candidateId })
           .then(result => result.data.locales)
           .catch(err => { padronLocalesPromise = null; throw err })
