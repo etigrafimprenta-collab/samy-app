@@ -39,7 +39,7 @@
 
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { Auth } from "./lib";
 
@@ -227,6 +227,45 @@ function alcanceAuditLabel(alcance: { scope: PaymentScope; local: string | null 
 
 const MENSAJE_FUERA_DE_ALCANCE =
   "Este votante no está dentro de tu alcance de pago autorizado";
+
+// ── Monto especial temporal por cajero (AUDITORÍA 2026-10-03) ───────────
+// Prioridad del monto a pagar (pedido explícito), de más a menos
+// específica:
+//   1. INDIVIDUAL — el votante (o la excepción) ya tiene un monto
+//      específicamente autorizado — eso se resuelve en cada función
+//      llamante, nunca pasa por acá (ver registrarEgresoCajero).
+//   2. ESPECIAL_CAJERO — este cajero tiene un monto especial vigente
+//      AHORA MISMO (candidates/{id}/users/{uid}.specialAmount +
+//      .specialAmountFrom/.specialAmountTo), comparado con la hora del
+//      SERVIDOR (Date.now() de Cloud Functions, nunca con nada que venga
+//      del cliente) — nunca confiar en que "todavía no venció" lo decida
+//      el navegador del cajero.
+//   3. CONFIG_GENERAL — Finanzas > Configuración > "Ayuda máxima por
+//      votante", el default histórico.
+// specialAmount ausente/0, o from/to ausentes, o fuera de ventana ⇒ cae
+// automáticamente a CONFIG_GENERAL sin intervención manual (pedido
+// explícito: "al vencer... vuelve automáticamente, sin intervención").
+type FuenteMonto = "INDIVIDUAL" | "ESPECIAL_CAJERO" | "CONFIG_GENERAL";
+function resolverMontoEfectivo(
+  memberData: FirebaseFirestore.DocumentData | undefined,
+  montoConfigGeneral: number
+): {
+  monto: number;
+  fuenteMonto: FuenteMonto;
+  vigenciaDesde: FirebaseFirestore.Timestamp | null;
+  vigenciaHasta: FirebaseFirestore.Timestamp | null;
+} {
+  const especial = Number(memberData?.specialAmount) || 0;
+  const desde = memberData?.specialAmountFrom as FirebaseFirestore.Timestamp | undefined;
+  const hasta = memberData?.specialAmountTo as FirebaseFirestore.Timestamp | undefined;
+  if (especial > 0 && desde && hasta) {
+    const ahoraMs = Date.now();
+    if (ahoraMs >= desde.toMillis() && ahoraMs <= hasta.toMillis()) {
+      return { monto: especial, fuenteMonto: "ESPECIAL_CAJERO", vigenciaDesde: desde, vigenciaHasta: hasta };
+    }
+  }
+  return { monto: montoConfigGeneral, fuenteMonto: "CONFIG_GENERAL", vigenciaDesde: null, vigenciaHasta: null };
+}
 
 function requireAuth(auth: Auth): string {
   if (!auth) {
@@ -423,6 +462,104 @@ export const asignarFondosCajero = functions.https.onCall(
   }
 );
 
+// ── 2c. configurarMontoEspecialCajero ────────────────────────────────────
+// AUDITORÍA 2026-10-03 — "Monto especial temporal": el administrador fija,
+// para UN cajero puntual, un monto por votante distinto al general de
+// Finanzas > Configuración, vigente solo entre dos fechas/horas. Vive en
+// el MISMO doc candidates/{id}/users/{uid} que ya usan Mesa/Local y
+// Alcance de pago (nunca una colección aparte) — admin-only, vía Admin
+// SDK (nunca escritura directa del cliente), precisamente para que
+// firestore.rules no tenga que exponer estos campos al camino de
+// auto-edición (ver bloqueo explícito agregado ahí: un cajero NUNCA
+// puede auto-asignarse su propio monto especial).
+// specialAmount <= 0 (o ausente) con fromMillis/toMillis ausentes ⇒ limpia
+// la configuración (vuelve a depender 100% de la config general).
+export const configurarMontoEspecialCajero = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cashierUid, specialAmount, fromMillis, toMillis, operationId } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId || !cashierUid || !operationId) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/cashierUid/operationId");
+    }
+
+    const limpiar = specialAmount === null || specialAmount === undefined || !(Number(specialAmount) > 0);
+    let desde: Date | null = null;
+    let hasta: Date | null = null;
+    if (!limpiar) {
+      if (!fromMillis || !toMillis) {
+        throw new functions.https.HttpsError("invalid-argument", "Faltan las fechas Desde/Hasta");
+      }
+      desde = new Date(Number(fromMillis));
+      hasta = new Date(Number(toMillis));
+      if (isNaN(desde.getTime()) || isNaN(hasta.getTime()) || hasta.getTime() <= desde.getTime()) {
+        throw new functions.https.HttpsError("invalid-argument", "El rango Desde/Hasta no es válido (Hasta debe ser posterior a Desde)");
+      }
+    }
+    const montoNum = limpiar ? null : Number(specialAmount);
+
+    return withIdempotency(
+      candidateId,
+      "configurarMontoEspecialCajero",
+      operationId,
+      { cashierUid, specialAmount: montoNum, fromMillis: desde ? desde.getTime() : null, toMillis: hasta ? hasta.getTime() : null },
+      async (tx) => {
+        const callerRoles = await readCallerRoles(tx, candidateId, callerUid);
+        if (!callerRoles.isAdmin) {
+          throw new functions.https.HttpsError(
+            "permission-denied",
+            "Solo campaign_admin/finance_admin pueden configurar un monto especial para un cajero"
+          );
+        }
+        const cashierRef = candidateRef(candidateId).collection("users").doc(cashierUid);
+        const cashierSnap = await tx.get(cashierRef);
+        if (!cashierSnap.exists) {
+          throw new functions.https.HttpsError("not-found", "Usuario no encontrado en este candidato");
+        }
+        const cashierData = cashierSnap.data()!;
+        const roleIds: string[] = Array.isArray(cashierData.roleIds) ? cashierData.roleIds : [];
+        const esCajero = cashierData.role === CASHIER_ROLE || roleIds.includes(CASHIER_ROLE) || cashierData.isFieldCashier === true;
+        if (!esCajero) {
+          throw new functions.https.HttpsError(
+            "failed-precondition",
+            "El usuario indicado no es un cajero (rol cashier o cajero de campo)"
+          );
+        }
+
+        const previousData = {
+          specialAmount: cashierData.specialAmount ?? null,
+          specialAmountFrom: cashierData.specialAmountFrom ?? null,
+          specialAmountTo: cashierData.specialAmountTo ?? null,
+        };
+        const newData = limpiar
+          ? {
+              specialAmount: null,
+              specialAmountFrom: null,
+              specialAmountTo: null,
+              specialAmountConfiguredBy: null,
+              specialAmountConfiguredAt: null,
+            }
+          : {
+              specialAmount: montoNum,
+              specialAmountFrom: Timestamp.fromDate(desde!),
+              specialAmountTo: Timestamp.fromDate(hasta!),
+              specialAmountConfiguredBy: callerUid,
+              specialAmountConfiguredAt: FieldValue.serverTimestamp(),
+            };
+        tx.update(cashierRef, newData);
+        writeAuditInTx(tx, candidateId, {
+          actorUid: callerUid,
+          action: limpiar ? "cashier_special_amount_clear" : "cashier_special_amount_set",
+          entityType: "candidateUsers",
+          entityId: cashierUid,
+          previousData,
+          newData,
+        });
+        return { ok: true };
+      }
+    );
+  }
+);
+
 // ── 2b. buscarBeneficiarioCajero ─────────────────────────────────────────
 // AUDITORÍA 2026-10-03: antes el cliente buscaba el beneficiario con un
 // query directo a savedRecords (getOwnRecordByCedula/getRecordByCedula,
@@ -509,18 +646,24 @@ export const buscarBeneficiarioCajero = functions.https.onCall(
           dirigenteNombre,
         };
       }
-      // AUDITORÍA 2026-10-03: el monto SUGERIDO para aprobar-y-pagar en
-      // un solo paso (aprobarYPagarAyudaCajero) es el mismo default de
-      // Finanzas > Configuración — se devuelve acá para que el cajero
-      // lo vea ANTES de confirmar, nunca lo escribe él.
+      // AUDITORÍA 2026-10-03: el monto que se va a cobrar de verdad al
+      // confirmar (aprobarYPagarAyudaCajero) — ya resuelto con la MISMA
+      // prioridad que usará esa función (monto especial del cajero
+      // vigente ahora, si no config general) — se devuelve acá para que
+      // el cajero vea el monto REAL antes de confirmar, nunca uno
+      // distinto al que realmente se va a cobrar.
       const settingsSnap = await candidateRef(candidateId).collection("config").doc("financeSettings").get();
+      const montoGeneral = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      const montoEfectivo = resolverMontoEfectivo(memberData, montoGeneral);
       return {
         scenario: "B",
         recordId: rec.id,
         nombre: data.nombre || "",
         cedula: data.cedula,
         dirigenteNombre,
-        maxVoterAssistanceAmount: Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0,
+        maxVoterAssistanceAmount: montoEfectivo.monto,
+        fuenteMonto: montoEfectivo.fuenteMonto,
+        vigenciaHastaMillis: montoEfectivo.vigenciaHasta ? montoEfectivo.vigenciaHasta.toMillis() : null,
       };
     }
 
@@ -868,6 +1011,12 @@ export const registrarEgresoCajero = functions.https.onCall(
         // ESTE cajero al momento de ESTE pago puntual (pedido explícito).
         paymentScopeAtPayment: alcanceAuditLabel(alcance),
         paymentScopeLocalAtPayment: alcance.scope === "local" ? alcance.local : null,
+        // Monto especial temporal (AUDITORÍA 2026-10-03): esta función
+        // SIEMPRE paga un monto YA autorizado específicamente para este
+        // beneficiario (el aprobado en su registro, o el de la excepción)
+        // — nunca el monto especial del cajero ni la config general, así
+        // que fuenteMonto es siempre INDIVIDUAL acá (ver prioridad 1).
+        fuenteMonto: "INDIVIDUAL" as const,
         createdAt: FieldValue.serverTimestamp(),
       };
       tx.set(movRef, movPayload);
@@ -888,7 +1037,7 @@ export const registrarEgresoCajero = functions.https.onCall(
         entityType: "cashierMovements",
         entityId: movRef.id,
         previousData: { balance: saldoActual },
-        newData: { balance: nuevoBalance, amount: montoNum, beneficiaryVoterId, paymentScopeAtPayment: alcanceAuditLabel(alcance) },
+        newData: { balance: nuevoBalance, amount: montoNum, beneficiaryVoterId, paymentScopeAtPayment: alcanceAuditLabel(alcance), fuenteMonto: "INDIVIDUAL" },
       });
       return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName };
     });
@@ -1022,7 +1171,13 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
         );
       }
 
-      const monto = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      // AUDITORÍA 2026-10-03 (monto especial temporal por cajero):
+      // prioridad 2/3 del pedido — monto especial vigente AHORA (hora
+      // del servidor, nunca la del cliente) si existe, si no config
+      // general. Prioridad 1 (monto individual ya autorizado) no aplica
+      // acá — esta función es SOLO para "sin ayuda previa todavía".
+      const montoGeneral = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      const { monto, fuenteMonto, vigenciaDesde, vigenciaHasta } = resolverMontoEfectivo(callerRoles.memberData, montoGeneral);
       if (!(monto > 0)) {
         throw new functions.https.HttpsError(
           "failed-precondition",
@@ -1069,6 +1224,10 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
         createdByRole: isOwner ? "cashier" : "admin",
         paymentScopeAtPayment: alcanceAuditLabel(alcance),
         paymentScopeLocalAtPayment: alcance.scope === "local" ? alcance.local : null,
+        fuenteMonto,
+        vigenciaDesde: vigenciaDesde || null,
+        vigenciaHasta: vigenciaHasta || null,
+        montoEspecialConfiguradoPor: fuenteMonto === "ESPECIAL_CAJERO" ? (callerRoles.memberData?.specialAmountConfiguredBy ?? null) : null,
         createdAt: FieldValue.serverTimestamp(),
       };
       tx.set(movRef, movPayload);
@@ -1082,9 +1241,9 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
         entityType: "cashierMovements",
         entityId: movRef.id,
         previousData: { balance: saldoActual, recordAssistanceStatus: record.assistanceStatus ?? null },
-        newData: { balance: nuevoBalance, amount: monto, beneficiaryVoterId, approvedAmount: monto, paymentScopeAtPayment: alcanceAuditLabel(alcance) },
+        newData: { balance: nuevoBalance, amount: monto, beneficiaryVoterId, approvedAmount: monto, paymentScopeAtPayment: alcanceAuditLabel(alcance), fuenteMonto },
       });
-      return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName, approvedAmount: monto };
+      return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName, approvedAmount: monto, fuenteMonto };
     });
   }
 );

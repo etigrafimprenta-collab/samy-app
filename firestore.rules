@@ -720,7 +720,8 @@ service cloud.firestore {
         (isOwner(uid) && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'role', 'roleIds', 'primaryRoleId', 'scopedPermissions', 'isFieldCashier',
           'mesa', 'mesasAsignadas', 'tableIds', 'seccional', 'zoneIds', 'pollingPlaceIds', 'local', 'teamId',
-          'paymentScope'
+          'paymentScope',
+          'specialAmount', 'specialAmountFrom', 'specialAmountTo', 'specialAmountConfiguredBy', 'specialAmountConfiguredAt'
         ]))
       );
 

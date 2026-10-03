@@ -92,6 +92,7 @@ import { debounce } from '../lib/debounce.js'
 import { exportGenericToExcel } from '../lib/excel.js'
 import { exportGenericToPdf } from '../lib/pdf.js'
 import { can } from '../lib/rbac.js'
+import { formatParaguayTime } from '../lib/paraguayTime.js'
 
 const BENEFICIARY_LABELS = {
   mesario: '🪑 Mesario', chofer: '🚗 Chofer', dirigente: '🧭 Dirigente',
@@ -1632,7 +1633,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     // editable) y pagar en un solo paso. aprobarYPagarAyudaCajero hace
     // las 2 cosas en UNA transacción atómica — nunca manda `amount`
     // desde el cliente.
-    function pintarSinAyudaAprobada({ nombre, ci, recordId, maxVoterAssistanceAmount }) {
+    function pintarSinAyudaAprobada({ nombre, ci, recordId, maxVoterAssistanceAmount, fuenteMonto, vigenciaHastaMillis }) {
       if (!(Number(maxVoterAssistanceAmount) > 0)) {
         resultadoEl.innerHTML = `
           <div style="background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
@@ -1643,11 +1644,17 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
         return
       }
+      // Monto especial temporal (AUDITORÍA 2026-10-03): el monto que
+      // muestra acá es el MISMO que realmente se va a cobrar al
+      // confirmar (ya resuelto server-side con la prioridad completa) —
+      // nunca "sugerido", es el que se cobra, el cajero no lo modifica.
+      const esEspecial = fuenteMonto === 'ESPECIAL_CAJERO'
       resultadoEl.innerHTML = `
         <div style="background:#f5f5f5; border-radius:6px; padding:12px; margin-bottom:14px; font-size:.9rem; display:grid; gap:4px;">
           <div><strong>Beneficiario:</strong> ${escapeHtml(nombre || '—')}</div>
           <div><strong>CI:</strong> ${escapeHtml(String(ci))}</div>
-          <div style="margin-top:4px; font-size:1.05rem;"><strong>Monto sugerido:</strong> <span style="color:#c62828; font-weight:700;">${money(maxVoterAssistanceAmount, cuenta.currency)}</span></div>
+          <div style="margin-top:4px; font-size:1.05rem;"><strong>Monto a entregar:</strong> <span style="color:#c62828; font-weight:700;">${money(maxVoterAssistanceAmount, cuenta.currency)}</span></div>
+          ${esEspecial && vigenciaHastaMillis ? `<div style="font-size:.75rem; color:#e65100;">💰 Monto especial vigente hasta ${escapeHtml(formatParaguayTime(new Date(vigenciaHastaMillis)))} (hora PY)</div>` : ''}
         </div>
         <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
         <div style="display:flex; gap:8px;">
@@ -1713,6 +1720,20 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
     }
 
+    // ── FUERA_DE_ALCANCE: existe, pero el Alcance de pago de este cajero
+    // no lo cubre (AUDITORÍA 2026-10-03) — antes caía sin querer en el
+    // mensaje de "no encontrado", que era confuso (la persona SÍ existe,
+    // solo que este cajero no está autorizado a pagarle).
+    function pintarFueraDeAlcance({ nombre, ci }) {
+      resultadoEl.innerHTML = `
+        <div style="background:#ffebee; border-left:4px solid #c62828; color:#c62828; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+          🚫 ${escapeHtml(nombre || 'Esta persona')} (CI ${escapeHtml(String(ci))}) no está dentro de tu alcance de pago autorizado.
+        </div>
+        <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+    }
+
     // ── Escenario D: CI no existe en ningún lado ────────────────────────
     function pintarNoEncontrado() {
       resultadoEl.innerHTML = `
@@ -1730,7 +1751,10 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       if (r.scenario === 'A') {
         pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.approvedAmount, dirigenteNombre: r.dirigenteNombre })
       } else if (r.scenario === 'B') {
-        pintarSinAyudaAprobada({ nombre: r.nombre, ci: r.cedula, recordId: r.recordId, maxVoterAssistanceAmount: r.maxVoterAssistanceAmount })
+        pintarSinAyudaAprobada({
+          nombre: r.nombre, ci: r.cedula, recordId: r.recordId, maxVoterAssistanceAmount: r.maxVoterAssistanceAmount,
+          fuenteMonto: r.fuenteMonto, vigenciaHastaMillis: r.vigenciaHastaMillis
+        })
       } else if (r.scenario === 'C') {
         if (r.excepcion?.status === 'approved') {
           pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.excepcion.approvedAmount, exceptionAuthorizationId: r.excepcion.id })
@@ -1739,6 +1763,8 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         } else {
           pintarSolicitarExcepcion({ nombre: r.nombre, ci: r.cedula })
         }
+      } else if (r.scenario === 'FUERA_DE_ALCANCE') {
+        pintarFueraDeAlcance({ nombre: r.nombre, ci: r.cedula })
       } else {
         pintarNoEncontrado()
       }

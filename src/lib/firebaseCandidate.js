@@ -3327,6 +3327,22 @@ export function generateCashierOperationId() {
   return (crypto?.randomUUID ? crypto.randomUUID() : `op-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 }
 
+// Monto especial temporal (AUDITORÍA 2026-10-03): `from`/`to` son objetos
+// Date (instante UTC real, ya convertidos desde hora Paraguay por quien
+// llama — ver src/lib/paraguayTime.js) — se mandan como millis, nunca un
+// string timezone-naive. `specialAmount` null/0 limpia la configuración.
+export async function configurarMontoEspecialCajero(candidateId, cashierUid, { specialAmount, from, to }, operationId) {
+  const fn = httpsCallable(functionsInstance, 'configurarMontoEspecialCajero')
+  const result = await fn({
+    candidateId, cashierUid,
+    specialAmount: specialAmount || null,
+    fromMillis: from ? from.getTime() : null,
+    toMillis: to ? to.getTime() : null,
+    operationId: operationId || generateCashierOperationId()
+  })
+  return result.data
+}
+
 export async function crearCuentaCajero(candidateId, responsibleUserId, name, operationId) {
   const fn = httpsCallable(functionsInstance, 'crearCuentaCajero')
   const result = await fn({ candidateId, responsibleUserId, name, operationId: operationId || generateCashierOperationId() })

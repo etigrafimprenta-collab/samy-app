@@ -28,13 +28,15 @@ import {
   searchVoterByCedula,
   getRecordByCedula,
   reopenAssistanceRequest,
-  getFinanceSettings
+  getFinanceSettings,
+  configurarMontoEspecialCajero
 } from '../lib/firebaseCandidate.js'
 import { resolveAssistanceStatus } from '../lib/ayudaGs.js'
 import { getCandidateMembershipsForUser, setStoredActiveCandidateId } from '../lib/candidateContext.js'
 import { buildRecordatorioVotoMessage } from '../lib/campaignMessages.js'
 import { can, getGrantedScopes } from '../lib/rbac.js'
 import { ROLE_LABELS } from '../lib/roleLabels.js'
+import { paraguayInputToDate, dateToParaguayInput, formatParaguayDateTime, toDate } from '../lib/paraguayTime.js'
 // Los paneles ricos (Día D admin/control, choferes) se importan
 // dinámicamente en cada tab — no todo campaign_admin necesita bajarlos
 // solo por abrir "Usuarios" (mismo criterio que Fase 4 en app.js/main.js).
@@ -1400,6 +1402,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
       function tarjetaUsuario(u) {
         const esTop = u.id === topUid
+        const esCajero = u.role === 'cashier' || u.isFieldCashier === true
+        const vigenciaHasta = esCajero ? toDate(u.specialAmountTo) : null
+        const montoEspecialVigenteOFuturo = esCajero && Number(u.specialAmount) > 0 && vigenciaHasta && vigenciaHasta.getTime() > Date.now()
         return `
             <div style="border:1px solid #eee; border-radius:6px; padding:14px; background:${esTop ? '#fff9c4' : '#f9f9f9'};">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
@@ -1407,6 +1412,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                   <div style="font-weight:700;">${esTop ? '🥇 ' : ''}${escapeHtml(u.nombre || u.email)}</div>
                   <div style="font-size:.75rem; color:#666;">${escapeHtml(u.email)}</div>
                   <span style="display:inline-block; margin-top:4px; background:${roleColor(u.role)}; color:white; padding:2px 8px; border-radius:3px; font-size:.7rem; font-weight:700;">${escapeHtml(ROLE_LABELS[u.role] || u.role)}</span>
+                  ${montoEspecialVigenteOFuturo ? `<div style="margin-top:4px; font-size:.72rem; color:#e65100; font-weight:700;">💰 Monto especial: Gs. ${Number(u.specialAmount).toLocaleString('es-PY')} (hasta ${escapeHtml(formatParaguayDateTime(vigenciaHasta))})</div>` : ''}
                 </div>
                 <div style="text-align:right;">
                   <div style="font-size:1.2rem; font-weight:700; color:${candidate.primaryColor || '#1f4b7a'};">${u.cantidad}</div>
@@ -1417,6 +1423,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
                 <button class="btn-editar-rol" data-uid="${u.id}" style="flex:1; min-width:90px; background:#2196f3; color:white; border:none; padding:7px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">✏️ Rol</button>
                 <button class="btn-cambiar-pass" data-uid="${u.id}" style="flex:1; min-width:90px; background:#ff9800; color:white; border:none; padding:7px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">🔐 Contraseña</button>
                 <button class="btn-asignar-mesa" data-uid="${u.id}" style="flex:1; min-width:90px; background:#4caf50; color:white; border:none; padding:7px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">📍 Mesa/Local</button>
+                ${esCajero ? `<button class="btn-monto-especial" data-uid="${u.id}" style="flex:1; min-width:90px; background:#e65100; color:white; border:none; padding:7px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">💰 Monto especial</button>` : ''}
                 <button class="btn-borrar-usuario" data-uid="${u.id}" style="flex:1; min-width:90px; background:#d32f2f; color:white; border:none; padding:7px 10px; border-radius:4px; cursor:pointer; font-size:.78rem; font-weight:600;">🗑️ Borrar</button>
               </div>
               ${u.telefono ? `
@@ -1435,6 +1442,9 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         })
         equipoEl.querySelectorAll('.btn-cambiar-pass').forEach(btn => {
           btn.addEventListener('click', () => modalCambiarPassword(ranking.find(u => u.id === btn.dataset.uid)))
+        })
+        equipoEl.querySelectorAll('.btn-monto-especial').forEach(btn => {
+          btn.addEventListener('click', () => modalMontoEspecialCajero(ranking.find(u => u.id === btn.dataset.uid)))
         })
         equipoEl.querySelectorAll('.btn-asignar-mesa').forEach(btn => {
           btn.addEventListener('click', () => modalAsignarMesa(ranking.find(u => u.id === btn.dataset.uid)))
@@ -1732,6 +1742,70 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
           alert('Error: ' + err.message)
         }
       })
+    }
+
+    // Monto especial temporal por cajero (AUDITORÍA 2026-10-03): ventana
+    // Desde/Hasta SIEMPRE en hora Paraguay (ver src/lib/paraguayTime.js) —
+    // nunca depende de la zona horaria del navegador de quien configura.
+    function modalMontoEspecialCajero(u) {
+      const actualDesde = toDate(u.specialAmountFrom)
+      const actualHasta = toDate(u.specialAmountTo)
+      const tieneActual = Number(u.specialAmount) > 0 && actualHasta
+      const modal = abrirModal(`
+        <h3 style="margin:0 0 6px;">💰 Monto especial — ${escapeHtml(u.nombre || u.email)}</h3>
+        <p style="margin:0 0 14px; font-size:.82rem; color:#666;">Tiene prioridad sobre "Ayuda máxima por votante" (Finanzas → Configuración) SOLO dentro de la ventana Desde/Hasta — fuera de esa ventana, este cajero vuelve automáticamente al monto general, sin que haga falta tocar nada.</p>
+        ${tieneActual ? `<div style="background:#fff3cd; border-left:4px solid #ffc107; padding:8px 10px; border-radius:4px; font-size:.78rem; margin-bottom:12px;">Configuración actual: Gs. ${Number(u.specialAmount).toLocaleString('es-PY')}, de ${escapeHtml(formatParaguayDateTime(actualDesde))} a ${escapeHtml(formatParaguayDateTime(actualHasta))}.</div>` : ''}
+        <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Monto especial por votante (Gs.):</label>
+        <input id="inp-monto-especial" type="number" min="0" value="${Number(u.specialAmount) > 0 ? Number(u.specialAmount) : ''}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:10px; box-sizing:border-box;">
+        <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Desde (hora Paraguay):</label>
+        <input id="inp-especial-desde" type="datetime-local" value="${actualDesde ? dateToParaguayInput(actualDesde) : ''}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:10px; box-sizing:border-box;">
+        <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Hasta (hora Paraguay):</label>
+        <input id="inp-especial-hasta" type="datetime-local" value="${actualHasta ? dateToParaguayInput(actualHasta) : ''}" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box;">
+        <div id="monto-especial-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:8px;">
+          <button id="btn-guardar-especial" style="flex:1; background:#e65100; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
+          ${tieneActual ? `<button id="btn-quitar-especial" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Quitar</button>` : ''}
+          <button id="btn-cancelar-especial" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+        </div>
+      `)
+      modal.querySelector('#btn-cancelar-especial').addEventListener('click', () => modal.remove())
+      const msg = modal.querySelector('#monto-especial-msg')
+      modal.querySelector('#btn-guardar-especial').addEventListener('click', async () => {
+        const monto = Number(modal.querySelector('#inp-monto-especial').value) || 0
+        const desdeStr = modal.querySelector('#inp-especial-desde').value
+        const hastaStr = modal.querySelector('#inp-especial-hasta').value
+        if (!(monto > 0) || !desdeStr || !hastaStr) {
+          msg.innerHTML = '<span style="color:#c62828;">Completá monto, Desde y Hasta.</span>'
+          return
+        }
+        const desde = paraguayInputToDate(desdeStr)
+        const hasta = paraguayInputToDate(hastaStr)
+        if (hasta.getTime() <= desde.getTime()) {
+          msg.innerHTML = '<span style="color:#c62828;">"Hasta" debe ser posterior a "Desde".</span>'
+          return
+        }
+        msg.textContent = 'Guardando...'
+        try {
+          await configurarMontoEspecialCajero(candidateId, u.id, { specialAmount: monto, from: desde, to: hasta })
+          modal.remove()
+          loadUsersList()
+        } catch (err) {
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
+      if (tieneActual) {
+        modal.querySelector('#btn-quitar-especial').addEventListener('click', async () => {
+          if (!confirm('¿Quitar el monto especial configurado? Este cajero vuelve de inmediato al monto general.')) return
+          msg.textContent = 'Quitando...'
+          try {
+            await configurarMontoEspecialCajero(candidateId, u.id, { specialAmount: null, from: null, to: null })
+            modal.remove()
+            loadUsersList()
+          } catch (err) {
+            msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+          }
+        })
+      }
     }
 
     function modalBorrarUsuario(u) {
