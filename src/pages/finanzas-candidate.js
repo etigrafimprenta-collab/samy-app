@@ -21,7 +21,10 @@ import {
   getDrivers,
   getAllCandidateUsers,
   getRecordByCedula,
-  getOwnRecordByCedula,
+  buscarBeneficiarioCajero,
+  solicitarExcepcionBeneficiario,
+  resolverExcepcionBeneficiario,
+  getPendingBeneficiaryExceptions,
   searchVoterByCedula,
   createFinanceObligation,
   updateFinanceObligation,
@@ -1068,6 +1071,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
             </tbody>
           </table>
         </div>
+        <div id="cdd-solicitudes-excepcion" style="margin-top:20px;"></div>
         <div id="cdd-pendientes" style="margin-top:20px;"></div>
         <div id="cdd-drilldown" style="margin-top:20px;"></div>
       `
@@ -1078,9 +1082,81 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
           pintarCajeroDrillDown(el.dataset.id)
         })
       })
+      if (puedeAutorizarExcepcionCajero) await pintarSolicitudesExcepcion()
     } catch (err) {
       body.innerHTML = `<div style="color:#c62828; padding:20px;">Error cargando cajeros: ${escapeHtml(err.message)}</div>`
     }
+  }
+
+  // AUDITORÍA 2026-10-03 — solicitudes de excepción pendientes (escenario
+  // C del cajero: beneficiario que no es "nuestro" votante, pidiendo
+  // autorización para un primer pago). Se muestran acá, a nivel de todo
+  // Cajeros DD (no dentro del drill-down de una cuenta puntual) porque
+  // una solicitud puede venir de cualquier cajero del candidato.
+  async function pintarSolicitudesExcepcion() {
+    const el = document.getElementById('cdd-solicitudes-excepcion')
+    if (!el) return
+    const pendientes = await getPendingBeneficiaryExceptions(candidateId)
+    if (pendientes.length === 0) { el.innerHTML = ''; return }
+    const equipo = await getAllCandidateUsers(candidateId)
+    const nombrePorUid = new Map(equipo.map(u => [u.id, u.nombre || u.email || u.id]))
+    el.innerHTML = `
+      <div style="border:2px solid #6a1b9a; border-radius:8px; padding:16px;">
+        <h4 style="margin:0 0 10px;">🔓 Solicitudes de autorización excepcional (${pendientes.length})</h4>
+        <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
+          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Beneficiario</th><th>CI</th><th>Solicitado por</th><th>Fecha/hora</th><th>Monto sugerido</th><th></th></tr></thead>
+          <tbody>
+            ${pendientes.map(p => `<tr style="border-bottom:1px solid #eee;" data-id="${p.id}">
+              <td style="padding:6px;">${escapeHtml(p.beneficiaryName || '')}</td>
+              <td>${escapeHtml(p.beneficiaryCI || '')}</td>
+              <td>${escapeHtml(nombrePorUid.get(p.requestedBy) || p.requestedBy || '')}</td>
+              <td>${p.requestedAt?.toDate ? p.requestedAt.toDate().toLocaleString('es-PY') : ''}</td>
+              <td><input type="number" class="cdd-sol-monto" data-id="${p.id}" value="${Number(p.suggestedAmount) || 0}" style="width:110px; padding:6px; border:1px solid #ddd; border-radius:4px;"></td>
+              <td style="white-space:nowrap;">
+                <button class="cdd-sol-aprobar" data-id="${p.id}" style="background:#2e7d32; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem; margin-right:4px;">✅ Aprobar</button>
+                <button class="cdd-sol-rechazar" data-id="${p.id}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">❌ Rechazar</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+        <div id="cdd-sol-msg" style="font-size:.85rem; margin-top:8px;"></div>
+      </div>
+    `
+    const msg = el.querySelector('#cdd-sol-msg')
+    el.querySelectorAll('.cdd-sol-aprobar').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id
+        const monto = Number(el.querySelector(`.cdd-sol-monto[data-id="${id}"]`).value)
+        if (!(monto > 0)) { msg.innerHTML = '<span style="color:#c62828;">El monto debe ser mayor a 0.</span>'; return }
+        btn.disabled = true
+        msg.textContent = 'Aprobando...'
+        try {
+          await resolverExcepcionBeneficiario(candidateId, id, 'approve', { approvedAmount: monto })
+          msg.innerHTML = '<span style="color:#2e7d32;">✅ Aprobado.</span>'
+          await pintarSolicitudesExcepcion()
+        } catch (err) {
+          btn.disabled = false
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
+    })
+    el.querySelectorAll('.cdd-sol-rechazar').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id
+        const reason = prompt('¿Motivo del rechazo? (obligatorio)')
+        if (!reason || !reason.trim()) return
+        btn.disabled = true
+        msg.textContent = 'Rechazando...'
+        try {
+          await resolverExcepcionBeneficiario(candidateId, id, 'reject', { rejectionReason: reason.trim() })
+          msg.innerHTML = '<span style="color:#2e7d32;">✅ Rechazado.</span>'
+          await pintarSolicitudesExcepcion()
+        } catch (err) {
+          btn.disabled = false
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
+    })
   }
 
   async function mostrarModalNuevaCuentaCajero() {
@@ -1476,11 +1552,17 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   // sigue bloqueado por el servidor (registrarEgresoCajero,
   // cashierFunds.ts) con un mensaje claro; es un caso excepcional real,
   // no el flujo simplificado que se pidió acá.
+  // AUDITORÍA 2026-10-03 (causa real + escenarios A/B/C/D): la búsqueda
+  // ya no es una query directa del cliente — buscarBeneficiarioCajero
+  // (Cloud Function) resuelve, contra TODO el candidato (nunca acotado
+  // a un dirigente puntual) y después contra el padrón completo de la
+  // localidad, cuál de los 4 escenarios aplica. El cajero SOLO visualiza
+  // y confirma: el monto a pagar nunca sale de un campo editable.
   function mostrarModalRegistrarEgreso(cuenta, prefillConfirmado = null) {
     const modal = document.createElement('div')
     modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px; overflow-y:auto;'
     modal.innerHTML = `
-      <div style="background: white; border-radius: 8px; max-width: 420px; width: 100%; padding: 24px; margin: 20px 0;">
+      <div style="background: white; border-radius: 8px; max-width: 440px; width: 100%; padding: 24px; margin: 20px 0;">
         <h3 style="margin:0 0 6px;">➖ Registrar egreso</h3>
         <p style="margin:0 0 14px; font-size:.85rem; color:#666;">Saldo disponible: ${money(cuenta.balance, cuenta.currency)}</p>
         <div id="cdd-eg-paso-ci" style="${prefillConfirmado ? 'display:none;' : ''}">
@@ -1492,31 +1574,143 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
             <button id="cdd-eg-btn-cancelar1" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
           </div>
         </div>
-        <div id="cdd-eg-paso-confirmar" style="${prefillConfirmado ? '' : 'display:none;'}">
-          <div style="background:#f5f5f5; border-radius:6px; padding:12px; margin-bottom:14px; font-size:.9rem; display:grid; gap:4px;">
-            <div><strong>Nombre:</strong> <span id="cdd-eg-conf-nombre"></span></div>
-            <div><strong>CI:</strong> <span id="cdd-eg-conf-ci"></span></div>
-            <div style="margin-top:4px; font-size:1.05rem;"><strong>Monto a entregar:</strong> <span id="cdd-eg-conf-monto" style="color:#c62828; font-weight:700;"></span></div>
-          </div>
-          <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
-          <div style="display:flex; gap:8px;">
-            <button id="cdd-eg-btn-confirmar" style="flex:1; background:#2e7d32; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">✅ Confirmar pago</button>
-            <button id="cdd-eg-btn-cancelar2" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
-          </div>
-        </div>
+        <div id="cdd-eg-paso-resultado" style="${prefillConfirmado ? '' : 'display:none;'}"></div>
       </div>
     `
     document.body.appendChild(modal)
-    modal.querySelectorAll('#cdd-eg-btn-cancelar1, #cdd-eg-btn-cancelar2').forEach(b => b.addEventListener('click', () => modal.remove()))
+    modal.querySelector('#cdd-eg-btn-cancelar1')?.addEventListener('click', () => modal.remove())
 
-    let datosConfirmados = prefillConfirmado ? { ...prefillConfirmado } : null
+    const resultadoEl = modal.querySelector('#cdd-eg-paso-resultado')
+    // Mismo criterio que mostrarModalAsignarFondos: UN operationId por
+    // apertura del modal, reusado en cada click de "Confirmar pago"
+    // mientras el modal siga abierto (doble clic == mismo operationId ==
+    // mismo resultado idempotente, nunca un movimiento duplicado).
+    const operationId = generateCashierOperationId()
 
-    function pintarConfirmacion() {
-      modal.querySelector('#cdd-eg-conf-nombre').textContent = datosConfirmados.nombre || '—'
-      modal.querySelector('#cdd-eg-conf-ci').textContent = datosConfirmados.ci
-      modal.querySelector('#cdd-eg-conf-monto').textContent = money(datosConfirmados.monto, cuenta.currency)
+    // ── Escenario A/C-aprobado: monto fijo, listo para pagar ───────────
+    function pintarListoParaPagar({ nombre, ci, monto, dirigenteNombre, exceptionAuthorizationId }) {
+      resultadoEl.innerHTML = `
+        <div style="background:#f5f5f5; border-radius:6px; padding:12px; margin-bottom:14px; font-size:.9rem; display:grid; gap:4px;">
+          <div><strong>Nombre:</strong> ${escapeHtml(nombre || '—')}</div>
+          <div><strong>CI:</strong> ${escapeHtml(String(ci))}</div>
+          ${dirigenteNombre ? `<div><strong>Dirigente responsable:</strong> ${escapeHtml(dirigenteNombre)}</div>` : ''}
+          <div style="margin-top:4px; font-size:1.15rem;"><strong>Monto a entregar:</strong> <span style="color:#c62828; font-weight:700;">${money(monto, cuenta.currency)}</span></div>
+        </div>
+        <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:8px;">
+          <button id="cdd-eg-btn-confirmar" style="flex:1; background:#2e7d32; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">✅ Confirmar pago</button>
+          <button id="cdd-eg-btn-cancelar2" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+        </div>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-cancelar2').addEventListener('click', () => modal.remove())
+      const btnConfirmar = resultadoEl.querySelector('#cdd-eg-btn-confirmar')
+      btnConfirmar.addEventListener('click', async () => {
+        const msg = resultadoEl.querySelector('#cdd-eg-msg')
+        btnConfirmar.disabled = true
+        msg.textContent = 'Registrando...'
+        try {
+          await registrarEgresoCajero(candidateId, {
+            cashAccountId: cuenta.id,
+            amount: monto,
+            concept: `Ayuda a votante — ${nombre || ci}`,
+            beneficiaryCI: ci,
+            exceptionAuthorizationId: exceptionAuthorizationId || null
+          }, operationId)
+          modal.remove()
+          await pintarCajerosDiaDPropio(document.getElementById('fin-body'))
+        } catch (err) {
+          btnConfirmar.disabled = false
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
     }
-    if (prefillConfirmado) pintarConfirmacion()
+
+    // ── Escenario B: nuestro votante, sin ayuda aprobada ────────────────
+    function pintarSinAyudaAprobada({ nombre }) {
+      resultadoEl.innerHTML = `
+        <div style="background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+          ${escapeHtml(nombre || 'Este votante')} pertenece a nuestros registros, pero no tiene una ayuda autorizada para cobrar.
+        </div>
+        <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+    }
+
+    // ── Escenario C sin excepción (o rechazada): ofrecer solicitarla ───
+    function pintarSolicitarExcepcion({ nombre, ci }) {
+      resultadoEl.innerHTML = `
+        <div style="background:#fff3cd; border-left:4px solid #ffc107; color:#856404; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+          ⚠️ Esta persona figura en el padrón electoral, pero no está registrada como nuestro votante.
+          <div style="margin-top:8px; font-size:.9rem; color:#333;"><strong>Nombre:</strong> ${escapeHtml(nombre || '—')} · <strong>CI:</strong> ${escapeHtml(String(ci))}</div>
+        </div>
+        <div id="cdd-eg-msg" style="font-size:.85rem; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:8px;">
+          <button id="cdd-eg-btn-solicitar" style="flex:1; background:#6a1b9a; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">🔓 Solicitar autorización al administrador</button>
+          <button id="cdd-eg-btn-cancelar2" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+        </div>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-cancelar2').addEventListener('click', () => modal.remove())
+      const btnSolicitar = resultadoEl.querySelector('#cdd-eg-btn-solicitar')
+      btnSolicitar.addEventListener('click', async () => {
+        const msg = resultadoEl.querySelector('#cdd-eg-msg')
+        btnSolicitar.disabled = true
+        msg.textContent = 'Enviando solicitud...'
+        try {
+          await solicitarExcepcionBeneficiario(candidateId, cuenta.id, ci)
+          msg.innerHTML = '<span style="color:#2e7d32;">✅ Solicitud enviada — un administrador tiene que aprobarla antes de poder pagar.</span>'
+          btnSolicitar.remove()
+        } catch (err) {
+          btnSolicitar.disabled = false
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+        }
+      })
+    }
+
+    // ── Escenario C con excepción pendiente ─────────────────────────────
+    function pintarExcepcionPendiente({ nombre, ci, suggestedAmount }) {
+      resultadoEl.innerHTML = `
+        <div style="background:#e3f2fd; border-left:4px solid #1976d2; color:#1565c0; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+          Ya existe una solicitud de autorización para <strong>${escapeHtml(nombre || ci)}</strong>, pendiente de aprobación por un administrador (monto sugerido: ${money(suggestedAmount, cuenta.currency)}).
+        </div>
+        <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+    }
+
+    // ── Escenario D: CI no existe en ningún lado ────────────────────────
+    function pintarNoEncontrado() {
+      resultadoEl.innerHTML = `
+        <div style="background:#ffebee; border-left:4px solid #c62828; color:#c62828; padding:12px; border-radius:4px; margin-bottom:14px; font-size:.88rem;">
+          ❌ La CI ingresada no fue encontrada en el padrón electoral.
+        </div>
+        <button id="cdd-eg-btn-volver" style="width:100%; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Volver</button>
+      `
+      resultadoEl.querySelector('#cdd-eg-btn-volver').addEventListener('click', () => modal.remove())
+    }
+
+    function pintarPorEscenario(r) {
+      resultadoEl.style.display = 'block'
+      modal.querySelector('#cdd-eg-paso-ci').style.display = 'none'
+      if (r.scenario === 'A') {
+        pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.approvedAmount, dirigenteNombre: r.dirigenteNombre })
+      } else if (r.scenario === 'B') {
+        pintarSinAyudaAprobada({ nombre: r.nombre })
+      } else if (r.scenario === 'C') {
+        if (r.excepcion?.status === 'approved') {
+          pintarListoParaPagar({ nombre: r.nombre, ci: r.cedula, monto: r.excepcion.approvedAmount, exceptionAuthorizationId: r.excepcion.id })
+        } else if (r.excepcion?.status === 'pending') {
+          pintarExcepcionPendiente({ nombre: r.nombre, ci: r.cedula, suggestedAmount: r.excepcion.suggestedAmount })
+        } else {
+          pintarSolicitarExcepcion({ nombre: r.nombre, ci: r.cedula })
+        }
+      } else {
+        pintarNoEncontrado()
+      }
+    }
+
+    if (prefillConfirmado) {
+      pintarListoParaPagar(prefillConfirmado)
+    }
 
     const btnBuscar = modal.querySelector('#cdd-eg-btn-buscar')
     if (btnBuscar) {
@@ -1527,19 +1721,8 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         btnBuscar.disabled = true
         msgCi.innerHTML = 'Buscando...'
         try {
-          const registro = await getOwnRecordByCedula(candidateId, cuenta.responsibleUserId, ci)
-          if (!registro) {
-            msgCi.innerHTML = '<span style="color:#c62828;">No se encontró esa CI entre tus registros.</span>'
-            return
-          }
-          if (registro.assistanceStatus !== 'approved' || !(Number(registro.approvedAmount) > 0)) {
-            msgCi.innerHTML = `<span style="color:#c62828;">${escapeHtml(registro.nombre || 'Este votante')} todavía no tiene una ayuda APROBADA por Finanzas.</span>`
-            return
-          }
-          datosConfirmados = { ci: registro.cedula, nombre: registro.nombre, monto: Number(registro.approvedAmount) }
-          pintarConfirmacion()
-          modal.querySelector('#cdd-eg-paso-ci').style.display = 'none'
-          modal.querySelector('#cdd-eg-paso-confirmar').style.display = 'block'
+          const r = await buscarBeneficiarioCajero(candidateId, cuenta.id, ci)
+          pintarPorEscenario(r)
         } catch (err) {
           msgCi.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
         } finally {
@@ -1547,32 +1730,6 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         }
       })
     }
-
-    // Mismo criterio que mostrarModalAsignarFondos: UN operationId por
-    // apertura del modal, reusado en cada click de "Confirmar pago"
-    // mientras el modal siga abierto (doble clic == mismo operationId ==
-    // mismo resultado idempotente, nunca un movimiento duplicado).
-    const operationId = generateCashierOperationId()
-    const btnConfirmar = modal.querySelector('#cdd-eg-btn-confirmar')
-    btnConfirmar.addEventListener('click', async () => {
-      const msg = modal.querySelector('#cdd-eg-msg')
-      if (!datosConfirmados) return
-      btnConfirmar.disabled = true
-      msg.textContent = 'Registrando...'
-      try {
-        await registrarEgresoCajero(candidateId, {
-          cashAccountId: cuenta.id,
-          amount: datosConfirmados.monto,
-          concept: `Ayuda a votante — ${datosConfirmados.nombre || datosConfirmados.ci}`,
-          beneficiaryCI: datosConfirmados.ci
-        }, operationId)
-        modal.remove()
-        await pintarCajerosDiaDPropio(document.getElementById('fin-body'))
-      } catch (err) {
-        btnConfirmar.disabled = false
-        msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
-      }
-    })
   }
 
   // ── REPORTES ──────────────────────────────────────────────────────────

@@ -839,30 +839,6 @@ export async function getRecordByCedula(candidateId, cedula) {
   return snap.docs.length > 0 ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null
 }
 
-// AUDITORÍA 2026-10-03 (cajero simplificado — buscar por CI): a
-// diferencia de getRecordByCedula (de arriba, solo seguro para
-// campaign_admin/coordinator/auditor/viewer, que tienen lectura
-// incondicional), un cajero/dirigente común SOLO puede leer
-// savedRecords propios (resource.data.uid == request.auth.uid, ver
-// firestore.rules). Firestore exige que el `where` de la consulta
-// "demuestre" esa condición — un where('cedula','==',...) solo, sin
-// filtrar también por uid, queda denegado aunque el doc que devolvería
-// sí sea propio (confirmado probando: list() necesita que la regla se
-// pueda probar a partir de la query, no solo de los datos reales).
-// `ownerUid` es el dueño de la cuenta de cajero (cuenta.responsibleUserId
-// en finanzas-candidate.js) — mismo criterio de alcance que ya usa
-// getUserRecords() para la lista de "pendientes de pago" de esa cuenta.
-export async function getOwnRecordByCedula(candidateId, ownerUid, cedula) {
-  const q = query(
-    collection(db, ...candidatePath(candidateId, 'savedRecords')),
-    where('uid', '==', ownerUid),
-    where('cedula', '==', String(cedula).trim()),
-    limit(1)
-  )
-  const snap = await getDocs(q)
-  return snap.docs.length > 0 ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null
-}
-
 // Todos los registros del candidato — se usa en los dashboards de Día D
 // (ranking/local/mesa), que necesitan agregar sobre el total. No tiene
 // límite explícito porque estos paneles ya son de uso ocasional/admin,
@@ -3392,6 +3368,45 @@ export async function autorizarExcepcionBeneficiario(candidateId, beneficiaryCI,
   const fn = httpsCallable(functionsInstance, 'autorizarExcepcionBeneficiario')
   const result = await fn({ candidateId, beneficiaryCI, reason, operationId: operationId || generateCashierOperationId() })
   return result.data
+}
+
+// AUDITORÍA 2026-10-03 (causa real de "No se encontró esa CI entre tus
+// registros"): la búsqueda de beneficiario para Registrar egreso ya NO
+// se hace con una query directa del cliente (getOwnRecordByCedula, que
+// reemplaza esta función, tenía que acotar por uid del dueño de la
+// cuenta para que firestore.rules la permitiera — eso rompía la
+// búsqueda para cualquier CI capturada por OTRO dirigente, aunque sea
+// "nuestro" votante). Resuelve servidor-side (Admin SDK, candidato
+// entero) los 4 escenarios A/B/C/D en una sola llamada.
+export async function buscarBeneficiarioCajero(candidateId, cashAccountId, ci) {
+  const fn = httpsCallable(functionsInstance, 'buscarBeneficiarioCajero')
+  const result = await fn({ candidateId, cashAccountId, ci })
+  return result.data
+}
+
+export async function solicitarExcepcionBeneficiario(candidateId, cashAccountId, beneficiaryCI, operationId) {
+  const fn = httpsCallable(functionsInstance, 'solicitarExcepcionBeneficiario')
+  const result = await fn({ candidateId, cashAccountId, beneficiaryCI, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+export async function resolverExcepcionBeneficiario(candidateId, exceptionId, decision, { approvedAmount, rejectionReason } = {}, operationId) {
+  const fn = httpsCallable(functionsInstance, 'resolverExcepcionBeneficiario')
+  const result = await fn({ candidateId, exceptionId, decision, approvedAmount, rejectionReason, operationId: operationId || generateCashierOperationId() })
+  return result.data
+}
+
+// Solicitudes de excepción pendientes de resolver — para el admin
+// (mismo criterio de alcance que getCashierExceptions si existiera: acá
+// se filtra por status=='pending' porque es lo único que un admin
+// necesita accionar; ver firestore.rules para cashierBeneficiaryExceptions).
+export async function getPendingBeneficiaryExceptions(candidateId) {
+  const q = query(
+    collection(db, ...candidatePath(candidateId, 'cashierBeneficiaryExceptions')),
+    where('status', '==', 'pending')
+  )
+  const snap = await getDocs(q)
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
 // ── Lecturas (client SDK directo contra cashierAccounts/cashierMovements,

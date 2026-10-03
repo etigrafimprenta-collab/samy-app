@@ -362,6 +362,192 @@ export const asignarFondosCajero = functions.https.onCall(
   }
 );
 
+// ── 2b. buscarBeneficiarioCajero ─────────────────────────────────────────
+// AUDITORÍA 2026-10-03: antes el cliente buscaba el beneficiario con un
+// query directo a savedRecords (getOwnRecordByCedula/getRecordByCedula,
+// firebaseCandidate.js) — eso solo puede funcionar si firestore.rules
+// puede "demostrar" el permiso a partir de la query. Para un cajero
+// común (no admin) la única regla que aplica es resource.data.uid ==
+// request.auth.uid, así que la query NECESITABA además un
+// where('uid','==',...) — eso acotaba la búsqueda a "votantes capturados
+// por ESTE MISMO uid", cuando lo que pide el negocio es "cualquiera de
+// nuestros votantes" (candidato entero, sin importar qué dirigente lo
+// capturó — por eso se muestra "dirigente responsable" en vez de
+// restringir por él). Esa fue la causa real de "No se encontró esa CI
+// entre tus registros" para una CI real y bien cargada, de OTRO
+// dirigente: no era un problema de normalización de CI (confirmado
+// contra datos reales de producción — cedula siempre string limpio) ni
+// de candidateId/localidad, era directamente una búsqueda demasiado
+// angosta. Server-side (Admin SDK) no tiene esa limitación, así que la
+// búsqueda completa (candidato entero + padrón completo) se resuelve
+// acá, con la MISMA autorización de acceso que registrarEgresoCajero
+// (dueño de ESTA cuenta de cajero, o admin de Finanzas) — nunca le
+// devuelve datos de otro candidato ni de otra cuenta.
+export const buscarBeneficiarioCajero = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cashAccountId, ci } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId || !cashAccountId || !ci) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/cashAccountId/ci");
+    }
+    const ciLimpia = String(ci).trim();
+    if (!ciLimpia) {
+      throw new functions.https.HttpsError("invalid-argument", "CI vacía");
+    }
+
+    const [platformSnap, memberSnap, accountSnap, candidateSnap] = await Promise.all([
+      db().collection("platformUsers").doc(callerUid).get(),
+      candidateRef(candidateId).collection("users").doc(callerUid).get(),
+      cashierAccountsCol(candidateId).doc(cashAccountId).get(),
+      candidateRef(candidateId).get(),
+    ]);
+    if (!accountSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Cuenta de cajero no encontrada");
+    }
+    const account = accountSnap.data()!;
+    const isSuperAdmin = platformSnap.data()?.globalRole === "superadmin";
+    const memberData = memberSnap.data();
+    const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
+    const roles = new Set<string>([memberData?.role, ...roleIds].filter(Boolean));
+    const isAdmin = isSuperAdmin || CASHIER_ADMIN_ROLES.some((r) => roles.has(r));
+    const isOwner = account.responsibleUserId === callerUid;
+    if (!isAdmin && !isOwner) {
+      throw new functions.https.HttpsError(
+        "permission-denied",
+        "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede buscar beneficiarios acá"
+      );
+    }
+
+    // A/B: "nuestro" votante — savedRecords de TODO el candidato (nunca
+    // acotado a un dirigente puntual, ver cabecera de arriba).
+    const recordSnap = await candidateRef(candidateId)
+      .collection("savedRecords")
+      .where("cedula", "==", ciLimpia)
+      .limit(1)
+      .get();
+
+    if (!recordSnap.empty) {
+      const rec = recordSnap.docs[0];
+      const data = rec.data();
+      let dirigenteNombre: string | null = null;
+      if (data.uid) {
+        const dirSnap = await candidateRef(candidateId).collection("users").doc(data.uid).get();
+        dirigenteNombre = dirSnap.data()?.nombre || dirSnap.data()?.email || null;
+      }
+      if (data.assistanceStatus === "approved" && Number(data.approvedAmount) > 0) {
+        return {
+          scenario: "A",
+          recordId: rec.id,
+          nombre: data.nombre || "",
+          cedula: data.cedula,
+          approvedAmount: Number(data.approvedAmount),
+          dirigenteNombre,
+        };
+      }
+      return { scenario: "B", nombre: data.nombre || "", cedula: data.cedula, dirigenteNombre };
+    }
+
+    // C/D: no es "nuestro" — ver si existe en el padrón completo de la
+    // localidad de este candidato.
+    const localidad = candidateSnap.data()?.localidad || "";
+    const voterSnap = await db()
+      .collection("voters")
+      .where("cedula", "==", ciLimpia)
+      .where("localidad", "==", localidad)
+      .limit(1)
+      .get();
+    if (voterSnap.empty) {
+      return { scenario: "D" };
+    }
+    const voter = voterSnap.docs[0].data();
+
+    // ¿Ya hay una excepción activa (pendiente o aprobada sin consumir)
+    // para este beneficiario? Como máximo debería haber una a la vez
+    // (solicitarExcepcionBeneficiario lo exige), pero por las dudas se
+    // prioriza: aprobada > pendiente > rechazada (una rechazada no
+    // bloquea pedir de nuevo).
+    const excSnap = await cashierExceptionsCol(candidateId)
+      .where("beneficiaryCI", "==", ciLimpia)
+      .where("consumed", "==", false)
+      .get();
+    let excepcion: any = null;
+    for (const d of excSnap.docs) {
+      const e = d.data();
+      const status = e.status ?? "approved";
+      if (status === "approved") { excepcion = { id: d.id, status, approvedAmount: Number(e.approvedAmount) || 0 }; break; }
+      if (status === "pending" && !excepcion) excepcion = { id: d.id, status, suggestedAmount: Number(e.suggestedAmount) || 0 };
+    }
+
+    const settingsSnap = await candidateRef(candidateId).collection("config").doc("financeSettings").get();
+    return {
+      scenario: "C",
+      nombre: voter.nombre || "",
+      cedula: ciLimpia,
+      maxVoterAssistanceAmount: Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0,
+      excepcion,
+    };
+  }
+);
+
+// Centraliza el chequeo de que una excepción indicada sea USABLE para
+// pagar — reusado por los 2 casos de registrarEgresoCajero que la
+// necesitan (reasistencia y beneficiario que no es "nuestro"). Nunca
+// escribe nada, solo valida y devuelve los datos de la excepción.
+function validarExcepcionUsable(
+  exceptionSnap: FirebaseFirestore.DocumentSnapshot | null,
+  exceptionAuthorizationId: string | undefined,
+  candidateId: string,
+  beneficiaryVoterId: string,
+  montoNum: number,
+  mensajeSiFalta: string
+): FirebaseFirestore.DocumentData {
+  if (!exceptionAuthorizationId || !exceptionSnap || !exceptionSnap.exists) {
+    throw new functions.https.HttpsError("failed-precondition", mensajeSiFalta);
+  }
+  const exc = exceptionSnap.data()!;
+  if (exc.candidateId !== candidateId || exc.beneficiaryVoterId !== beneficiaryVoterId) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "La autorización excepcional indicada no corresponde a este beneficiario"
+    );
+  }
+  if (exc.consumed) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "Esta autorización excepcional ya fue utilizada — se necesita una nueva"
+    );
+  }
+  // `status` es nuevo (auditoría 2026-10-03) — docs legacy creados por
+  // autorizarExcepcionBeneficiario antes de este cambio no lo tienen, y
+  // SIEMPRE fueron ya-aprobados en el momento de crearse (no existía
+  // estado 'pending' todavía), así que ausencia de status se trata
+  // igual que 'approved'. Una excepción todavía 'pending' o ya
+  // 'rejected' nunca puede usarse para pagar.
+  const status = exc.status ?? "approved";
+  if (status !== "approved") {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      status === "pending"
+        ? "Esta autorización excepcional todavía está pendiente de aprobación por un administrador"
+        : "Esta autorización excepcional fue rechazada"
+    );
+  }
+  // El monto a pagar con una excepción es el que el administrador
+  // aprobó, nunca uno distinto que el cajero pueda escribir — mismo
+  // principio que "el cajero solo visualiza y confirma". Las excepciones
+  // legacy (creadas por autorizarExcepcionBeneficiario, que no pide
+  // monto) quedan con approvedAmount en null/0 — ahí no hay nada que
+  // comparar, se mantiene el comportamiento de siempre.
+  const montoAprobado = Number(exc.approvedAmount);
+  if (montoAprobado > 0 && montoNum !== montoAprobado) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      `El monto no coincide con el aprobado para esta excepción (Gs. ${montoAprobado})`
+    );
+  }
+  return exc;
+}
+
 // ── 3. registrarEgresoCajero ─────────────────────────────────────────────
 // La función más sensible del archivo: saldo, identidad del beneficiario
 // contra el padrón de la LOCALIDAD DEL CANDIDATO, y reasistencia.
@@ -428,15 +614,29 @@ export const registrarEgresoCajero = functions.https.onCall(
       const ciLimpia = beneficiaryCI ? String(beneficiaryCI).trim() : "";
 
       let voterSnap: FirebaseFirestore.QuerySnapshot | null = null;
+      // AUDITORÍA 2026-10-03 (escenarios A/B/C/D): además del padrón
+      // compartido (/voters, para resolver identidad/beneficiaryVoterId,
+      // sin cambios), hace falta saber si esta CI es uno de "nuestros"
+      // votantes (savedRecords de ESTE candidato, candidato entero — ver
+      // mismo criterio que buscarBeneficiarioCajero) para decidir si el
+      // pago sale de la ayuda ya aprobada para esa persona, o si
+      // necesita sí o sí una excepción (beneficiario que no es nuestro).
+      let nuestroRecordSnap: FirebaseFirestore.QuerySnapshot | null = null;
       if (ciLimpia) {
-        voterSnap = await tx.get(
-          db()
-            .collection("voters")
-            .where("cedula", "==", ciLimpia)
-            .where("localidad", "==", candidateLocalidad)
-            .limit(1)
-        );
+        [voterSnap, nuestroRecordSnap] = await Promise.all([
+          tx.get(
+            db()
+              .collection("voters")
+              .where("cedula", "==", ciLimpia)
+              .where("localidad", "==", candidateLocalidad)
+              .limit(1)
+          ),
+          tx.get(
+            candidateRef(candidateId).collection("savedRecords").where("cedula", "==", ciLimpia).limit(1)
+          ),
+        ]);
       }
+      const nuestroRecord = nuestroRecordSnap && !nuestroRecordSnap.empty ? nuestroRecordSnap.docs[0].data() : null;
 
       let beneficiaryVoterId: string | null = null;
       let beneficiaryName: string | null = null;
@@ -472,30 +672,59 @@ export const registrarEgresoCajero = functions.https.onCall(
       }
 
       // ── VALIDACIONES (después de todas las lecturas) ───────────────────
+      // AUDITORÍA 2026-10-03 (escenarios A/B/C/D): antes esto SOLO exigía
+      // excepción para un SEGUNDO pago al mismo beneficiarioVoterId
+      // (dupSnap) — nunca verificaba que el monto pagado coincidiera con
+      // la ayuda realmente aprobada para esa persona (confiaba ciegamente
+      // en `amount`, lo que el cliente mandara), y no existía ningún gate
+      // para pagarle a alguien que NO es "nuestro" votante (solo está en
+      // el padrón general) — ese caso simplemente no se contemplaba.
+      // validarExcepcionUsable() (función de abajo) centraliza el
+      // chequeo de excepción para los 2 casos reales que la necesitan:
+      // reasistencia (ya cobró antes) y beneficiario ajeno (nunca es
+      // "nuestro").
       let exceptionRef: FirebaseFirestore.DocumentReference | null = null;
       let exceptionDataUsed: FirebaseFirestore.DocumentData | null = null;
-      if (beneficiaryVoterId && dupSnap && !dupSnap.empty) {
-        if (!exceptionAuthorizationId || !exceptionSnap || !exceptionSnap.exists) {
-          throw new functions.https.HttpsError(
-            "failed-precondition",
-            "Este beneficiario ya recibió un aporte — se necesita una autorización excepcional vigente para un segundo aporte"
+      if (ciLimpia && beneficiaryVoterId) {
+        if (nuestroRecord) {
+          // Camino normal: "nuestro" votante con ayuda ya aprobada por
+          // Finanzas — el monto a pagar es EXACTAMENTE el aprobado, el
+          // cajero nunca puede pagar un monto distinto (ver pedido
+          // explícito "el cajero solo visualiza y confirma").
+          if (nuestroRecord.assistanceStatus !== "approved" || !(Number(nuestroRecord.approvedAmount) > 0)) {
+            throw new functions.https.HttpsError(
+              "failed-precondition",
+              "Este votante pertenece a nuestros registros, pero no tiene una ayuda autorizada para cobrar"
+            );
+          }
+          const montoAprobadoVotante = Number(nuestroRecord.approvedAmount);
+          if (montoNum !== montoAprobadoVotante) {
+            throw new functions.https.HttpsError(
+              "failed-precondition",
+              `El monto no coincide con la ayuda aprobada para este votante (Gs. ${montoAprobadoVotante})`
+            );
+          }
+          if (dupSnap && !dupSnap.empty) {
+            // Reasistencia — ya recibió un aporte antes, hace falta una
+            // excepción vigente para uno adicional (mecanismo original).
+            const exc = validarExcepcionUsable(
+              exceptionSnap, exceptionAuthorizationId, candidateId, beneficiaryVoterId, montoNum,
+              "Este beneficiario ya recibió un aporte — se necesita una autorización excepcional aprobada para un segundo aporte"
+            );
+            exceptionRef = exceptionSnap!.ref;
+            exceptionDataUsed = exc;
+          }
+        } else {
+          // No es "nuestro" votante (solo está en el padrón general) —
+          // SIEMPRE requiere una excepción aprobada, aunque sea el
+          // primer pago a esta persona (escenario C del pedido).
+          const exc = validarExcepcionUsable(
+            exceptionSnap, exceptionAuthorizationId, candidateId, beneficiaryVoterId, montoNum,
+            "Este beneficiario no es uno de nuestros votantes — hace falta una autorización excepcional aprobada por un administrador"
           );
+          exceptionRef = exceptionSnap!.ref;
+          exceptionDataUsed = exc;
         }
-        const exc = exceptionSnap.data()!;
-        if (exc.candidateId !== candidateId || exc.beneficiaryVoterId !== beneficiaryVoterId) {
-          throw new functions.https.HttpsError(
-            "failed-precondition",
-            "La autorización excepcional indicada no corresponde a este beneficiario"
-          );
-        }
-        if (exc.consumed) {
-          throw new functions.https.HttpsError(
-            "failed-precondition",
-            "Esta autorización excepcional ya fue utilizada — se necesita una nueva para un aporte adicional"
-          );
-        }
-        exceptionRef = exceptionSnap.ref;
-        exceptionDataUsed = exc;
       }
 
       const saldoActual = Number(account.balance || 0);
@@ -921,6 +1150,16 @@ export const autorizarExcepcionBeneficiario = functions.https.onCall(
         beneficiaryCI: ci,
         beneficiaryName,
         reason,
+        // `status` (auditoría 2026-10-03): esta función siempre crea la
+        // excepción YA aprobada (es el admin autorizando directamente,
+        // nunca una solicitud pendiente) — se deja sin `approvedAmount`
+        // a propósito, porque este flujo nunca pidió un monto (lo define
+        // el cajero al pagar, igual que siempre); registrarEgresoCajero
+        // solo exige que el monto coincida con approvedAmount cuando ese
+        // campo SÍ está seteado (ver solicitarExcepcionBeneficiario/
+        // resolverExcepcionBeneficiario, que sí lo fijan).
+        status: "approved",
+        approvedAmount: null,
         authorizedBy: callerUid,
         authorizedAt: FieldValue.serverTimestamp(),
         consumed: false,
@@ -938,6 +1177,188 @@ export const autorizarExcepcionBeneficiario = functions.https.onCall(
         reason,
       });
       return { exceptionId: excRef.id, beneficiaryVoterId, beneficiaryName };
+    });
+  }
+);
+
+// ── 8b. solicitarExcepcionBeneficiario ───────────────────────────────────
+// Camino NUEVO, iniciado por el cajero (a diferencia de la función de
+// arriba, que es el admin autorizando directo) — crea la excepción en
+// estado 'pending', nunca usable todavía para pagar (ver chequeo de
+// `status` en registrarEgresoCajero). El monto SUGERIDO viene de
+// Finanzas > Configuración > "Ayuda máxima por votante" — el admin
+// puede aprobarlo tal cual o modificarlo al resolver (ver función
+// siguiente), nunca lo fija el cajero.
+export const solicitarExcepcionBeneficiario = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, cashAccountId, beneficiaryCI, operationId } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId || !cashAccountId || !beneficiaryCI || !operationId) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/cashAccountId/beneficiaryCI/operationId");
+    }
+
+    return withIdempotency(candidateId, "solicitarExcepcionBeneficiario", operationId, { cashAccountId, beneficiaryCI }, async (tx) => {
+      const ci = String(beneficiaryCI).trim();
+      // 1ra tanda de lecturas — todavía no se conoce `localidad` (hace
+      // falta candidateSnap para eso), así que la búsqueda en /voters va
+      // en una 2da tanda, pero SIGUE siendo antes de cualquier escritura
+      // (Firestore solo exige ese orden, no que sea una sola tanda).
+      const [accountSnap, candidateSnap, settingsSnap, callerRoles] = await Promise.all([
+        tx.get(cashierAccountsCol(candidateId).doc(cashAccountId)),
+        tx.get(candidateRef(candidateId)),
+        tx.get(candidateRef(candidateId).collection("config").doc("financeSettings")),
+        readCallerRoles(tx, candidateId, callerUid),
+      ]);
+
+      if (!accountSnap.exists) {
+        throw new functions.https.HttpsError("not-found", "Cuenta de cajero no encontrada");
+      }
+      const account = accountSnap.data()!;
+      const isOwner = account.responsibleUserId === callerUid;
+      if (!callerRoles.isAdmin && !isOwner) {
+        throw new functions.https.HttpsError(
+          "permission-denied",
+          "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede solicitar una excepción acá"
+        );
+      }
+
+      const localidad = candidateSnap.data()?.localidad || "";
+      const [voterSnap, existingSnap] = await Promise.all([
+        tx.get(db().collection("voters").where("cedula", "==", ci).where("localidad", "==", localidad).limit(1)),
+        tx.get(cashierExceptionsCol(candidateId).where("beneficiaryCI", "==", ci).where("consumed", "==", false)),
+      ]);
+      if (voterSnap.empty) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          `CI ${ci} no encontrada en el padrón de la localidad de este candidato (${localidad || "sin localidad configurada"})`
+        );
+      }
+      const beneficiaryVoterId = voterSnap.docs[0].id;
+      const beneficiaryName = voterSnap.docs[0].data().nombre || "";
+
+      const yaActiva = existingSnap.docs.find((d) => (d.data().status ?? "approved") !== "rejected");
+      if (yaActiva) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Ya existe una autorización excepcional activa (pendiente o aprobada, sin usar) para este beneficiario"
+        );
+      }
+
+      const suggestedAmount = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      const excRef = cashierExceptionsCol(candidateId).doc();
+      const payload = {
+        candidateId,
+        beneficiaryVoterId,
+        beneficiaryCI: ci,
+        beneficiaryName,
+        status: "pending",
+        suggestedAmount,
+        approvedAmount: null,
+        reason: null,
+        requestedBy: callerUid,
+        requestedAt: FieldValue.serverTimestamp(),
+        requestedFromAccountId: cashAccountId,
+        authorizedBy: null,
+        authorizedAt: null,
+        rejectedBy: null,
+        rejectedAt: null,
+        rejectionReason: null,
+        consumed: false,
+        consumedAt: null,
+        consumedByMovementId: null,
+      };
+      tx.set(excRef, payload);
+      writeAuditInTx(tx, candidateId, {
+        actorUid: callerUid,
+        action: "cashier_exception_request",
+        entityType: "cashierBeneficiaryExceptions",
+        entityId: excRef.id,
+        previousData: null,
+        newData: payload,
+      });
+      return { exceptionId: excRef.id, beneficiaryName, suggestedAmount };
+    });
+  }
+);
+
+// ── 8c. resolverExcepcionBeneficiario ────────────────────────────────────
+// El admin aprueba (con el monto sugerido o uno modificado) o rechaza
+// una solicitud 'pending' creada por solicitarExcepcionBeneficiario. Solo
+// puede resolverse una vez — una ya resuelta no se puede volver a tocar
+// acá (evita que una aprobación se pise con un rechazo tardío o viceversa).
+export const resolverExcepcionBeneficiario = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, exceptionId, decision, approvedAmount, rejectionReason, operationId } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId || !exceptionId || !decision || !operationId) {
+      throw new functions.https.HttpsError("invalid-argument", "Faltan candidateId/exceptionId/decision/operationId");
+    }
+    if (decision !== "approve" && decision !== "reject") {
+      throw new functions.https.HttpsError("invalid-argument", "decision debe ser 'approve' o 'reject'");
+    }
+    if (decision === "reject" && !rejectionReason) {
+      throw new functions.https.HttpsError("invalid-argument", "El motivo del rechazo es obligatorio");
+    }
+
+    return withIdempotency(candidateId, "resolverExcepcionBeneficiario", operationId, { exceptionId, decision, approvedAmount: approvedAmount ?? null, rejectionReason: rejectionReason ?? null }, async (tx) => {
+      const callerRoles = await readCallerRoles(tx, candidateId, callerUid);
+      if (!callerRoles.isAdmin) {
+        throw new functions.https.HttpsError(
+          "permission-denied",
+          "Solo campaign_admin/finance_admin pueden aprobar/rechazar una solicitud de excepción"
+        );
+      }
+      const excRef = cashierExceptionsCol(candidateId).doc(exceptionId);
+      const excSnap = await tx.get(excRef);
+      if (!excSnap.exists) {
+        throw new functions.https.HttpsError("not-found", "Solicitud de excepción no encontrada");
+      }
+      const exc = excSnap.data()!;
+      if (exc.candidateId !== candidateId) {
+        throw new functions.https.HttpsError("failed-precondition", "La solicitud no corresponde a este candidato");
+      }
+      if (exc.status !== "pending") {
+        throw new functions.https.HttpsError("failed-precondition", `Esta solicitud ya fue resuelta (estado: ${exc.status})`);
+      }
+
+      if (decision === "approve") {
+        const monto = Number(approvedAmount ?? exc.suggestedAmount) || 0;
+        if (!(monto > 0)) {
+          throw new functions.https.HttpsError("invalid-argument", "El monto aprobado debe ser mayor a 0");
+        }
+        tx.update(excRef, {
+          status: "approved",
+          approvedAmount: monto,
+          authorizedBy: callerUid,
+          authorizedAt: FieldValue.serverTimestamp(),
+        });
+        writeAuditInTx(tx, candidateId, {
+          actorUid: callerUid,
+          action: "cashier_exception_approve",
+          entityType: "cashierBeneficiaryExceptions",
+          entityId: excRef.id,
+          previousData: { status: exc.status, suggestedAmount: exc.suggestedAmount },
+          newData: { status: "approved", approvedAmount: monto },
+        });
+        return { ok: true, status: "approved", approvedAmount: monto };
+      }
+
+      tx.update(excRef, {
+        status: "rejected",
+        rejectedBy: callerUid,
+        rejectedAt: FieldValue.serverTimestamp(),
+        rejectionReason,
+      });
+      writeAuditInTx(tx, candidateId, {
+        actorUid: callerUid,
+        action: "cashier_exception_reject",
+        entityType: "cashierBeneficiaryExceptions",
+        entityId: excRef.id,
+        previousData: { status: exc.status },
+        newData: { status: "rejected", rejectionReason },
+        reason: rejectionReason,
+      });
+      return { ok: true, status: "rejected" };
     });
   }
 );
