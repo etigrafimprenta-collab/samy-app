@@ -1603,6 +1603,12 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       // se oculta del todo el campo para esta localidad — no se toca nada
       // para ninguna otra localidad, donde el campo sigue exactamente igual.
       const ocultarSeccional = candidate.localidad === 'asuncion'
+      // Alcance de pago (AUDITORÍA 2026-10-03): solo aplica a quien opera
+      // una cuenta de Cajeros DD — rol 'cashier' real, o dirigente
+      // auto-enrolado como cajero de campo (isFieldCashier) — reusa este
+      // MISMO modal (pedido explícito: "revisá cómo actualmente Mesa/Local
+      // se guarda... y reutilizá el modelo existente").
+      const esCajero = u.role === 'cashier' || u.isFieldCashier === true
       const cargando = document.createElement('div')
       cargando.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999;'
       cargando.innerHTML = '<div style="background:white; padding:24px 32px; border-radius:8px; font-weight:700; color:#1976d2;">🔎 Cargando locales de votación reales...</div>'
@@ -1632,19 +1638,36 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
         ? (localEntryActual.mesas.find(m => m === String(u.mesa).trim()) || null)
         : null
 
+      const scopeInicial = u.paymentScope === 'local' || u.paymentScope === 'all_our_voters' ? u.paymentScope : 'full_padron'
+
       const modal = abrirModal(`
         <h3 style="margin:0 0 16px;">Mesa/Local de ${escapeHtml(u.nombre || u.email)}</h3>
-        ${ocultarSeccional ? '' : `<input id="inp-seccional" value="${escapeHtml(u.seccional || '')}" placeholder="Seccional" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">`}
+        ${esCajero ? `
+          <div style="margin-bottom:12px; background:#f5f5f5; border-radius:6px; padding:10px 12px;">
+            <label style="font-size:.78rem; color:#666; display:block; margin-bottom:6px; font-weight:700;">Alcance de pago:</label>
+            <label style="display:block; font-size:.85rem; margin-bottom:6px; cursor:pointer;">
+              <input type="radio" name="alcance-pago" id="alcance-local" value="local" ${scopeInicial === 'local' ? 'checked' : ''}> Local asignado
+            </label>
+            <label style="display:block; font-size:.85rem; margin-bottom:6px; cursor:pointer;">
+              <input type="radio" name="alcance-pago" id="alcance-todos-a" value="all_our_voters" ${scopeInicial === 'all_our_voters' ? 'checked' : ''}> Todos (A) – Nuestros votantes
+            </label>
+            <label style="display:block; font-size:.85rem; cursor:pointer;">
+              <input type="radio" name="alcance-pago" id="alcance-todos-b" value="full_padron" ${scopeInicial === 'full_padron' ? 'checked' : ''}> Todos (B) – Padrón completo
+            </label>
+          </div>
+        ` : ''}
+        ${ocultarSeccional || esCajero ? '' : `<input id="inp-seccional" value="${escapeHtml(u.seccional || '')}" placeholder="Seccional" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">`}
         <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Local de votación:</label>
         <select id="sel-local" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;">
           <option value="">Seleccionar Local</option>
           ${!localCanonical && u.local ? `<option value="${escapeHtml(u.local)}" selected>${escapeHtml(u.local)} (actual, fuera del padrón)</option>` : ''}
           ${padronLocales.map(l => `<option value="${escapeHtml(l.local)}" ${localCanonical === l.local ? 'selected' : ''}>${escapeHtml(l.local)}</option>`).join('')}
         </select>
+        ${esCajero ? '' : `
         <label style="font-size:.78rem; color:#666; display:block; margin-bottom:2px;">Mesa:</label>
         <select id="sel-mesa" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:8px; box-sizing:border-box;" disabled>
           <option value="">Seleccionar Mesa</option>
-        </select>
+        </select>`}
         ${padronLocales.length === 0 ? '<div style="font-size:.75rem; color:#c62828; margin-bottom:8px;">No se encontraron locales en el padrón — verificá que esté cargado.</div>' : ''}
         <div style="display:flex; gap:8px; margin-top:8px;">
           <button id="btn-confirmar" style="flex:1; background:#4caf50; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Guardar</button>
@@ -1654,6 +1677,7 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
 
       function poblarMesas(localValue, mesaPreseleccionada) {
         const selMesa = modal.querySelector('#sel-mesa')
+        if (!selMesa) return // cajero: sin selector de Mesa (no hace falta, ver "Alcance de pago")
         const entry = entradaLocal(localValue)
         if (entry) {
           const mesaNorm = String(mesaPreseleccionada || '').trim()
@@ -1671,16 +1695,37 @@ export async function renderCampaignPanel(root, user, candidateId, opts = {}) {
       poblarMesas(localCanonical || u.local || '', mesaCanonical || u.mesa || '')
       modal.querySelector('#sel-local').addEventListener('change', (e) => poblarMesas(e.target.value, ''))
 
+      // Si selecciona Local asignado, habilitar el desplegable Local de
+      // votación; si selecciona Todos A/B, el local deja de ser
+      // obligatorio (pedido explícito) — se deshabilita para que quede
+      // visualmente claro, pero el valor guardado anteriormente no se
+      // borra (por si vuelve a elegir Local asignado después).
+      if (esCajero) {
+        const selLocal = modal.querySelector('#sel-local')
+        function actualizarEstadoLocal() {
+          const elegido = modal.querySelector('input[name="alcance-pago"]:checked')?.value || 'full_padron'
+          selLocal.disabled = elegido !== 'local'
+        }
+        modal.querySelectorAll('input[name="alcance-pago"]').forEach(r => r.addEventListener('change', actualizarEstadoLocal))
+        actualizarEstadoLocal()
+      }
+
       modal.querySelector('#btn-cancelar').addEventListener('click', () => modal.remove())
       modal.querySelector('#btn-confirmar').addEventListener('click', async () => {
         try {
-          await updateCandidateUserMesaLocal(candidateId, u.id, {
+          const selMesa = modal.querySelector('#sel-mesa')
+          const inpSeccional = modal.querySelector('#inp-seccional')
+          const datos = {
             // Asunción: nunca se carga/infiere un valor — queda null (ver
             // updateCandidateUserMesaLocal, trata '' igual que ausente).
-            seccional: ocultarSeccional ? '' : modal.querySelector('#inp-seccional').value.trim(),
+            seccional: (ocultarSeccional || !inpSeccional) ? '' : inpSeccional.value.trim(),
             local: modal.querySelector('#sel-local').value.trim(),
-            mesa: modal.querySelector('#sel-mesa').value.trim()
-          })
+            mesa: selMesa ? selMesa.value.trim() : ''
+          }
+          if (esCajero) {
+            datos.paymentScope = modal.querySelector('input[name="alcance-pago"]:checked')?.value || 'full_padron'
+          }
+          await updateCandidateUserMesaLocal(candidateId, u.id, datos)
           modal.remove()
           loadUsersList()
         } catch (err) {

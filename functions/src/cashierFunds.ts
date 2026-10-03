@@ -164,8 +164,69 @@ async function readCallerRoles(
   if (!isSuperAdmin && !memberSnap.exists) {
     throw new functions.https.HttpsError("permission-denied", "No pertenecés a este candidato");
   }
-  return { isSuperAdmin, isAdmin, roles, memberExists: memberSnap.exists };
+  return { isSuperAdmin, isAdmin, roles, memberExists: memberSnap.exists, memberData };
 }
+
+// ── Alcance de pago autorizado (AUDITORÍA 2026-10-03) ────────────────────
+// 3 modalidades, guardadas en candidates/{id}/users/{uid}.paymentScope
+// (reusando el MISMO campo .local que ya usa Mesa/Local — ver
+// modalAsignarMesa en campaign.js, nunca se agregó un segundo selector):
+//   'local'          → solo "nuestros" votantes cuyo .local coincide con
+//                        el .local asignado a este cajero. No importa la
+//                        mesa (la autorización es por local completo).
+//   'all_our_voters' → cualquier "nuestro" votante, nunca el padrón
+//                        general (sin flujo de excepción).
+//   'full_padron'    → sin restricción — comportamiento histórico. Este
+//                        es también el valor que se usa cuando el campo
+//                        está AUSENTE (cajeros creados antes de este
+//                        cambio no deben quedar bloqueados — "no romper
+//                        asignaciones actuales", pedido explícito).
+// La verificación es SIEMPRE server-side acá (nunca confía en lo que
+// mande el cliente) — se resuelve a partir del doc candidates/{id}/users/
+// {uid} del PROPIO llamante, leído en la misma transacción/lectura que ya
+// lee su rol.
+type PaymentScope = "local" | "all_our_voters" | "full_padron";
+function resolverAlcancePago(
+  memberData: FirebaseFirestore.DocumentData | undefined
+): { scope: PaymentScope; local: string | null } {
+  const raw = memberData?.paymentScope;
+  const scope: PaymentScope = raw === "local" || raw === "all_our_voters" ? raw : "full_padron";
+  return { scope, local: scope === "local" ? String(memberData?.local || "").trim() || null : null };
+}
+
+function normalizaLocal(v: unknown): string {
+  return String(v || "").trim().toUpperCase();
+}
+
+// `esNuestro` = la persona es uno de "nuestros" votantes (savedRecords);
+// `localDelVotante` = su campo .local (mismo nombre de campo en
+// savedRecords y en /voters). Admins (Finanzas) nunca están sujetos a
+// esto — el alcance de pago es una restricción de CAJERO, no de admin.
+function dentroDeAlcance(
+  alcance: { scope: PaymentScope; local: string | null },
+  isAdmin: boolean,
+  esNuestro: boolean,
+  localDelVotante: string | null | undefined
+): boolean {
+  if (isAdmin) return true;
+  if (alcance.scope === "full_padron") return true;
+  if (alcance.scope === "all_our_voters") return esNuestro;
+  // scope === 'local'
+  if (!esNuestro) return false;
+  if (!alcance.local || !localDelVotante) return false;
+  return normalizaLocal(alcance.local) === normalizaLocal(localDelVotante);
+}
+
+// Para la auditoría — "qué modalidad tenía el cajero al momento de cada
+// pago" (pedido explícito, valores exactos pedidos: LOCAL/TODOS_A/TODOS_B).
+function alcanceAuditLabel(alcance: { scope: PaymentScope; local: string | null }): string {
+  if (alcance.scope === "local") return "LOCAL";
+  if (alcance.scope === "all_our_voters") return "TODOS_A";
+  return "TODOS_B";
+}
+
+const MENSAJE_FUERA_DE_ALCANCE =
+  "Este votante no está dentro de tu alcance de pago autorizado";
 
 function requireAuth(auth: Auth): string {
   if (!auth) {
@@ -417,6 +478,7 @@ export const buscarBeneficiarioCajero = functions.https.onCall(
         "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede buscar beneficiarios acá"
       );
     }
+    const alcance = resolverAlcancePago(memberData);
 
     // A/B: "nuestro" votante — savedRecords de TODO el candidato (nunca
     // acotado a un dirigente puntual, ver cabecera de arriba).
@@ -429,6 +491,9 @@ export const buscarBeneficiarioCajero = functions.https.onCall(
     if (!recordSnap.empty) {
       const rec = recordSnap.docs[0];
       const data = rec.data();
+      if (!dentroDeAlcance(alcance, isAdmin, true, data.local)) {
+        return { scenario: "FUERA_DE_ALCANCE", nombre: data.nombre || "", cedula: data.cedula };
+      }
       let dirigenteNombre: string | null = null;
       if (data.uid) {
         const dirSnap = await candidateRef(candidateId).collection("users").doc(data.uid).get();
@@ -472,6 +537,14 @@ export const buscarBeneficiarioCajero = functions.https.onCall(
       return { scenario: "D" };
     }
     const voter = voterSnap.docs[0].data();
+
+    // El padrón general (no "nuestro") solo es accesible bajo TODOS (B) —
+    // LOCAL/TODOS (A) no tienen flujo de excepción en absoluto, ver pedido
+    // explícito ("Para TODOS (B) mantener la lógica de autorización
+    // excepcional... salvo que posteriormente definamos...").
+    if (!dentroDeAlcance(alcance, isAdmin, false, null)) {
+      return { scenario: "FUERA_DE_ALCANCE", nombre: voter.nombre || "", cedula: ciLimpia };
+    }
 
     // ¿Ya hay una excepción activa (pendiente o aprobada sin consumir)
     // para este beneficiario? Como máximo debería haber una a la vez
@@ -621,6 +694,7 @@ export const registrarEgresoCajero = functions.https.onCall(
           "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede registrar egresos acá"
         );
       }
+      const alcance = resolverAlcancePago(memberData);
 
       const candidateLocalidad = candidateSnap.data()?.localidad || "";
       const ciLimpia = beneficiaryCI ? String(beneficiaryCI).trim() : "";
@@ -699,6 +773,13 @@ export const registrarEgresoCajero = functions.https.onCall(
       let exceptionDataUsed: FirebaseFirestore.DocumentData | null = null;
       if (ciLimpia && beneficiaryVoterId) {
         if (nuestroRecord) {
+          // Alcance de pago (AUDITORÍA 2026-10-03): antes de nada, ¿este
+          // votante está dentro de lo que este cajero puede pagar? Se
+          // chequea PRIMERO — si está fuera de alcance, no importa si
+          // tiene ayuda aprobada o no, no se revela nada más.
+          if (!dentroDeAlcance(alcance, isAdmin, true, nuestroRecord.local)) {
+            throw new functions.https.HttpsError("permission-denied", MENSAJE_FUERA_DE_ALCANCE);
+          }
           // Camino normal: "nuestro" votante con ayuda ya aprobada por
           // Finanzas — el monto a pagar es EXACTAMENTE el aprobado, el
           // cajero nunca puede pagar un monto distinto (ver pedido
@@ -727,6 +808,13 @@ export const registrarEgresoCajero = functions.https.onCall(
             exceptionDataUsed = exc;
           }
         } else {
+          // Alcance de pago: el padrón general (no "nuestro") solo es
+          // pagable bajo TODOS (B) — LOCAL/TODOS (A) no tienen flujo de
+          // excepción en absoluto, aunque de algún modo tuvieran un
+          // exceptionAuthorizationId a mano.
+          if (!dentroDeAlcance(alcance, isAdmin, false, null)) {
+            throw new functions.https.HttpsError("permission-denied", MENSAJE_FUERA_DE_ALCANCE);
+          }
           // No es "nuestro" votante (solo está en el padrón general) —
           // SIEMPRE requiere una excepción aprobada, aunque sea el
           // primer pago a esta persona (escenario C del pedido).
@@ -776,6 +864,10 @@ export const registrarEgresoCajero = functions.https.onCall(
           : null,
         createdBy: callerUid,
         createdByRole: isOwner ? "cashier" : "admin",
+        // AUDITORÍA 2026-10-03: qué modalidad de alcance de pago tenía
+        // ESTE cajero al momento de ESTE pago puntual (pedido explícito).
+        paymentScopeAtPayment: alcanceAuditLabel(alcance),
+        paymentScopeLocalAtPayment: alcance.scope === "local" ? alcance.local : null,
         createdAt: FieldValue.serverTimestamp(),
       };
       tx.set(movRef, movPayload);
@@ -796,7 +888,7 @@ export const registrarEgresoCajero = functions.https.onCall(
         entityType: "cashierMovements",
         entityId: movRef.id,
         previousData: { balance: saldoActual },
-        newData: { balance: nuevoBalance, amount: montoNum, beneficiaryVoterId },
+        newData: { balance: nuevoBalance, amount: montoNum, beneficiaryVoterId, paymentScopeAtPayment: alcanceAuditLabel(alcance) },
       });
       return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName };
     });
@@ -856,6 +948,7 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
           "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede registrar egresos acá"
         );
       }
+      const alcance = resolverAlcancePago(callerRoles.memberData);
 
       if (recordSnap.empty) {
         throw new functions.https.HttpsError(
@@ -865,6 +958,9 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
       }
       const recordDoc = recordSnap.docs[0];
       const record = recordDoc.data();
+      if (!dentroDeAlcance(alcance, callerRoles.isAdmin, true, record.local)) {
+        throw new functions.https.HttpsError("permission-denied", MENSAJE_FUERA_DE_ALCANCE);
+      }
       // Esta función es SOLO para el caso "sin ayuda previa" — si ya
       // tiene una aprobada, el camino correcto es registrarEgresoCajero
       // directo (o, si ya fue pagada, reasistencia con excepción).
@@ -971,6 +1067,8 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
         exceptionAuthorization: null,
         createdBy: callerUid,
         createdByRole: isOwner ? "cashier" : "admin",
+        paymentScopeAtPayment: alcanceAuditLabel(alcance),
+        paymentScopeLocalAtPayment: alcance.scope === "local" ? alcance.local : null,
         createdAt: FieldValue.serverTimestamp(),
       };
       tx.set(movRef, movPayload);
@@ -984,7 +1082,7 @@ export const aprobarYPagarAyudaCajero = functions.https.onCall(
         entityType: "cashierMovements",
         entityId: movRef.id,
         previousData: { balance: saldoActual, recordAssistanceStatus: record.assistanceStatus ?? null },
-        newData: { balance: nuevoBalance, amount: monto, beneficiaryVoterId, approvedAmount: monto },
+        newData: { balance: nuevoBalance, amount: monto, beneficiaryVoterId, approvedAmount: monto, paymentScopeAtPayment: alcanceAuditLabel(alcance) },
       });
       return { movementId: movRef.id, balanceAfter: nuevoBalance, beneficiaryVoterId, beneficiaryName, approvedAmount: monto };
     });
@@ -1419,6 +1517,13 @@ export const solicitarExcepcionBeneficiario = functions.https.onCall(
         throw new functions.https.HttpsError(
           "permission-denied",
           "Solo el cajero dueño de esta cuenta (o un admin de Finanzas) puede solicitar una excepción acá"
+        );
+      }
+      const alcance = resolverAlcancePago(callerRoles.memberData);
+      if (!dentroDeAlcance(alcance, callerRoles.isAdmin, false, null)) {
+        throw new functions.https.HttpsError(
+          "permission-denied",
+          "Tu alcance de pago no incluye el padrón general — no podés solicitar una excepción para esta persona"
         );
       }
 

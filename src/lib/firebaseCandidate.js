@@ -1075,12 +1075,20 @@ export async function updateCandidateUserMesaLocal(candidateId, uid, data) {
     await batch.commit()
   }
 
-  await updateDoc(doc(db, ...candidatePath(candidateId, 'users', uid)), {
+  const payload = {
     seccional: newSeccional,
     mesa: newMesa,
     local: newLocal,
     mesasAsignadas: data.mesasAsignadas || null
-  })
+  }
+  // Alcance de pago (Finanzas–Cajero/a): campo opcional, reusa este mismo
+  // endpoint/doc en vez de crear uno aparte (pedido explícito) — solo se
+  // escribe cuando el llamante lo manda, así los roles que no tienen esta
+  // sección (mesarios, dirigentes, etc.) nunca lo tocan.
+  if (data.paymentScope !== undefined) {
+    payload.paymentScope = data.paymentScope || null
+  }
+  await updateDoc(doc(db, ...candidatePath(candidateId, 'users', uid)), payload)
 }
 
 // Campos de pago del rol operador (monto entregado + cadencia de entrega).
