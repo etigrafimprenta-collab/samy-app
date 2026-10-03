@@ -60,6 +60,21 @@ export async function updateCandidateBranding(candidateId, { name, logoUrl, prim
   })
 }
 
+// Distinta de updateCandidateBranding a propósito: `localidad` NO está en
+// la allowlist de campos que campaign_admin puede tocar
+// (firestore.rules:551-559, `affectedKeys().hasOnly([...])`) — solo
+// superadmin puede reasignarla, porque cambia qué padrón ve/busca el
+// candidato entero (ver searchVoterByCedula/searchVotersByName). Mezclarla
+// en updateCandidateBranding hubiera hecho que un campaign_admin real
+// reciba "permission-denied" silencioso apenas tocara cualquier otro campo
+// del mismo formulario.
+export async function updateCandidateLocalidad(candidateId, localidad) {
+  await updateDoc(doc(db, ...candidatePath(candidateId)), {
+    localidad: String(localidad || '').trim(),
+    updatedAt: serverTimestamp()
+  })
+}
+
 // ── Usuarios del candidato ──────────────────────────────────────────────
 
 export async function getCandidateUser(candidateId, uid) {
@@ -91,27 +106,29 @@ export async function listCandidateUsersPage(candidateId, { role = null, cursor 
 // candidateId. Ver firestore.rules: lectura abierta a cualquier usuario
 // autenticado, escritura solo admin legacy/superadmin.
 
-export async function searchVoterByCedula(cedula) {
-  const q = query(
-    collection(db, 'voters'),
-    where('cedula', '==', String(cedula).trim()),
-    limit(1)
-  )
+// `localidad` scopea la búsqueda al padrón del candidato que la pide —
+// ver comentario de cabecera de sección: el padrón es compartido entre
+// TODOS los candidatos, pero ya no todos son de la misma localidad, así
+// que sin este filtro un candidato vería votantes de una localidad ajena.
+// Opcional (undefined) para no romper llamadas legacy sin candidato.
+export async function searchVoterByCedula(cedula, localidad) {
+  const clauses = [where('cedula', '==', String(cedula).trim())]
+  if (localidad) clauses.push(where('localidad', '==', localidad))
+  clauses.push(limit(1))
+  const q = query(collection(db, 'voters'), ...clauses)
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
 
 // Mínimo 3 caracteres — evita disparar consultas por cada tecla sobre
 // nombres de 1-2 letras que devolverían de a cientos.
-export async function searchVotersByName(termino) {
+export async function searchVotersByName(termino, localidad) {
   const upper = String(termino).trim().toUpperCase()
   if (upper.length < 3) return []
-  const q = query(
-    collection(db, 'voters'),
-    where('nombre_upper', '>=', upper),
-    where('nombre_upper', '<=', upper + ''),
-    limit(50)
-  )
+  const clauses = [where('nombre_upper', '>=', upper), where('nombre_upper', '<=', upper + '')]
+  if (localidad) clauses.push(where('localidad', '==', localidad))
+  clauses.push(limit(50))
+  const q = query(collection(db, 'voters'), ...clauses)
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
@@ -320,7 +337,7 @@ export { CEDULA_ALIASES }
 // `nombre` siempre queda como "APELLIDO NOMBRE" combinado (igual que
 // siempre) para no romper ninguna pantalla que ya lo lee así — los campos
 // nuevos (teléfono, sexo, partido2023, etc.) se agregan aparte.
-function parseVoterRow(row) {
+function parseVoterRow(row, localidad) {
   const normRow = normalizeRowKeys(row)
   const cedula = String(pick(normRow, ...CEDULA_ALIASES)).replace('.0', '').trim()
   const apellido = String(pick(normRow, 'APELLIDO', 'Apellidos')).trim()
@@ -330,6 +347,13 @@ function parseVoterRow(row) {
     cedula,
     nombre,
     nombre_upper: nombre.toUpperCase(),
+    // Localidad elegida en Superadmin al cargar este archivo (slug, ej.
+    // 'fernando-de-la-mora') — scopea búsqueda/conteo por candidato (ver
+    // searchVoterByCedula/searchVotersByName más arriba). No viene del
+    // Excel: el padrón real no trae una columna de localidad utilizable
+    // directamente (distrito/depart/zona son subdivisiones distintas), así
+    // que se fija una vez por archivo cargado, no por fila.
+    localidad: String(localidad || '').trim(),
     apellido,
     nombreSolo,
     telefono: String(pick(normRow, 'TELEFONO', 'Celular')).trim(),
@@ -383,7 +407,7 @@ function assertCedulaColumnFound(rows, parsed) {
 // Solo superadmin (ver firestore.rules) — carga/actualiza el padrón
 // COMPARTIDO. Ningún campaign_admin de ningún candidato tiene su propio
 // botón de "importar padrón": todos ven y buscan sobre este mismo origen.
-export async function importSharedVotersBatch(rows, onProgress) {
+export async function importSharedVotersBatch(rows, localidad, onProgress) {
   const BATCH_SIZE = 400
   // Cuántas tandas de 400 filas se procesan en simultáneo — cada una hace
   // su propio chequeo de duplicados + writeBatch, independiente de las
@@ -404,7 +428,7 @@ export async function importSharedVotersBatch(rows, onProgress) {
   const seen = new Set()
   const parsed = []
   for (const row of rows) {
-    const v = parseVoterRow(row)
+    const v = parseVoterRow(row, localidad)
     if (v.cedula) {
       if (seen.has(v.cedula)) {
         stats.duplicates++
@@ -459,10 +483,10 @@ export async function importSharedVotersBatch(rows, onProgress) {
 // que no aparezca en el archivo nuevo (a diferencia de un reemplazo
 // total) — así ningún registro ya capturado por un candidato queda
 // huérfano si el archivo nuevo tiene menos filas por el motivo que sea.
-export async function updateSharedVotersBatch(rows, onProgress) {
+export async function updateSharedVotersBatch(rows, localidad, onProgress) {
   const BATCH_SIZE = 400
   const CONCURRENCY = 6 // ver comentario en importSharedVotersBatch
-  const stats = { added: 0, updated: 0, errors: 0, total: rows.length }
+  const stats = { added: 0, updated: 0, errors: 0, total: rows.length, conflictosLocalidad: 0, conflictosLocalidadList: [] }
 
   // Mismo motivo que en importSharedVotersBatch: si la misma cédula
   // aparece más de una vez en el archivo, se consolida en una sola fila
@@ -475,7 +499,7 @@ export async function updateSharedVotersBatch(rows, onProgress) {
   // descartan acá mismo (antes se descartaban más abajo, mismo resultado).
   const byCedula = new Map()
   for (const row of rows) {
-    const v = parseVoterRow(row)
+    const v = parseVoterRow(row, localidad)
     if (!v.cedula) continue
     const previo = byCedula.get(v.cedula)
     byCedula.set(v.cedula, previo ? mergeVoterFields(v, previo) : v)
@@ -494,6 +518,18 @@ export async function updateSharedVotersBatch(rows, onProgress) {
     chunkParsed.forEach((v) => {
       const match = existingVoters.get(v.cedula)
       if (match) {
+        // Salvaguarda de localidad: una cédula paraguaya es única a nivel
+        // nacional, así que si esta cédula ya está cargada con OTRA
+        // localidad, esto no es "la misma persona con datos desactualizados"
+        // sino un conflicto real (padrón mal etiquetado, o coincidencia de
+        // datos entre dos localidades distintas) — no se pisa mesa/local/
+        // dirección de la localidad ya cargada a ciegas, se deja afuera del
+        // merge automático y se reporta aparte para revisión manual.
+        if (match.data.localidad && localidad && match.data.localidad !== localidad) {
+          stats.conflictosLocalidad++
+          stats.conflictosLocalidadList.push(v.cedula)
+          return
+        }
         // match.data.telefono ya viene resuelto desde la subcolección
         // privada (ver findExistingVotersShared) — mergeVoterFields decide
         // si el archivo nuevo lo pisa o se conserva el que ya había, sin
@@ -1010,7 +1046,8 @@ export async function reopenAssistanceRequest(candidateId, record, nuevoMonto, a
 // assignTableUserToVoter), cuáles quedan "huérfanos" cuando se le cambia
 // la mesa/local. Sin esto, si el admin cambia a un mesario de Mesa 12 a
 // Mesa 14, seguía viendo (y pudiendo marcar) los votantes de Mesa 12 que
-// alguna vez le fueron asignados a mano — acceso residual.
+// alguna vez le fueron asignados a mano — acceso residual, punto 7/K del
+// pedido de alta unificada de mesario.
 export function computeStaleTableAssignments(controlDocs, newLocal, newMesa) {
   return controlDocs
     .filter(d => d.pollingPlace !== (newLocal || '') || String(d.tableNumber || '') !== String(newMesa || ''))
@@ -1164,7 +1201,10 @@ export async function desmarcarVoto(candidateId, { seccional, mesa, cedula, acto
 // isMesarioOfMesa cuando el perfil lo tiene seteado — sin el mismo filtro
 // acá, la query completa queda denegada por Firestore (no puede evaluar
 // una regla que depende de un campo que la query no está acotando), no
-// solo "devuelve de menos".
+// solo "devuelve de menos". Encontrado en producción: mesario nuevo con
+// `local` en su perfil se quedaba colgado en "Cargando..." porque este
+// query rechazado nunca resolvía ni rechazaba visiblemente (sin try/catch
+// en el caller de entonces).
 export async function getVotosDeMesa(candidateId, seccional, mesa, local) {
   const clauses = [where('mesa', '==', String(mesa))]
   clauses.push(local ? where('local', '==', local) : where('seccional', '==', seccional))
@@ -1365,6 +1405,13 @@ export async function createMesario(candidateId, data) {
     local: '',
     mesa: '',
     savedRecordId: null,
+    // UID de Firebase Auth de la cuenta de login vinculada (alta unificada
+    // de mesario) — null para filas de roster sin cuenta todavía (o
+    // migradas de antes de este cambio). candidates/{id}/mesarios sigue
+    // siendo un doc separado de candidates/{id}/users (roster de RRHH vs.
+    // cuenta de acceso), pero ahora referenciado por uid en vez de vivir
+    // como 2 identidades sin relación.
+    userId: null,
     capacitaciones: [],
     pagos: [],
     ...data,
@@ -1433,6 +1480,22 @@ export async function getSharedVotersCount() {
   const { getCountFromServer } = await import('firebase/firestore')
   const snap = await getCountFromServer(collection(db, 'voters'))
   return snap.data().count
+}
+
+// Desglose del padrón compartido por localidad — para que Superadmin
+// verifique que una carga nueva no se mezcló con la localidad equivocada.
+// Recibe la lista de localidades a contar (Superadmin ya las conoce por
+// `candidates[].localidad`, no hace falta una colección catálogo aparte).
+// Cuenta en paralelo, una query `count()` por localidad (barato: son pocas
+// localidades, nunca cientos).
+export async function getSharedVotersCountByLocalidad(localidades) {
+  const { getCountFromServer } = await import('firebase/firestore')
+  const unicas = [...new Set((localidades || []).filter(Boolean))]
+  const entries = await Promise.all(unicas.map(async (localidad) => {
+    const snap = await getCountFromServer(query(collection(db, 'voters'), where('localidad', '==', localidad)))
+    return [localidad, snap.data().count]
+  }))
+  return Object.fromEntries(entries)
 }
 
 // ── Auditoría ────────────────────────────────────────────────────────
@@ -2116,6 +2179,24 @@ export async function getElectionDayControlByTableUser(candidateId, tableUserUid
   const q = query(collection(db, ...candidatePath(candidateId, 'electionDayControl')), where('assignedTableUserId', '==', tableUserUid))
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// AUDITORÍA 2026-10-03 (voto único, misma fuente en todas las pantallas):
+// la herramienta "Por Mesa" de Día D Admin (dia-d-admin-candidate.js)
+// calculaba "votaron" leyendo SOLO diaD/votes — a diferencia de
+// registroYaVoto() (mismo archivo), que además hace OR con
+// electionDayControl.status==='voted'. Un "nuestro" confirmado SOLO por
+// ese lado (ej. desde Centro de Contacto, que no tiene mesa y por lo
+// tanto no deja espejo en diaD/votes) aparecía como "no votó" acá pero
+// "sí votó" en Global/Local — mismo elector, dos respuestas. Mismo
+// patrón que getRecordsByIds (ids ya conocidos, pocos — nunca toda la
+// colección), para que "Por Mesa" pueda hacer el mismo OR sin leer de más.
+export async function getElectionDayControlByIds(candidateId, ids) {
+  const unique = [...new Set(ids)].filter(Boolean)
+  const docs = await Promise.all(
+    unique.map(id => getDoc(doc(db, ...candidatePath(candidateId, 'electionDayControl', id))))
+  )
+  return docs.filter(d => d.exists()).map(d => ({ id: d.id, ...d.data() }))
 }
 
 export async function getElectionDayControlByDriver(candidateId, driverId) {

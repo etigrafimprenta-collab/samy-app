@@ -45,7 +45,14 @@ export async function renderReporteDirigentes(body, candidateId) {
       ])
       const votaron = control.filter(c => c.status === 'voted').length
       const noIran = control.filter(c => c.status === 'will_not_vote').length
-      return { dirigente: d, registros, votaron, noIran, pendientes: control.length - votaron - noIran }
+      // AUDITORÍA 2026-10-03 (voto único, mismo estado en toda la app):
+      // `control` (electionDayControl por assignedLeaderId) se crea de
+      // forma LAZY — un registro nunca tocado no tiene doc ahí todavía.
+      // "Pendientes" tiene que ser relativo a `registros` (el total real
+      // de savedRecords de este dirigente, siempre completo), no a
+      // control.length — si no, un dirigente con registros sin tocar
+      // mostraba "Pendientes: 0" en vez de "Pendientes: registros".
+      return { dirigente: d, registros, votaron, noIran, pendientes: Math.max(0, registros - votaron - noIran) }
     }))
     stats.sort((a, b) => b.registros - a.registros)
 

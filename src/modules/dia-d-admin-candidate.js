@@ -9,9 +9,11 @@
 import {
   onElectionDayChange,
   setElectionDayEnabled,
+  getCandidate,
   getVotersByMesa,
   getRecordsByMesa,
   getVotosDeMesa,
+  getElectionDayControlByIds,
   getAllRecords,
   getAllCandidateUsers,
   listenAllVotes,
@@ -202,10 +204,11 @@ async function loadAndRender(container, candidateId, currentUser) {
       updateToggle(enabled, candidateId, currentUser.uid)
     })
 
-    const [equipo, allRecords, drivers0] = await Promise.all([
+    const [equipo, allRecords, drivers0, candidate] = await Promise.all([
       getAllCandidateUsers(candidateId),
       getAllRecords(candidateId),
-      getDrivers0(candidateId)
+      getDrivers0(candidateId),
+      getCandidate(candidateId)
     ])
 
     const locales = new Set()
@@ -235,11 +238,25 @@ async function loadAndRender(container, candidateId, currentUser) {
         }
 
         try {
-          const votantes = await getVotersByMesa(seccional, mesa)
+          const votantes = await getVotersByMesa(seccional, mesa, null, candidate?.localidad)
           const nuestrosRecords = await getRecordsByMesa(candidateId, seccional, mesa)
           const nuestros = new Set(nuestrosRecords.map(r => r.cedula))
           const votosMesa = await getVotosDeMesa(candidateId, seccional, mesa)
+          // AUDITORÍA 2026-10-03 (voto único, misma fuente en toda la app):
+          // diaD/votes solo no alcanza — un "nuestro" (savedRecords) puede
+          // estar confirmado SOLO en electionDayControl (ej. desde Centro
+          // de Contacto, sin mesa, sin espejo posible) y antes aparecía
+          // "no votó" acá aunque Global/Local ya lo contaran. Mismo OR que
+          // usa registroYaVoto() más abajo en este archivo, acotado a los
+          // "nuestros" de ESTA mesa (los únicos que pueden tener
+          // electionDayControl — el resto del padrón no tiene savedRecords).
+          const controlNuestros = await getElectionDayControlByIds(candidateId, nuestrosRecords.map(r => r.id))
+          const cedulaPorRecordId = {}
+          nuestrosRecords.forEach(r => { cedulaPorRecordId[r.id] = r.cedula })
           const votaron = new Set(votosMesa.filter(v => v.voted).map(v => v.cedula))
+          controlNuestros.forEach(c => {
+            if (c.status === 'voted' && cedulaPorRecordId[c.id]) votaron.add(cedulaPorRecordId[c.id])
+          })
 
           document.getElementById('mesa-total').textContent = votantes.length
           document.getElementById('mesa-nuestros').textContent = nuestros.size

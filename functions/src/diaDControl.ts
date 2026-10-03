@@ -219,48 +219,46 @@ function baseElectionDayControl(candidateId: string, voterId: string, ctx: Conte
   };
 }
 
-// Espejo de marcarVoto()/desmarcarVoto() (firebaseCandidate.js) — reusa
-// el `record` ya leído por resolverContexto(), nunca vuelve a pedirlo.
-// Solo se toca si Día D está habilitado y el votante tiene seccional+mesa.
-async function sincronizarDiaDVotes(
-  candidateId: string,
-  ctx: Contexto,
-  newStatus: string,
-  previousStatus: string | null,
-  callerUid: string
+// AUDITORÍA 2026-10-03 (voto único por elector, idempotencia y
+// atomicidad): antes, esto hacía 3 escrituras independientes
+// (electionDayControl, electionDayMovements, diaD/votes) basadas en una
+// lectura de `previousStatus` ya tomada por resolverContexto() — si dos
+// llamadas (dirigente + mesario + admin, cualquier combinación) tocaban
+// el MISMO voterId casi al mismo tiempo, ambas podían leer
+// previousStatus=null y las dos escribir como si fueran "la primera vez"
+// (2 movimientos de auditoría duplicados, y en el peor caso una
+// condición de carrera real). Reescrito como transacción de Firestore:
+// la lectura de `status` pasa a ser DENTRO de la transacción (fresca,
+// nunca la de resolverContexto) y las 3 escrituras van atómicas con ella
+// — Firestore reintenta automáticamente la transacción que pierde la
+// carrera, así que la que gana ve el estado YA actualizado por la otra.
+//
+// Idempotencia: si `status` ya es el valor pedido, no se escribe nada —
+// ni electionDayControl, ni un movimiento nuevo, ni diaD/votes. Esto es
+// lo que hace que "Elector X" marcado por dirigente y después también
+// por mesario/admin nunca pase de contar 1 a contar 2: el dashboard
+// cuenta sobre ese mismo campo único (status==='voted'), así que si no
+// cambia, tampoco cambia el conteo — sin importar cuántas veces ni
+// quiénes lo toquen.
+function construirUpdateVotes(
+  record: FirebaseFirestore.DocumentData,
+  recordId: string,
+  callerUid: string,
+  nuevoVoted: boolean
 ) {
-  const record = ctx.record;
-  // BUG REAL (encontrado probando la sincronización de mesario por
-  // local+mesa): esto exigía `seccional` SIEMPRE, igual que marcarVoto()
-  // ya corrigió en firebaseCandidate.js — `seccional` queda vacío a
-  // propósito para perfiles/votantes del mecanismo nuevo (local es la
-  // fuente de verdad). Sin este fix, un mesario por local+mesa nunca
-  // sincronizaba su voto a diaD/votes (el guard devolvía antes de
-  // escribir nada), aunque electionDayControl sí quedara bien.
-  if (!record?.mesa || (!record?.seccional && !record?.local)) return;
-
-  const docId = `${record.seccional}_${record.mesa}_${record.cedula}`;
-  const votesRef = candidateRef(candidateId).collection("diaD").doc("current").collection("votes").doc(docId);
-
-  if (newStatus === "voted") {
-    const configSnap = await candidateRef(candidateId).collection("diaD").doc("current").get();
-    if (!configSnap.exists || configSnap.data()?.enabled !== true) return;
-    await votesRef.set({
-      voterId: record.voterId ?? null,
-      savedRecordId: ctx.recordRef.id,
-      cedula: record.cedula,
-      seccional: record.seccional,
-      mesa: String(record.mesa),
-      local: record.local || "",
-      voted: true,
-      markedBy: callerUid,
-      markedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-  } else if (previousStatus === "voted") {
-    const votesSnap = await votesRef.get();
-    if (!votesSnap.exists) return;
-    await votesRef.set({ voted: false, unmarkedBy: callerUid, unmarkedAt: FieldValue.serverTimestamp() }, { merge: true });
-  }
+  return nuevoVoted
+    ? {
+        voterId: record.voterId ?? null,
+        savedRecordId: recordId,
+        cedula: record.cedula,
+        seccional: record.seccional ?? "",
+        mesa: String(record.mesa),
+        local: record.local || "",
+        voted: true,
+        markedBy: callerUid,
+        markedAt: FieldValue.serverTimestamp(),
+      }
+    : { voted: false, unmarkedBy: callerUid, unmarkedAt: FieldValue.serverTimestamp() };
 }
 
 export const setDiaDStatusFn = functions.https.onCall(
@@ -273,24 +271,44 @@ export const setDiaDStatusFn = functions.https.onCall(
     }
 
     const ctx = await resolverContexto(candidateId, voterId, callerUid);
-    const previousStatus = ctx.controlExists ? ctx.control?.status ?? null : null;
-    const base = baseElectionDayControl(candidateId, voterId, ctx);
+    const record = ctx.record;
+    // BUG REAL (encontrado probando la sincronización de mesario por
+    // local+mesa): esto exigía `seccional` SIEMPRE — `seccional` queda
+    // vacío a propósito para perfiles/votantes del mecanismo nuevo
+    // (local es la fuente de verdad).
+    const tieneUbicacion = !!(record?.mesa && (record?.seccional || record?.local));
+    const votesRef = tieneUbicacion
+      ? candidateRef(candidateId).collection("diaD").doc("current").collection("votes")
+          .doc(`${record!.seccional ?? ""}_${record!.mesa}_${record!.cedula}`)
+      : null;
+    const diaDConfigRef = candidateRef(candidateId).collection("diaD").doc("current");
 
-    // Las 2 escrituras de acá no dependen una de la otra (ambas solo
-    // dependen de lo ya leído en ctx/previousStatus) — van en paralelo.
-    // sincronizarDiaDVotes SÍ puede tocar el mismo doc de diaD/votes que
-    // otra escritura futura, pero nunca el mismo doc que estas dos, así
-    // que también entra en la misma tanda.
-    await Promise.all([
-      ctx.controlRef.set({
+    const resultado = await db().runTransaction(async (tx) => {
+      // TODAS las lecturas de la transacción van primero (requisito de
+      // Firestore: ningún get() después del primer set()/update()).
+      const [controlSnap, configSnap, votesSnap] = await Promise.all([
+        tx.get(ctx.controlRef),
+        votesRef ? tx.get(diaDConfigRef) : Promise.resolve(null),
+        votesRef ? tx.get(votesRef) : Promise.resolve(null),
+      ]);
+      const previousStatus = controlSnap.exists ? controlSnap.data()?.status ?? null : null;
+
+      if (previousStatus === newStatus) {
+        return { changed: false, previousStatus };
+      }
+
+      const base = controlSnap.exists ? {} : baseElectionDayControl(candidateId, voterId, ctx);
+
+      tx.set(ctx.controlRef, {
         ...base,
         status: newStatus,
         lastMovementAt: FieldValue.serverTimestamp(),
         lastUpdatedBy: callerUid,
         lastUpdatedRole: rolParaRegistro(ctx.roles),
         updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true }),
-      candidateRef(candidateId).collection("electionDayMovements").add({
+      }, { merge: true });
+
+      tx.set(candidateRef(candidateId).collection("electionDayMovements").doc(), {
         candidateId,
         voterId,
         previousStatus,
@@ -300,11 +318,22 @@ export const setDiaDStatusFn = functions.https.onCall(
         note: "",
         location: null,
         createdAt: FieldValue.serverTimestamp(),
-      }),
-      sincronizarDiaDVotes(candidateId, ctx, newStatus, previousStatus, callerUid),
-    ]);
+      });
 
-    return { ok: true };
+      if (votesRef) {
+        if (newStatus === "voted") {
+          if (configSnap?.exists && configSnap.data()?.enabled === true) {
+            tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, true), { merge: true });
+          }
+        } else if (previousStatus === "voted" && votesSnap?.exists) {
+          tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, false), { merge: true });
+        }
+      }
+
+      return { changed: true, previousStatus };
+    });
+
+    return { ok: true, ...resultado };
   }
 );
 
