@@ -23,6 +23,12 @@ import { debounce, throttle } from '../lib/debounce.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import {
   getCandidate,
+  getCandidateUser,
+  getVotersByMesa,
+  getVotosDeMesa,
+  getRecordsByMesa,
+  marcarVoto,
+  desmarcarVoto,
   getAllRecords,
   getUserRecords,
   getRecordsByIds,
@@ -35,7 +41,6 @@ import {
   getAllElectionDayControl,
   listenAllElectionDayControl,
   getElectionDayControlByLeader,
-  getElectionDayControlByTableUser,
   getElectionDayControlByDriver,
   getDriverByUsuario,
   setDiaDStatus,
@@ -144,7 +149,7 @@ function tarjetaAccionRapida({ record, control, botones, color, incidentTypes, c
   return `
     <div class="dd-card" data-id="${record.id}" style="border: 1px solid #ddd; border-radius: 10px; padding: 14px; background: ${control?.status === 'voted' ? '#e8f5e9' : 'white'};">
       <div style="font-weight: 700; font-size: 1rem;">${escapeHtml(record.nombre)}</div>
-      <div style="font-size: 0.78rem; color: #666;">CI ${escapeHtml(record.cedula)} · 📱 ${escapeHtml(record.telefono) || 'sin tel.'}</div>
+      <div style="font-size: 0.78rem; color: #666;">CI ${escapeHtml(record.cedula)} · Orden ${escapeHtml(record.orden) || '—'} · 📱 ${escapeHtml(record.telefono) || 'sin tel.'}</div>
       <div style="font-size: 0.78rem; color: #666; margin-bottom: 6px;">🗳️ ${escapeHtml(record.local) || '—'} · Mesa ${escapeHtml(record.mesa) || '—'} ${record.direccion ? '· 🏠 ' + escapeHtml(record.direccion) : ''}</div>
       <span style="display:inline-block; background:#ede7f6; color:#4527a0; padding:2px 8px; border-radius:8px; font-size:.7rem; font-weight:700; margin-bottom:8px;">${statusLabel}</span>
       ${control?.incidentOpen ? '<span style="display:inline-block; background:#ffebee; color:#c62828; padding:2px 8px; border-radius:8px; font-size:.7rem; font-weight:700; margin-left:4px; margin-bottom:8px;">⚠️ Incidencia abierta</span>' : ''}
@@ -163,6 +168,13 @@ function wireAccionRapida(box, { candidateId, user, role, records, controlByVote
     btn.addEventListener('click', async () => {
       const record = records.find(r => r.id === btn.dataset.id)
       const control = controlByVoterId[record.id]
+      // Corregir un "Ya votó" no es un click más — sin esta confirmación,
+      // un mis-click de cualquier otro botón pisa el estado en silencio.
+      // No borra nada (setDiaDStatus + desmarcarVoto se ocupan de dejar
+      // rastro), pero el mesario tiene que confirmarlo a propósito.
+      if (btn.dataset.status && control?.status === 'voted' && btn.dataset.status !== 'voted') {
+        if (!confirm('Este elector ya fue marcado como VOTÓ. ¿Confirmás que querés corregir este estado?')) return
+      }
       btn.disabled = true
       try {
         // Vía Cloud Function (HTTPS normal, no WebChannel) — ver cabecera
@@ -170,9 +182,7 @@ function wireAccionRapida(box, { candidateId, user, role, records, controlByVote
         // autorización que setDiaDStatus/setDiaDFlags, por un transporte
         // distinto al que venía fallando de forma intermitente para
         // algunos dirigentes reales sin causa identificable (auditoría
-        // 2026-10-02) — causa real ya encontrada y corregida aparte (bug
-        // de orden en el spread de ELECTION_DAY_CONTROL_DEFAULTS), esto
-        // queda como capa extra de robustez.
+        // 2026-10-02).
         if (btn.dataset.status) {
           await setDiaDStatusViaFn(candidateId, record, btn.dataset.status)
         } else if (btn.dataset.flag) {
@@ -386,50 +396,173 @@ async function renderDirigenteView(container, candidateId, user) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Vista MESARIO — votantes de su local/mesa asignada.
+// Vista MESARIO — igual a la primera versión de la app (mesario-control.js):
+// lista COMPLETA del padrón de su mesa (no solo electores asignados uno
+// por uno), un solo botón "Marcar" / "Revertir", sin los estados
+// intermedios de chofer/dirigente. La mesa/seccional del mesario vive en
+// candidates/{id}/users/{uid}.mesa/.seccional — campo admin-only desde la
+// auditoría RBAC (ya no autoeditable), así que isMesarioOfMesa() en
+// firestore.rules es una fuente confiable para autorizar diaD/votes.
 // ══════════════════════════════════════════════════════════════════════
 async function renderMesarioView(container, candidateId, user) {
   container.innerHTML = headerHtml('Vista mesario') + '<div id="dd-body" style="color:#999;">Cargando...</div>'
   iniciarReloj('__diaDControlMesarioInterval')
 
-  async function cargarYPintar() {
-    const controls = await getElectionDayControlByTableUser(candidateId, user.uid)
-    const records = await getRecordsByIds(candidateId, controls.map(c => c.voterId))
-    const controlByVoterId = {}
-    controls.forEach(c => { controlByVoterId[c.voterId] = c })
+  let perfil
+  let candidate
+  try {
+    [perfil, candidate] = await Promise.all([
+      getCandidateUser(candidateId, user.uid),
+      getCandidate(candidateId)
+    ])
+  } catch (err) {
+    document.getElementById('dd-body').innerHTML = `<div style="background:#ffebee; border:1px solid #ef9a9a; border-radius:8px; padding:30px; text-align:center; color:#c62828;">Error cargando tu perfil: ${escapeHtml(err.message)}</div>`
+    return
+  }
+  const seccional = perfil?.seccional || ''
+  const mesa = perfil?.mesa || ''
+  // Alta unificada de mesario: los creados/editados por el flujo nuevo
+  // siempre traen `local` en su perfil — hace falta pasarlo a las queries
+  // de abajo porque firestore.rules ahora lo exige quien lo tiene seteado
+  // (evita que Mesa 12 de un local se confunda con Mesa 12 de otro). Un
+  // mesario legado sin `local` sigue funcionando igual que siempre
+  // (seccional+mesa solo) porque `local` queda '' y las queries de
+  // firebaseCandidate.js tratan un `local` vacío como "no filtrar por
+  // local", igual que la regla lo trata como "no exigirlo".
+  const local = perfil?.local || ''
+  const body = document.getElementById('dd-body')
 
-    const body = document.getElementById('dd-body')
-    if (records.length === 0) {
-      body.innerHTML = '<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:30px; text-align:center; color:#999;">Todavía no tenés votantes asignados a tu mesa. Pedile al administrador que te asigne desde el panel de Control.</div>'
-      return
-    }
+  // BUG REAL (encontrado en la prueba real desde el teléfono): esta
+  // guarda exigía `seccional` SIEMPRE, aunque el mesario ya tuviera
+  // `local` — pero `seccional` es informativo/opcional para perfiles
+  // nuevos (ver bug de datos real de arriba: es inconsistente por
+  // votante dentro de la misma mesa física, así que un admin puede
+  // dejarlo vacío a propósito). Alcanza con mesa + (seccional O local).
+  if (!mesa || (!seccional && !local)) {
+    body.innerHTML = '<div style="background:white; border:1px solid #ddd; border-radius:8px; padding:30px; text-align:center; color:#999;">Todavía no tenés local/mesa asignados. Pedile al administrador que te los asigne.</div>'
+    return
+  }
+
+  let votantes = []
+  let votados = new Set()
+  // Cédulas de electores que ESTE candidato ya tiene capturados en su
+  // propio roster (savedRecords) para esta mesa — "nuestros", igual
+  // criterio/color que ya usa el sistema legacy (mesario-control.js) y
+  // Día D Admin, para no inventar una convención visual nueva.
+  let nuestros = new Set()
+
+  async function cargarDatos() {
+    const [padron, votos, nuestrosRecords] = await Promise.all([
+      getVotersByMesa(seccional, mesa, local, candidate?.localidad),
+      getVotosDeMesa(candidateId, seccional, mesa, local),
+      // Requiere `local` en el perfil (mesarios del flujo unificado nuevo)
+      // — ver regla nueva en firestore.rules; un mesario legado sin
+      // `local` simplemente no resalta "nuestros" (nuestros queda vacío).
+      local ? getRecordsByMesa(candidateId, seccional, mesa, local) : Promise.resolve([])
+    ])
+    votantes = padron.sort((a, b) => (parseInt(a.orden) || 999999) - (parseInt(b.orden) || 999999))
+    votados = new Set(votos.filter(v => v.voted).map(v => v.cedula))
+    nuestros = new Set(nuestrosRecords.map(r => r.cedula))
+  }
+
+  function pintar(filtro = '') {
+    const term = filtro.trim().toLowerCase()
+    const filtrados = term
+      ? votantes.filter(v => String(v.nombre || '').toLowerCase().includes(term) || String(v.cedula || '').includes(term) || String(v.orden || '').includes(term))
+      : votantes
+
+    const totalVotaron = votantes.filter(v => votados.has(v.cedula)).length
+    const totalNuestros = votantes.filter(v => nuestros.has(v.cedula)).length
+    const encabezadoUbicacion = [local, seccional ? `Seccional ${seccional}` : null].filter(Boolean).join(' · ') || 'Sin local asignado'
+
     body.innerHTML = `
-      <div style="background:white; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px;">
-        <strong>🪑 Mi mesa</strong> — ${records.length} votante${records.length === 1 ? '' : 's'}
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+        <div style="font-size: 0.9rem; opacity: 0.9; margin-bottom: 8px;">${escapeHtml(encabezadoUbicacion)} · Mesa ${escapeHtml(mesa)}</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+          <div style="background: rgba(255,255,255,0.1); padding: 12px; border-radius: 6px; text-align: center;">
+            <div style="font-size: 0.85rem; opacity: 0.9;">Total Votantes</div>
+            <div style="font-size: 1.8rem; font-weight: 700;">${votantes.length}</div>
+          </div>
+          <div style="background: rgba(255,255,255,0.1); padding: 12px; border-radius: 6px; text-align: center;">
+            <div style="font-size: 0.85rem; opacity: 0.9;">Nuestros</div>
+            <div style="font-size: 1.8rem; font-weight: 700;">🔴 ${totalNuestros}</div>
+          </div>
+          <div style="background: rgba(255,255,255,0.1); padding: 12px; border-radius: 6px; text-align: center;">
+            <div style="font-size: 0.85rem; opacity: 0.9;">Votaron</div>
+            <div style="font-size: 1.8rem; font-weight: 700;">✅ ${totalVotaron}</div>
+          </div>
+        </div>
       </div>
-      <div id="dd-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px;"></div>
+      <input type="text" id="mesario-buscar" placeholder="🔍 Buscar por nombre, cédula u orden..." value="${escapeHtml(filtro)}" style="width: 100%; padding: 12px; border: 2px solid #ccc; border-radius: 6px; font-size: 1rem; margin-bottom: 16px; box-sizing: border-box;" />
+      <div id="mesario-lista" style="display: flex; flex-direction: column; gap: 8px;"></div>
     `
-    const grid = document.getElementById('dd-grid')
-    grid.innerHTML = records.map(r => tarjetaAccionRapida({
-      record: r, control: controlByVoterId[r.id],
-      botones: [
-        { label: '📍 Llegó al local', status: 'arrived_polling_place' },
-        { label: '🪑 Llegó a mesa', status: 'arrived_table' },
-        { label: '✅ Ya votó', status: 'voted' },
-        { label: '❓ No figura en mesa', status: 'not_found' },
-        { label: '📄 Problema con documento', flag: 'incidentOpen' }
-      ],
-      color: '#2e7d32'
-    })).join('')
 
-    wireAccionRapida(grid, {
-      candidateId, user, role: 'mesario', records, controlByVoterId,
-      incidentTypes: ['Mesa equivocada', 'Problema con documento', 'No figura en el padrón', 'Otro'],
-      onRefresh: cargarYPintar
+    const lista = document.getElementById('mesario-lista')
+    lista.innerHTML = filtrados.length === 0
+      ? '<div style="color:#999; padding:20px; text-align:center;">Sin resultados.</div>'
+      : filtrados.map(v => {
+          const yaVoto = votados.has(v.cedula)
+          const esNuestro = nuestros.has(v.cedula)
+          const bgColor = yaVoto ? '#f0f0f0' : esNuestro ? '#fef3c7' : 'white'
+          const borderLeft = yaVoto ? 'none' : esNuestro ? '4px solid #dc2626' : 'none'
+          return `
+            <div style="background: ${bgColor}; border: 1px solid #ddd; border-left: ${borderLeft}; padding: 12px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; opacity: ${yaVoto ? 0.7 : 1};">
+              <div>
+                <div style="font-weight: 700; font-size: 0.95rem;">${escapeHtml(v.nombre)}</div>
+                <div style="font-size: 0.85rem; color: #666;">CI ${escapeHtml(v.cedula)} · Orden <strong>${escapeHtml(v.orden)}</strong></div>
+              </div>
+              ${yaVoto
+                ? `<button class="mesario-revertir" data-cedula="${escapeHtml(v.cedula)}" style="padding: 8px 14px; background: #f97316; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">↩️ Revertir</button>`
+                : `<button class="mesario-marcar" data-cedula="${escapeHtml(v.cedula)}" data-local="${escapeHtml(v.local || '')}" style="padding: 8px 14px; background: #22c55e; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">▶ Marcar</button>`}
+            </div>
+          `
+        }).join('')
+
+    document.getElementById('mesario-buscar').addEventListener('input', debounce((e) => pintar(e.target.value), 250))
+
+    lista.querySelectorAll('.mesario-marcar').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cedula = btn.dataset.cedula
+        btn.disabled = true
+        btn.textContent = 'Guardando...'
+        try {
+          await marcarVoto(candidateId, { savedRecordId: null, cedula, seccional, mesa, local: btn.dataset.local, markedBy: user.uid })
+          await cargarDatos()
+          pintar(document.getElementById('mesario-buscar')?.value || '')
+        } catch (err) {
+          alert('Error: ' + err.message)
+          btn.disabled = false
+          btn.textContent = '▶ Marcar'
+        }
+      })
+    })
+
+    lista.querySelectorAll('.mesario-revertir').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cedula = btn.dataset.cedula
+        if (!confirm('¿Desmarcar este voto?')) return
+        btn.disabled = true
+        btn.textContent = 'Revirtiendo...'
+        try {
+          await desmarcarVoto(candidateId, { seccional, mesa, cedula, actorUid: user.uid })
+          await cargarDatos()
+          pintar(document.getElementById('mesario-buscar')?.value || '')
+        } catch (err) {
+          alert('Error: ' + err.message)
+          btn.disabled = false
+          btn.textContent = '↩️ Revertir'
+        }
+      })
     })
   }
 
-  await cargarYPintar()
+  try {
+    await cargarDatos()
+  } catch (err) {
+    body.innerHTML = `<div style="background:#ffebee; border:1px solid #ef9a9a; border-radius:8px; padding:30px; text-align:center; color:#c62828;">Error cargando tus votantes: ${escapeHtml(err.message)}</div>`
+    return
+  }
+  pintar()
 }
 
 // ══════════════════════════════════════════════════════════════════════

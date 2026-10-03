@@ -135,13 +135,23 @@ export async function getTelefonosPadron(candidateId, cedulas) {
 // Reemplaza al viejo patrón de "traer todo voters y filtrar en el cliente"
 // (auditoría IV.1) — esta es la única forma correcta de traer los
 // votantes de una mesa.
-export async function getVotersByMesa(seccional, mesa) {
-  const q = query(
-    collection(db, 'voters'),
-    where('seccional', '==', seccional),
-    where('mesa', '==', String(mesa)),
-    limit(1000) // tope de seguridad; una mesa real ronda 300-400 votantes
-  )
+//
+// BUG REAL encontrado probando contra el padrón real (local "COL.NAC.
+// FERNANDO DE LA MORA", Mesa 1, 350 votantes reales, orden 1-350
+// correlativo): `seccional` viene INCONSISTENTE por votante DENTRO de la
+// misma mesa física — de esos 350, 176 no tienen `seccional` cargado y el
+// resto se reparte entre 4 valores distintos (169/355/356/357). Filtrar
+// por seccional+mesa (el diseño original) le mostraba a un mesario real
+// menos de la mitad de sus propios votantes. `local+mesa` sí identifica
+// la mesa física sin ambigüedad (para eso se agregó `local`), así que
+// ahora es la fuente de verdad cuando está disponible — `seccional` queda
+// solo como respaldo para perfiles legado que todavía no tienen `local`.
+export async function getVotersByMesa(seccional, mesa, local, localidad) {
+  const clauses = [where('mesa', '==', String(mesa))]
+  clauses.push(local ? where('local', '==', local) : where('seccional', '==', seccional))
+  if (localidad) clauses.push(where('localidad', '==', localidad))
+  clauses.push(limit(1000)) // tope de seguridad; una mesa real ronda 300-400 votantes
+  const q = query(collection(db, 'voters'), ...clauses)
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
@@ -743,12 +753,15 @@ export async function listRecordsPageFiltered(candidateId, { by = null, value = 
   }
 }
 
-export async function getRecordsByMesa(candidateId, seccional, mesa) {
-  const q = query(
-    collection(db, ...candidatePath(candidateId, 'savedRecords')),
-    where('seccional', '==', seccional),
-    where('mesa', '==', String(mesa))
-  )
+// `local` opcional, mismo criterio que getVotersByMesa/getVotosDeMesa:
+// cuando está disponible es la fuente de verdad (seccional viene
+// inconsistente por votante dentro de la misma mesa física en el padrón
+// real — ver comentario en getVotersByMesa), y sin `local` cae al
+// comportamiento viejo (seccional+mesa) para callers que todavía no lo pasan.
+export async function getRecordsByMesa(candidateId, seccional, mesa, local) {
+  const clauses = [where('mesa', '==', String(mesa))]
+  clauses.push(local ? where('local', '==', local) : where('seccional', '==', seccional))
+  const q = query(collection(db, ...candidatePath(candidateId, 'savedRecords')), ...clauses)
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
@@ -992,11 +1005,43 @@ export async function reopenAssistanceRequest(candidateId, record, nuevoMonto, a
   await batch.commit()
 }
 
+// Pura y testeable — de los electionDayControl que este mesario tiene
+// asignados vía el mecanismo MANUAL (assignedTableUserId, ver
+// assignTableUserToVoter), cuáles quedan "huérfanos" cuando se le cambia
+// la mesa/local. Sin esto, si el admin cambia a un mesario de Mesa 12 a
+// Mesa 14, seguía viendo (y pudiendo marcar) los votantes de Mesa 12 que
+// alguna vez le fueron asignados a mano — acceso residual.
+export function computeStaleTableAssignments(controlDocs, newLocal, newMesa) {
+  return controlDocs
+    .filter(d => d.pollingPlace !== (newLocal || '') || String(d.tableNumber || '') !== String(newMesa || ''))
+    .map(d => d.id)
+}
+
 export async function updateCandidateUserMesaLocal(candidateId, uid, data) {
+  const newSeccional = data.seccional || null
+  const newMesa = data.mesa || null
+  const newLocal = data.local || null
+
+  // Limpieza de asignaciones manuales viejas (mecanismo assignedTableUserId)
+  // ANTES de escribir el perfil nuevo — así, si esto falla, el perfil
+  // tampoco cambia y no queda a mitad de camino.
+  const controlSnap = await getDocs(
+    query(collection(db, ...candidatePath(candidateId, 'electionDayControl')), where('assignedTableUserId', '==', uid))
+  )
+  const controlDocs = controlSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+  const staleIds = computeStaleTableAssignments(controlDocs, newLocal, newMesa)
+  if (staleIds.length > 0) {
+    const batch = writeBatch(db)
+    staleIds.forEach(id => {
+      batch.update(doc(db, ...candidateControlPath(candidateId, id)), { assignedTableUserId: null })
+    })
+    await batch.commit()
+  }
+
   await updateDoc(doc(db, ...candidatePath(candidateId, 'users', uid)), {
-    seccional: data.seccional || null,
-    mesa: data.mesa || null,
-    local: data.local || null,
+    seccional: newSeccional,
+    mesa: newMesa,
+    local: newLocal,
     mesasAsignadas: data.mesasAsignadas || null
   })
 }
@@ -1088,13 +1133,42 @@ export async function marcarVoto(candidateId, { voterId, savedRecordId = null, c
   }, { merge: true })
 }
 
+// Corrige el espejo de marcarVoto() cuando un mesario se equivocó al
+// marcar "Ya votó" y corrige el estado en electionDayControl a otro
+// distinto de 'voted' (ver setDiaDStatus). No se borra el doc (el
+// mesario no tiene permiso de delete sobre diaD/votes, ver
+// firestore.rules — solo campaign_admin/superadmin) ni el historial de
+// quién lo marcó: se deja voted=false + quién/cuándo lo desmarcó, así
+// Día D Admin (registroYaVoto en dia-d-admin-candidate.js, que cuenta
+// "votó" con un OR entre diaD/votes y electionDayControl.status) deja de
+// contar a este votante como voto confirmado.
+export async function desmarcarVoto(candidateId, { seccional, mesa, cedula, actorUid }) {
+  const docId = `${seccional}_${mesa}_${cedula}`
+  const ref = doc(db, ...candidatePath(candidateId, 'diaD', DIA_D_DOC, 'votes', docId))
+  const snap = await getDoc(ref)
+  if (!snap.exists()) return
+  await setDoc(ref, {
+    voted: false,
+    unmarkedBy: actorUid,
+    unmarkedAt: serverTimestamp()
+  }, { merge: true })
+}
+
 // Trae los votos YA marcados de una mesa (bounded — nunca toda la colección).
-export async function getVotosDeMesa(candidateId, seccional, mesa) {
-  const q = query(
-    collection(db, ...candidatePath(candidateId, 'diaD', DIA_D_DOC, 'votes')),
-    where('seccional', '==', seccional),
-    where('mesa', '==', String(mesa))
-  )
+//
+// `local` es opcional por compatibilidad (el mini-tool de Día D Admin
+// "Cargar por mesa" solo pide seccional+mesa, sin selector de local, y ESE
+// caller sigue funcionando igual porque entra por campaign_admin/
+// coordinator, que no depende de isMesarioOfMesa). Para el mesario SÍ hay
+// que pasarlo: firestore.rules ahora exige `local` en la comparación de
+// isMesarioOfMesa cuando el perfil lo tiene seteado — sin el mismo filtro
+// acá, la query completa queda denegada por Firestore (no puede evaluar
+// una regla que depende de un campo que la query no está acotando), no
+// solo "devuelve de menos".
+export async function getVotosDeMesa(candidateId, seccional, mesa, local) {
+  const clauses = [where('mesa', '==', String(mesa))]
+  clauses.push(local ? where('local', '==', local) : where('seccional', '==', seccional))
+  const q = query(collection(db, ...candidatePath(candidateId, 'diaD', DIA_D_DOC, 'votes')), ...clauses)
   const snap = await getDocs(q)
   return snap.docs.map(d => ({ id: d.id, ...d.data() }))
 }
@@ -1102,12 +1176,12 @@ export async function getVotosDeMesa(candidateId, seccional, mesa) {
 // Suscripción EN VIVO acotada a una sola mesa, usando docChanges() para
 // aplicar solo el delta en vez de re-leer/re-renderizar todo (auditoría
 // IV.2 — el viejo onSnapshot escuchaba la colección completa de votos).
-export function listenVotosDeMesa(candidateId, seccional, mesa, onChange) {
-  const q = query(
-    collection(db, ...candidatePath(candidateId, 'diaD', DIA_D_DOC, 'votes')),
-    where('seccional', '==', seccional),
-    where('mesa', '==', String(mesa))
-  )
+// Mismo motivo que getVotosDeMesa para preferir local+mesa sobre
+// seccional+mesa.
+export function listenVotosDeMesa(candidateId, seccional, mesa, local, onChange) {
+  const clauses = [where('mesa', '==', String(mesa))]
+  clauses.push(local ? where('local', '==', local) : where('seccional', '==', seccional))
+  const q = query(collection(db, ...candidatePath(candidateId, 'diaD', DIA_D_DOC, 'votes')), ...clauses)
   return onSnapshot(q, snap => {
     onChange(snap.docChanges().map(c => ({
       type: c.type, // 'added' | 'modified' | 'removed'
@@ -2162,6 +2236,16 @@ export async function setDiaDStatus(candidateId, record, newStatus, actorUid, ac
       })
     } catch (err) {
       console.warn('No se pudo sincronizar el voto con Día D Admin (diaD/votes):', err.message)
+    }
+  } else if (previousStatus === 'voted' && newStatus !== 'voted' && record.seccional && record.mesa) {
+    // Corrección de un "Ya votó" marcado por error: si no se revierte
+    // también acá, Día D Admin seguiría contando el voto (registroYaVoto
+    // hace OR entre diaD/votes y electionDayControl.status) aunque el
+    // estado operativo ya no diga 'voted'.
+    try {
+      await desmarcarVoto(candidateId, { seccional: record.seccional, mesa: record.mesa, cedula: record.cedula, actorUid })
+    } catch (err) {
+      console.warn('No se pudo revertir el espejo del voto en diaD/votes:', err.message)
     }
   }
 }
