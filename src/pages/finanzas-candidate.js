@@ -79,6 +79,9 @@ import {
   getCajeroDiaDAccountByResponsible,
   getCajeroDiaDAccountSummary,
   getCajeroDiaDMovementsPage,
+  getAllCashierMovements,
+  getVotersLocalMesaByIds,
+  getDirigenteUidByCedulas,
   generateCashierOperationId,
   getUserRecords,
   FINANCE_BENEFICIARY_TYPES,
@@ -92,7 +95,8 @@ import { debounce } from '../lib/debounce.js'
 import { exportGenericToExcel } from '../lib/excel.js'
 import { exportGenericToPdf } from '../lib/pdf.js'
 import { can } from '../lib/rbac.js'
-import { formatParaguayTime } from '../lib/paraguayTime.js'
+import { formatParaguayTime, formatParaguayDateTime } from '../lib/paraguayTime.js'
+import { construirFilaBeneficiario, construirReportePagosCajerosDD, TIPO_LABELS } from '../lib/cajerosReportes.js'
 
 const BENEFICIARY_LABELS = {
   mesario: '🪑 Mesario', chofer: '🚗 Chofer', dirigente: '🧭 Dirigente',
@@ -1100,25 +1104,33 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     if (!el) return
     const pendientes = await getPendingBeneficiaryExceptions(candidateId)
     if (pendientes.length === 0) { el.innerHTML = ''; return }
-    const equipo = await getAllCandidateUsers(candidateId)
+    const [equipo, voterInfo] = await Promise.all([
+      getAllCandidateUsers(candidateId),
+      getVotersLocalMesaByIds(pendientes.map(p => p.beneficiaryVoterId))
+    ])
     const nombrePorUid = new Map(equipo.map(u => [u.id, u.nombre || u.email || u.id]))
+    const ALCANCE_LABELS = { LOCAL: 'Local asignado', TODOS_A: 'Todos (A) – Nuestros votantes', TODOS_B: 'Todos (B) – Padrón completo' }
     el.innerHTML = `
       <div style="border:2px solid #6a1b9a; border-radius:8px; padding:16px;">
         <h4 style="margin:0 0 10px;">🔓 Solicitudes de autorización excepcional (${pendientes.length})</h4>
         <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
-          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Beneficiario</th><th>CI</th><th>Solicitado por</th><th>Fecha/hora</th><th>Monto sugerido</th><th></th></tr></thead>
+          <thead><tr style="text-align:left; border-bottom:2px solid #eee;"><th style="padding:6px;">Beneficiario</th><th>CI</th><th>Solicitado por</th><th>Fecha/hora</th><th>Motivo</th><th>Monto sugerido</th><th></th></tr></thead>
           <tbody>
-            ${pendientes.map(p => `<tr style="border-bottom:1px solid #eee;" data-id="${p.id}">
+            ${pendientes.map(p => { const vi = voterInfo.get(p.beneficiaryVoterId) || {}; return `<tr style="border-bottom:1px solid #eee;" data-id="${p.id}">
               <td style="padding:6px;">${escapeHtml(p.beneficiaryName || '')}</td>
               <td>${escapeHtml(p.beneficiaryCI || '')}</td>
               <td>${escapeHtml(nombrePorUid.get(p.requestedBy) || p.requestedBy || '')}</td>
               <td>${p.requestedAt?.toDate ? p.requestedAt.toDate().toLocaleString('es-PY') : ''}</td>
+              <td style="max-width:220px; font-size:.78rem; color:#555;">${escapeHtml(p.motivo || 'Sin motivo registrado')}</td>
               <td><input type="number" class="cdd-sol-monto" data-id="${p.id}" value="${Number(p.suggestedAmount) || 0}" style="width:110px; padding:6px; border:1px solid #ddd; border-radius:4px;"></td>
               <td style="white-space:nowrap;">
                 <button class="cdd-sol-aprobar" data-id="${p.id}" style="background:#2e7d32; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem; margin-right:4px;">✅ Aprobar</button>
                 <button class="cdd-sol-rechazar" data-id="${p.id}" style="background:#c62828; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">❌ Rechazar</button>
               </td>
-            </tr>`).join('')}
+            </tr>
+            <tr style="border-bottom:1px solid #eee;"><td colspan="7" style="padding:4px 6px 10px; font-size:.75rem; color:#777;">
+              📍 Local: ${escapeHtml(vi.local || '—')} · Mesa: ${escapeHtml(vi.mesa || '—')} · Alcance del cajero: ${escapeHtml(ALCANCE_LABELS[p.paymentScopeAtRequest] || p.paymentScopeAtRequest || '—')}
+            </td></tr>` }).join('')}
           </tbody>
         </table></div>
         <div id="cdd-sol-msg" style="font-size:.85rem; margin-top:8px;"></div>
@@ -1805,6 +1817,11 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
 
     body.innerHTML = `
       <div class="rep-card" style="margin-bottom:24px;">
+        <h3 style="margin:0 0 10px; font-size:1rem; color:#00695c;">💵 Pagos Cajeros DD</h3>
+        <div id="rep-cdd-pagos">Cargando...</div>
+      </div>
+
+      <div class="rep-card" style="margin-bottom:24px;">
         <h3 style="margin:0 0 10px; font-size:1rem; color:#00695c;">💳 Pagos por método (solo pagados)</h3>
         <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.85rem;">
           <thead><tr style="border-bottom:2px solid #eee; text-align:left;"><th style="padding:6px;">Método</th><th>Total</th></tr></thead>
@@ -1841,6 +1858,243 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         exportGenericToExcel(sinComprobante.map(p => ({ Beneficiario: p.beneficiaryName, Monto: p.amount, 'Fecha de pago': p.paymentDate || '' })), 'pagos_sin_comprobante.xlsx', 'Sin comprobante')
       }
     }))
+
+    pintarReportePagosCajerosDD(document.getElementById('rep-cdd-pagos'))
+  }
+
+  // ── Reportes > Pagos Cajeros DD (AUDITORÍA 2026-10-03) ───────────────
+  // Fuente de verdad ÚNICA: cashierMovements (ver cabecera de
+  // src/lib/cajerosReportes.js) — cashierOperations nunca se lee acá
+  // (es solo el caché de idempotencia, no plata real). La agregación en
+  // sí es PURA (construirReportePagosCajerosDD, testeada aparte con
+  // fixtures) — este bloque solo trae los datos crudos UNA vez, los
+  // enriquece (local/mesa del votante, dirigente, nombre de cajero) y
+  // re-renderiza localmente cuando cambian filtros/sub-vista, sin volver
+  // a pegarle a Firestore.
+  let repCddState = null // { filasBase, cuentasConTotales } — cacheado por visita a Reportes
+  let repCddFiltros = { desde: '', hasta: '', cashAccountId: '', local: '', busqueda: '' }
+  let repCddSubvista = 'consolidado'
+
+  async function pintarReportePagosCajerosDD(container) {
+    if (!container) return
+    if (!repCddState) {
+      container.innerHTML = '<p style="color:#999;">Cargando pagos de Cajeros DD...</p>'
+      const [movimientos, cuentas, equipo] = await Promise.all([
+        getAllCashierMovements(candidateId),
+        getCajerosDiaDAccounts(candidateId),
+        getAllCandidateUsers(candidateId)
+      ])
+      const nombrePorUid = new Map(equipo.map(u => [u.id, u.nombre || u.email || u.id]))
+      const cuentaPorId = new Map(cuentas.map(c => [c.id, c]))
+
+      // totalAssigned por cuenta, en UNA pasada sobre los mismos
+      // movimientos que ya se trajeron (nunca una query aparte por
+      // cuenta — evitaría N llamadas extra para N cajeros).
+      const totalAsignadoPorCuenta = new Map(cuentas.map(c => [c.id, 0]))
+      for (const m of movimientos) {
+        if (m.type === 'fund_assignment' && m.status === 'confirmed' && totalAsignadoPorCuenta.has(m.cashAccountId)) {
+          totalAsignadoPorCuenta.set(m.cashAccountId, totalAsignadoPorCuenta.get(m.cashAccountId) + (Number(m.amount) || 0))
+        }
+      }
+      const cuentasConTotales = cuentas.map(c => ({ ...c, totalAssigned: totalAsignadoPorCuenta.get(c.id) || 0 }))
+
+      const movimientosExpense = movimientos.filter(m => m.type === 'expense')
+      const [voterInfo, dirigenteUidPorCedula] = await Promise.all([
+        getVotersLocalMesaByIds(movimientosExpense.map(m => m.beneficiaryVoterId)),
+        getDirigenteUidByCedulas(candidateId, movimientosExpense.map(m => m.beneficiaryCI))
+      ])
+
+      const filasBase = movimientosExpense.map(m => {
+        const vi = voterInfo.get(m.beneficiaryVoterId) || {}
+        const dirUid = dirigenteUidPorCedula.get(m.beneficiaryCI)
+        return construirFilaBeneficiario(
+          { ...m, createdAt: m.createdAt?.toDate ? m.createdAt.toDate() : null },
+          {
+            local: vi.local || '', mesa: vi.mesa || '',
+            dirigenteNombre: dirUid ? (nombrePorUid.get(dirUid) || '') : '',
+            cajeroNombre: cuentaPorId.get(m.cashAccountId)?.name || m.cashAccountId
+          }
+        )
+      })
+      repCddState = { filasBase, cuentasConTotales }
+    }
+
+    renderReportePagosCajerosDD(container)
+  }
+
+  function renderReportePagosCajerosDD(container) {
+    const { filasBase, cuentasConTotales } = repCddState
+    const filtros = {
+      desde: repCddFiltros.desde ? new Date(repCddFiltros.desde + 'T00:00:00') : null,
+      hasta: repCddFiltros.hasta ? new Date(repCddFiltros.hasta + 'T23:59:59') : null,
+      cashAccountId: repCddFiltros.cashAccountId || null,
+      local: repCddFiltros.local || null,
+      busqueda: repCddFiltros.busqueda || null,
+    }
+    const reporte = construirReportePagosCajerosDD(filasBase, { cuentas: cuentasConTotales, filtros })
+    const localesUnicos = [...new Set(filasBase.map(f => f.local).filter(Boolean))].sort()
+
+    container.innerHTML = `
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:12px;">
+        <div><label style="font-size:.72rem; color:#666; display:block;">Desde</label><input type="date" id="rc-desde" value="${escapeHtml(repCddFiltros.desde)}" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;"></div>
+        <div><label style="font-size:.72rem; color:#666; display:block;">Hasta</label><input type="date" id="rc-hasta" value="${escapeHtml(repCddFiltros.hasta)}" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;"></div>
+        <div><label style="font-size:.72rem; color:#666; display:block;">Cajero</label><select id="rc-cajero" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+          <option value="">Todos</option>
+          ${cuentasConTotales.map(c => `<option value="${c.id}" ${repCddFiltros.cashAccountId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+        </select></div>
+        <div><label style="font-size:.72rem; color:#666; display:block;">Local de votación</label><select id="rc-local" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;">
+          <option value="">Todos</option>
+          ${localesUnicos.map(l => `<option value="${escapeHtml(l)}" ${repCddFiltros.local === l ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+        </select></div>
+        <div><label style="font-size:.72rem; color:#666; display:block;">Buscar CI/nombre</label><input id="rc-busqueda" value="${escapeHtml(repCddFiltros.busqueda)}" placeholder="CI o nombre" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;"></div>
+      </div>
+      <div style="display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap;">
+        <button class="rc-tab btn-tab btn-tab--pill${repCddSubvista === 'consolidado' ? ' active' : ''}" data-tab="consolidado" style="--tab-color:#00695c;">📊 Consolidado</button>
+        <button class="rc-tab btn-tab btn-tab--pill${repCddSubvista === 'porCajero' ? ' active' : ''}" data-tab="porCajero" style="--tab-color:#00695c;">👤 Por cajero</button>
+        <button class="rc-tab btn-tab btn-tab--pill${repCddSubvista === 'porLocal' ? ' active' : ''}" data-tab="porLocal" style="--tab-color:#00695c;">📍 Por local</button>
+        <button class="rc-tab btn-tab btn-tab--pill${repCddSubvista === 'beneficiarios' ? ' active' : ''}" data-tab="beneficiarios" style="--tab-color:#00695c;">🧾 Beneficiarios</button>
+      </div>
+      <div id="rc-contenido"></div>
+    `
+
+    container.querySelector('#rc-desde').addEventListener('change', (e) => { repCddFiltros.desde = e.target.value; renderReportePagosCajerosDD(container) })
+    container.querySelector('#rc-hasta').addEventListener('change', (e) => { repCddFiltros.hasta = e.target.value; renderReportePagosCajerosDD(container) })
+    container.querySelector('#rc-cajero').addEventListener('change', (e) => { repCddFiltros.cashAccountId = e.target.value; renderReportePagosCajerosDD(container) })
+    container.querySelector('#rc-local').addEventListener('change', (e) => { repCddFiltros.local = e.target.value; renderReportePagosCajerosDD(container) })
+    const buscarDebounced = debounce((valor) => { repCddFiltros.busqueda = valor; renderReportePagosCajerosDD(container) }, 350)
+    container.querySelector('#rc-busqueda').addEventListener('input', (e) => buscarDebounced(e.target.value))
+    container.querySelectorAll('.rc-tab').forEach(btn => btn.addEventListener('click', () => { repCddSubvista = btn.dataset.tab; renderReportePagosCajerosDD(container) }))
+
+    pintarSubvistaReporteCDD(document.getElementById('rc-contenido'), reporte)
+  }
+
+  function pintarSubvistaReporteCDD(el, reporte) {
+    if (repCddSubvista === 'consolidado') return pintarConsolidadoCDD(el, reporte)
+    if (repCddSubvista === 'porCajero') return pintarPorCajeroCDD(el, reporte)
+    if (repCddSubvista === 'porLocal') return pintarPorLocalCDD(el, reporte)
+    return pintarBeneficiariosCDD(el, reporte)
+  }
+
+  function statCardSmall(label, value) {
+    return `<div style="background:#f5f5f5; border-radius:6px; padding:12px; text-align:center;"><div style="font-size:1.1rem; font-weight:700; color:#00695c;">${value}</div><div style="font-size:.72rem; color:#666; margin-top:2px;">${label}</div></div>`
+  }
+
+  function pintarConsolidadoCDD(el, reporte) {
+    const c = reporte.consolidado
+    el.innerHTML = `
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px;">
+        ${statCardSmall('Total asignado', money(c.totalAsignado))}
+        ${statCardSmall('Total pagado', money(c.totalPagado))}
+        ${statCardSmall('Beneficiarios pagados', c.cantidadBeneficiarios)}
+        ${statCardSmall('Saldo disponible', money(c.saldoTotal))}
+        ${statCardSmall('Pagos normales', `${c.pagosNormalesCantidad} · ${money(c.pagosNormalesMonto)}`)}
+        ${statCardSmall('Pagos excepcionales', `${c.pagosExcepcionalesCantidad} · ${money(c.pagosExcepcionalesMonto)}`)}
+        ${statCardSmall('Promedio por beneficiario', money(Math.round(c.promedioPorBeneficiario)))}
+      </div>
+      <button id="rc-export-consolidado" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel (consolidado)</button>
+    `
+    el.querySelector('#rc-export-consolidado').addEventListener('click', () => {
+      exportGenericToExcel([{
+        'Total asignado': c.totalAsignado, 'Total pagado': c.totalPagado, 'Beneficiarios pagados': c.cantidadBeneficiarios,
+        'Saldo disponible': c.saldoTotal, 'Pagos normales (cantidad)': c.pagosNormalesCantidad, 'Pagos normales (monto)': c.pagosNormalesMonto,
+        'Pagos excepcionales (cantidad)': c.pagosExcepcionalesCantidad, 'Pagos excepcionales (monto)': c.pagosExcepcionalesMonto,
+        'Promedio por beneficiario': Math.round(c.promedioPorBeneficiario)
+      }], 'pagos_cajeros_dd_consolidado.xlsx', 'Consolidado')
+    })
+  }
+
+  function pintarPorCajeroCDD(el, reporte) {
+    el.innerHTML = `
+      <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
+        <thead><tr style="border-bottom:2px solid #eee; text-align:left;">
+          <th style="padding:6px;">Cajero</th><th>Fondos recibidos</th><th>Pagos</th><th>Monto pagado</th><th>Saldo actual</th><th>Excepcionales</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${reporte.porCajero.length === 0 ? '<tr><td colspan="7" style="padding:30px; text-align:center; color:#999;">Sin pagos.</td></tr>' : reporte.porCajero.map(c => `
+            <tr style="border-bottom:1px solid #eee;">
+              <td style="padding:6px; font-weight:700;">${escapeHtml(c.cajeroNombre)}</td>
+              <td>${money(c.fondosRecibidos)}</td>
+              <td>${c.cantidadPagos}</td>
+              <td style="font-weight:700;">${money(c.montoTotal)}</td>
+              <td>${money(c.saldoActual)}</td>
+              <td>${c.cantidadExcepcionales} · ${money(c.montoExcepcionales)}</td>
+              <td><button class="rc-detalle-cajero" data-id="${c.cashAccountId}" style="background:#00695c; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">Ver detalle</button></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table></div>
+      <div id="rc-detalle-cajero-cont" style="margin-top:14px;"></div>
+    `
+    el.querySelectorAll('.rc-detalle-cajero').forEach(btn => btn.addEventListener('click', () => {
+      const grupo = reporte.porCajero.find(c => c.cashAccountId === btn.dataset.id)
+      pintarTablaBeneficiarios(document.getElementById('rc-detalle-cajero-cont'), grupo.beneficiarios, `detalle_cajero_${grupo.cajeroNombre}.xlsx`)
+    }))
+  }
+
+  function pintarPorLocalCDD(el, reporte) {
+    el.innerHTML = `
+      <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.83rem;">
+        <thead><tr style="border-bottom:2px solid #eee; text-align:left;">
+          <th style="padding:6px;">Local de votación</th><th>Beneficiarios pagados</th><th>Monto total</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${reporte.porLocal.length === 0 ? '<tr><td colspan="4" style="padding:30px; text-align:center; color:#999;">Sin pagos.</td></tr>' : reporte.porLocal.map(l => `
+            <tr style="border-bottom:1px solid #eee;">
+              <td style="padding:6px; font-weight:700;">${escapeHtml(l.local)}</td>
+              <td>${l.cantidadBeneficiarios}</td>
+              <td style="font-weight:700;">${money(l.montoTotal)}</td>
+              <td><button class="rc-detalle-local" data-local="${escapeHtml(l.local)}" style="background:#00695c; color:white; border:none; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:.72rem;">Ver detalle</button></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table></div>
+      <div id="rc-detalle-local-cont" style="margin-top:14px;"></div>
+    `
+    el.querySelectorAll('.rc-detalle-local').forEach(btn => btn.addEventListener('click', () => {
+      const grupo = reporte.porLocal.find(l => l.local === btn.dataset.local)
+      pintarTablaBeneficiarios(document.getElementById('rc-detalle-local-cont'), grupo.beneficiarios, `detalle_local_${grupo.local}.xlsx`)
+    }))
+  }
+
+  function pintarBeneficiariosCDD(el, reporte) {
+    pintarTablaBeneficiarios(el, reporte.beneficiarios, 'pagos_cajeros_dd_beneficiarios.xlsx')
+  }
+
+  // Tabla compartida por las 3 vistas de detalle (beneficiarios directo,
+  // drill-down por cajero, drill-down por local) — mismas columnas,
+  // mismos datos, nunca una segunda fuente.
+  function pintarTablaBeneficiarios(el, filas, nombreExport) {
+    el.innerHTML = `
+      <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.8rem;">
+        <thead><tr style="border-bottom:2px solid #eee; text-align:left;">
+          <th style="padding:6px;">Fecha/Hora</th><th>Beneficiario</th><th>CI</th><th>Local</th><th>Mesa</th><th>Dirigente</th><th>Cajero</th><th>Monto</th><th>Tipo</th><th>Estado</th>
+        </tr></thead>
+        <tbody>
+          ${filas.length === 0 ? '<tr><td colspan="10" style="padding:30px; text-align:center; color:#999;">Sin pagos.</td></tr>' : filas.map(f => `
+            <tr style="border-bottom:1px solid #eee; ${f.estado === 'Anulado' ? 'opacity:.55;' : ''}">
+              <td style="padding:6px; white-space:nowrap;">${f.fecha ? escapeHtml(formatParaguayDateTime(f.fecha)) : '—'}</td>
+              <td>${escapeHtml(f.beneficiaryName)}</td>
+              <td style="font-family:monospace;">${escapeHtml(f.beneficiaryCI)}</td>
+              <td>${escapeHtml(f.local || '—')}</td>
+              <td>${escapeHtml(f.mesa || '—')}</td>
+              <td>${escapeHtml(f.dirigenteNombre || '—')}</td>
+              <td>${escapeHtml(f.cajeroNombre)}</td>
+              <td style="font-weight:700;">${money(f.amount)}</td>
+              <td>${escapeHtml(TIPO_LABELS[f.tipo] || f.tipo)}</td>
+              <td>${f.estado === 'Anulado' ? '<span style="color:#c62828;">🚫 Anulado</span>' : '<span style="color:#2e7d32;">✅ Confirmado</span>'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table></div>
+      <button class="rc-export-detalle" style="margin-top:8px; background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel (detalle)</button>
+    `
+    el.querySelector('.rc-export-detalle').addEventListener('click', () => {
+      exportGenericToExcel(filas.map(f => ({
+        'Fecha/Hora': f.fecha ? formatParaguayDateTime(f.fecha) : '', Beneficiario: f.beneficiaryName, CI: f.beneficiaryCI,
+        Local: f.local, Mesa: f.mesa, Dirigente: f.dirigenteNombre, Cajero: f.cajeroNombre, Monto: f.amount,
+        Tipo: TIPO_LABELS[f.tipo] || f.tipo, Estado: f.estado
+      })), nombreExport, 'Beneficiarios')
+    })
   }
 
   // ── DÍA D (generador de obligaciones especiales) ─────────────────────

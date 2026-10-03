@@ -1709,6 +1709,14 @@ export const solicitarExcepcionBeneficiario = functions.https.onCall(
       }
 
       const suggestedAmount = Number(settingsSnap.data()?.maxVoterAssistanceAmount) || 0;
+      // AUDITORÍA 2026-10-03 — "no quiero que el administrador tenga que
+      // adivinar por qué está aprobando": motivo AUTOMÁTICO, nunca
+      // escrito a mano por el cajero (no hay ningún campo de texto libre
+      // en esta función) — se deriva de la ÚNICA razón real por la que
+      // se puede llegar hasta acá (ver el chequeo de alcance arriba,
+      // esNuestro=false siempre): el beneficiario no es uno de "nuestros"
+      // votantes, está en el padrón general de la localidad.
+      const motivo = "No pertenece a nuestros votantes — encontrado en el padrón general de la localidad";
       const excRef = cashierExceptionsCol(candidateId).doc();
       const payload = {
         candidateId,
@@ -1719,6 +1727,11 @@ export const solicitarExcepcionBeneficiario = functions.https.onCall(
         suggestedAmount,
         approvedAmount: null,
         reason: null,
+        motivo,
+        // Alcance de pago que tenía ESTE cajero al momento de pedir la
+        // excepción (mismo criterio que paymentScopeAtPayment en los
+        // movimientos) — se muestra en el detalle de la solicitud.
+        paymentScopeAtRequest: alcanceAuditLabel(alcance),
         requestedBy: callerUid,
         requestedAt: FieldValue.serverTimestamp(),
         requestedFromAccountId: cashAccountId,
@@ -1796,12 +1809,23 @@ export const resolverExcepcionBeneficiario = functions.https.onCall(
           authorizedBy: callerUid,
           authorizedAt: FieldValue.serverTimestamp(),
         });
+        // AUDITORÍA 2026-10-03: beneficiario/CI/motivo/quién solicitó
+        // también quedan en la auditoría, no solo el status — "tanto la
+        // aprobación como el rechazo deben quedar registrados con
+        // beneficiario, CI, motivo, monto solicitado, monto finalmente
+        // aprobado, quién solicitó, quién resolvió y fecha/hora" (pedido
+        // explícito; actorUid/createdAt ya quedan en el doc de auditoría
+        // mismo, ver writeAuditInTx).
         writeAuditInTx(tx, candidateId, {
           actorUid: callerUid,
           action: "cashier_exception_approve",
           entityType: "cashierBeneficiaryExceptions",
           entityId: excRef.id,
-          previousData: { status: exc.status, suggestedAmount: exc.suggestedAmount },
+          previousData: {
+            status: exc.status, suggestedAmount: exc.suggestedAmount,
+            beneficiaryName: exc.beneficiaryName, beneficiaryCI: exc.beneficiaryCI,
+            motivo: exc.motivo ?? null, requestedBy: exc.requestedBy,
+          },
           newData: { status: "approved", approvedAmount: monto },
         });
         return { ok: true, status: "approved", approvedAmount: monto };
@@ -1818,7 +1842,11 @@ export const resolverExcepcionBeneficiario = functions.https.onCall(
         action: "cashier_exception_reject",
         entityType: "cashierBeneficiaryExceptions",
         entityId: excRef.id,
-        previousData: { status: exc.status },
+        previousData: {
+          status: exc.status, suggestedAmount: exc.suggestedAmount,
+          beneficiaryName: exc.beneficiaryName, beneficiaryCI: exc.beneficiaryCI,
+          motivo: exc.motivo ?? null, requestedBy: exc.requestedBy,
+        },
         newData: { status: "rejected", rejectionReason },
         reason: rejectionReason,
       });

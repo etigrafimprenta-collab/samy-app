@@ -3516,6 +3516,58 @@ export async function getCajeroDiaDMovementsPage(candidateId, { cashAccountId, r
   }
 }
 
+// AUDITORÍA 2026-10-03 — Reportes > "Pagos Cajeros DD": fuente de verdad
+// ÚNICA, SIN filtrar (misma cobertura de rol que getCajerosDiaDAccounts —
+// solo admin/finance_admin llegan a Reportes; el reporte en sí filtra
+// después en memoria vía src/lib/cajerosReportes.js, NUNCA con una query
+// acotada que pudiera dejar afuera movimientos reales).
+export async function getAllCashierMovements(candidateId) {
+  const snap = await getDocs(collection(db, ...candidatePath(candidateId, 'cashierMovements')))
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+
+// Local/mesa del BENEFICIARIO para "Reporte por local de votación" —
+// SIEMPRE desde /voters (padrón compartido, lectura abierta a cualquier
+// autenticado, ver firestore.rules) por el id real (beneficiaryVoterId
+// que cashierFunds.ts ya resolvió al pagar), nunca por cédula de nuevo.
+export async function getVotersLocalMesaByIds(voterIds) {
+  const ids = [...new Set(voterIds.filter(Boolean))]
+  const result = new Map()
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const snap = await getDoc(doc(db, 'voters', id))
+      if (snap.exists()) result.set(id, { local: snap.data().local || '', mesa: snap.data().mesa || '' })
+    } catch {
+      // degradar con gracia — un votante puntual que no se pueda leer no
+      // debe romper el reporte entero, solo queda sin local/mesa.
+    }
+  }))
+  return result
+}
+
+// Dirigente responsable de cada beneficiario pagado, cuando es uno de
+// "nuestros" votantes — candidate-wide (igual criterio que
+// buscarBeneficiarioCajero: cualquier dirigente, no uno puntual), en
+// tandas de 30 cédulas (límite de "in"). Degrada con gracia (Map vacío
+// parcial) si algún rol no tiene permiso de listar savedRecords — el
+// reporte sigue mostrando todo lo demás, solo con "Dirigente" en blanco.
+export async function getDirigenteUidByCedulas(candidateId, cedulas) {
+  const list = [...new Set(cedulas.filter(Boolean))]
+  const result = new Map()
+  const chunks = []
+  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) chunks.push(list.slice(i, i + IN_CHUNK_SIZE))
+  await Promise.all(chunks.map(async (chunk) => {
+    try {
+      const q = query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where('cedula', 'in', chunk))
+      const snap = await getDocs(q)
+      snap.docs.forEach(d => { if (d.data().uid) result.set(d.data().cedula, d.data().uid) })
+    } catch {
+      // ver comentario de arriba.
+    }
+  }))
+  return result
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Finanzas de Campaña — Etapa 4 (integración Día D + alertas).
 //
