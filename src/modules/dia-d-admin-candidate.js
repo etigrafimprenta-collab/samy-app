@@ -312,8 +312,23 @@ async function loadAndRender(container, candidateId, currentUser) {
       document.getElementById('total-votos').textContent = totalVotos
       document.getElementById('total-pct').textContent = pct
 
+      // AUDITORÍA 2026-10-04 (víspera/inicio Día D): el Ranking es "por
+      // DIRIGENTE, cuántos de sus votantes ya votaron" — nunca por
+      // mesario/chofer/operador/cajero (no son dueños de savedRecords,
+      // solo confirman el estado del elector, jamás lo atribuyen a sí
+      // mismos — ver registroYaVoto/assignedLeaderId, que ya nunca se
+      // pisa con el uid de quien confirma). Antes se armaba una fila de
+      // porMil para TODO `equipo` sin filtrar por rol, así que cualquier
+      // mesario/chofer/operador/cajero puro aparecía igual, siempre en
+      // 0/0 (nunca dueño de un registro) — ruido en la lista, no un
+      // problema de atribución de votos. Acá se arma SOLO para quien es
+      // dirigente (role o roleIds, cubre cuentas que combinan rol cajero
+      // + dirigente) o ya tiene al menos un votante propio (nunca se cae
+      // un caso real, ej. un admin que capturó votantes a mano).
+      const ownerUids = new Set(allRecords.map(r => r.uid).filter(Boolean))
+      const esDirigente = m => m.role === 'dirigente' || (Array.isArray(m.roleIds) && m.roleIds.includes('dirigente'))
       const porMil = {}
-      equipo.forEach(m => {
+      equipo.filter(m => esDirigente(m) || ownerUids.has(m.id)).forEach(m => {
         porMil[m.id] = { nombre: m.nombre || m.email, email: m.email, votos: 0, registros: [] }
       })
 
