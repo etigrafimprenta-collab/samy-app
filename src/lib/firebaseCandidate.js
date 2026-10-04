@@ -20,6 +20,7 @@ import {
   deleteDoc,
   query,
   where,
+  documentId,
   orderBy,
   limit,
   startAfter,
@@ -3573,6 +3574,33 @@ export async function getDirigenteUidByCedulas(candidateId, cedulas) {
       const q = query(collection(db, ...candidatePath(candidateId, 'savedRecords')), where('cedula', 'in', chunk))
       const snap = await getDocs(q)
       snap.docs.forEach(d => { if (d.data().uid) result.set(d.data().cedula, d.data().uid) })
+    } catch {
+      // ver comentario de arriba.
+    }
+  }))
+  return result
+}
+
+// MEJORA 2026-10-04 — "Exportar Excel (beneficiarios)": motivo real de
+// cada autorización excepcional, por id de cashierBeneficiaryExceptions
+// (exceptionAuthorization.exceptionDocId, ya en cada cashierMovement de
+// tipo AUTORIZACION_EXCEPCIONAL — ver cashierFunds.ts). El texto vive en
+// uno de 2 campos según qué función creó la excepción: `reason` (admin
+// autoriza directo, autorizarExcepcionBeneficiario) o `motivo` (cajero
+// solicita, solicitarExcepcionBeneficiario) — nunca los 2 a la vez, por
+// eso se intentan ambos. Mismo criterio de degradación con gracia que
+// getDirigenteUidByCedulas: un error puntual deja ese tramo en blanco,
+// nunca rompe el export entero.
+export async function getExceptionReasonsByIds(candidateId, exceptionDocIds) {
+  const list = [...new Set(exceptionDocIds.filter(Boolean))]
+  const result = new Map()
+  const chunks = []
+  for (let i = 0; i < list.length; i += IN_CHUNK_SIZE) chunks.push(list.slice(i, i + IN_CHUNK_SIZE))
+  await Promise.all(chunks.map(async (chunk) => {
+    try {
+      const q = query(collection(db, ...candidatePath(candidateId, 'cashierBeneficiaryExceptions')), where(documentId(), 'in', chunk))
+      const snap = await getDocs(q)
+      snap.docs.forEach(d => { result.set(d.id, d.data().reason || d.data().motivo || '') })
     } catch {
       // ver comentario de arriba.
     }

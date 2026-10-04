@@ -59,7 +59,7 @@ export const TIPO_LABELS = {
 // para filtrar/agrupar/exportar. `createdAt` se espera ya convertido a
 // Date (o null) — nunca un Timestamp de Firestore (mantiene este módulo
 // sin ninguna dependencia de Firestore).
-export function construirFilaBeneficiario(mov, { local = '', mesa = '', dirigenteNombre = '', cajeroNombre = '' } = {}) {
+export function construirFilaBeneficiario(mov, { local = '', mesa = '', dirigenteNombre = '', cajeroNombre = '', motivoExcepcion = '' } = {}) {
   return {
     id: mov.id,
     cashAccountId: mov.cashAccountId,
@@ -74,6 +74,11 @@ export function construirFilaBeneficiario(mov, { local = '', mesa = '', dirigent
     amount: Number(mov.amount) || 0,
     tipo: tipoPago(mov),
     estado: mov.status === 'voided' ? 'Anulado' : 'Confirmado',
+    // Solo tiene valor cuando tipo === 'AUTORIZACION_EXCEPCIONAL' — el
+    // llamante lo resuelve aparte (cashierBeneficiaryExceptions por
+    // exceptionDocId, ver getExceptionReasonsByIds) porque esta función
+    // se mantiene sin ninguna dependencia de Firestore (ver cabecera).
+    motivoExcepcion,
   }
 }
 

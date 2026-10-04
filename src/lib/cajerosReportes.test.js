@@ -53,6 +53,10 @@ test('construirFilaBeneficiario: status confirmed -> Estado Confirmado', () => {
   const f = fila({ status: 'confirmed' })
   assert.equal(f.estado, 'Confirmado')
 })
+test('construirFilaBeneficiario: motivoExcepcion pasa tal cual (resuelto aparte por el llamante), vacío por defecto', () => {
+  assert.equal(fila().motivoExcepcion, '')
+  assert.equal(fila({}, { motivoExcepcion: 'No pertenece a nuestros votantes' }).motivoExcepcion, 'No pertenece a nuestros votantes')
+})
 
 // ── construirReportePagosCajerosDD — consolidado ────────────────────────
 test('consolidado: total pagado y cantidad de beneficiarios (distintos, no pagos)', () => {

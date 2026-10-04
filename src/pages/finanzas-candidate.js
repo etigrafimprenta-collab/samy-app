@@ -83,6 +83,7 @@ import {
   getAllCashierMovements,
   getVotersLocalMesaByIds,
   getDirigenteUidByCedulas,
+  getExceptionReasonsByIds,
   generateCashierOperationId,
   getUserRecords,
   FINANCE_BENEFICIARY_TYPES,
@@ -93,7 +94,7 @@ import {
 } from '../lib/firebaseCandidate.js'
 import { escapeHtml } from '../lib/escapeHtml.js'
 import { debounce } from '../lib/debounce.js'
-import { exportGenericToExcel } from '../lib/excel.js'
+import { exportGenericToExcel, exportBeneficiariosCDDExcel } from '../lib/excel.js'
 import { exportGenericToPdf } from '../lib/pdf.js'
 import { can } from '../lib/rbac.js'
 import { formatParaguayTime, formatParaguayDateTime } from '../lib/paraguayTime.js'
@@ -2018,20 +2019,27 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       const cuentasConTotales = cuentas.map(c => ({ ...c, totalAssigned: totalAsignadoPorCuenta.get(c.id) || 0 }))
 
       const movimientosExpense = movimientos.filter(m => m.type === 'expense')
-      const [voterInfo, dirigenteUidPorCedula] = await Promise.all([
+      const [voterInfo, dirigenteUidPorCedula, motivoPorExceptionId] = await Promise.all([
         getVotersLocalMesaByIds(movimientosExpense.map(m => m.beneficiaryVoterId)),
-        getDirigenteUidByCedulas(candidateId, movimientosExpense.map(m => m.beneficiaryCI))
+        getDirigenteUidByCedulas(candidateId, movimientosExpense.map(m => m.beneficiaryCI)),
+        // MEJORA 2026-10-04 (Exportar Excel > Beneficiarios): motivo real
+        // de cada autorización excepcional, por exceptionDocId — ver
+        // getExceptionReasonsByIds. Solo los movimientos que de verdad
+        // tienen una excepción asociada piden algo.
+        getExceptionReasonsByIds(candidateId, movimientosExpense.map(m => m.exceptionAuthorization?.exceptionDocId))
       ])
 
       const filasBase = movimientosExpense.map(m => {
         const vi = voterInfo.get(m.beneficiaryVoterId) || {}
         const dirUid = dirigenteUidPorCedula.get(m.beneficiaryCI)
+        const excId = m.exceptionAuthorization?.exceptionDocId
         return construirFilaBeneficiario(
           { ...m, createdAt: m.createdAt?.toDate ? m.createdAt.toDate() : null },
           {
             local: vi.local || '', mesa: vi.mesa || '',
             dirigenteNombre: dirUid ? (nombrePorUid.get(dirUid) || '') : '',
-            cajeroNombre: cuentaPorId.get(m.cashAccountId)?.name || m.cashAccountId
+            cajeroNombre: cuentaPorId.get(m.cashAccountId)?.name || m.cashAccountId,
+            motivoExcepcion: excId ? (motivoPorExceptionId.get(excId) || '') : ''
           }
         )
       })
@@ -2176,13 +2184,21 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   }
 
   function pintarBeneficiariosCDD(el, reporte) {
-    pintarTablaBeneficiarios(el, reporte.beneficiarios, 'pagos_cajeros_dd_beneficiarios.xlsx')
+    // MEJORA 2026-10-04: a diferencia de los drill-downs (por cajero/por
+    // local, que son un subconjunto), acá se pasa también el consolidado
+    // — mismos filtros activos, ya calculado por construirReportePagosCajerosDD
+    // una sola vez más arriba — para el botón nuevo "Exportar Excel
+    // (beneficiarios)", que agrega un resumen de reconciliación.
+    pintarTablaBeneficiarios(el, reporte.beneficiarios, 'pagos_cajeros_dd_beneficiarios.xlsx', reporte.consolidado)
   }
 
   // Tabla compartida por las 3 vistas de detalle (beneficiarios directo,
   // drill-down por cajero, drill-down por local) — mismas columnas,
-  // mismos datos, nunca una segunda fuente.
-  function pintarTablaBeneficiarios(el, filas, nombreExport) {
+  // mismos datos, nunca una segunda fuente. `resumenParaExport` (solo lo
+  // pasa la pestaña Beneficiarios directa) agrega el botón de export con
+  // resumen de reconciliación — los 2 drill-downs quedan exactamente
+  // como estaban, con su único botón "Exportar Excel (detalle)".
+  function pintarTablaBeneficiarios(el, filas, nombreExport, resumenParaExport = null) {
     el.innerHTML = `
       <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.8rem;">
         <thead><tr style="border-bottom:2px solid #eee; text-align:left;">
@@ -2205,8 +2221,16 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
           `).join('')}
         </tbody>
       </table></div>
-      <button class="rc-export-detalle" style="margin-top:8px; background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel (detalle)</button>
+      <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+        <button class="rc-export-detalle" style="background:#455a64; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel (detalle)</button>
+        ${resumenParaExport ? `<button class="rc-export-beneficiarios" style="background:#00695c; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:.78rem;">⬇️ Exportar Excel (beneficiarios)</button>` : ''}
+      </div>
     `
+    if (resumenParaExport) {
+      el.querySelector('.rc-export-beneficiarios').addEventListener('click', () => {
+        exportBeneficiariosCDDExcel(filas, resumenParaExport, 'pagos_cajeros_dd_beneficiarios_detalle.xlsx')
+      })
+    }
     el.querySelector('.rc-export-detalle').addEventListener('click', () => {
       exportGenericToExcel(filas.map(f => ({
         'Fecha/Hora': f.fecha ? formatParaguayDateTime(f.fecha) : '', Beneficiario: f.beneficiaryName, CI: f.beneficiaryCI,

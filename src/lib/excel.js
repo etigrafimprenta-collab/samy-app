@@ -1,4 +1,6 @@
 import * as XLSX from 'xlsx'
+import { TIPO_LABELS } from './cajerosReportes.js'
+import { formatParaguayDate, formatParaguayTime } from './paraguayTime.js'
 
 export const exportToExcel = (records, filename = 'registros_samy.xlsx') => {
   const data = records.map((r, i) => ({
@@ -35,6 +37,48 @@ export const exportGenericToExcel = (rows, filename = 'reporte.xlsx', sheetName 
   const wb = XLSX.utils.book_new()
   const ws = XLSX.utils.json_to_sheet(rows)
   XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  XLSX.writeFile(wb, filename)
+}
+
+// MEJORA 2026-10-04 — Finanzas > Pagos Cajeros DD > Beneficiarios >
+// "Exportar Excel (beneficiarios)". Mismo motor que exportGenericToExcel
+// (json_to_sheet + writeFile), con un resumen de reconciliación agregado
+// DEBAJO de las filas en la misma hoja (vía sheet_add_aoa) — así el total
+// de la última fila es, literalmente, contar las filas de la hoja, sin
+// tener que creerle a un número aparte. `resumen` espera exactamente la
+// forma de reporte.consolidado de cajerosReportes.js (misma fuente que ya
+// alimenta la pestaña Consolidado, nunca un recálculo paralelo).
+export const exportBeneficiariosCDDExcel = (filas, resumen, filename = 'pagos_cajeros_dd_beneficiarios.xlsx') => {
+  const rows = filas.map(f => ({
+    Fecha: f.fecha ? formatParaguayDate(f.fecha) : '',
+    Hora: f.fecha ? formatParaguayTime(f.fecha) : '',
+    Beneficiario: f.beneficiaryName,
+    CI: f.beneficiaryCI,
+    'Local de votación': f.local,
+    Mesa: f.mesa,
+    Dirigente: f.dirigenteNombre,
+    Cajero: f.cajeroNombre,
+    'Monto pagado': f.amount,
+    'Tipo de pago': TIPO_LABELS[f.tipo] || f.tipo,
+    Estado: f.estado,
+    'Motivo / Autorización': f.motivoExcepcion || '',
+  }))
+
+  const ws = XLSX.utils.json_to_sheet(rows)
+  XLSX.utils.sheet_add_aoa(ws, [
+    [],
+    ['RESUMEN (filtros activos al momento de exportar)'],
+    ['Cantidad total de pagos exportados', filas.length],
+    ['Cantidad de beneficiarios únicos', resumen.cantidadBeneficiarios],
+    ['Monto total pagado', resumen.totalPagado],
+    ['Pagos normales — cantidad', resumen.pagosNormalesCantidad],
+    ['Pagos normales — monto', resumen.pagosNormalesMonto],
+    ['Pagos excepcionales — cantidad', resumen.pagosExcepcionalesCantidad],
+    ['Pagos excepcionales — monto', resumen.pagosExcepcionalesMonto],
+  ], { origin: -1 })
+
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Beneficiarios')
   XLSX.writeFile(wb, filename)
 }
 

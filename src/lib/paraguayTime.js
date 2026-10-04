@@ -54,6 +54,15 @@ export function formatParaguayDateTime(date) {
   }).format(date) + ' (hora PY)'
 }
 
+// Fecha sola (sin hora), hora Paraguay explícita — para exports con
+// columnas Fecha y Hora separadas en vez de una sola "Fecha/Hora".
+export function formatParaguayDate(date) {
+  if (!date) return ''
+  return new Intl.DateTimeFormat('es-PY', {
+    timeZone: 'America/Asuncion', dateStyle: 'short',
+  }).format(date)
+}
+
 export function formatParaguayTime(date) {
   if (!date) return ''
   return new Intl.DateTimeFormat('es-PY', {
