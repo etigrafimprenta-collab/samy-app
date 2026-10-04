@@ -483,7 +483,12 @@ const EXEC_CONCURRENCY = 25;
 export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
   { timeoutSeconds: 300 },
   async (request: functions.https.CallableRequest<any>) => {
-    const { candidateId, dryRun } = request.data ?? {};
+    // `incluirExternos` (pedido explícito 2026-10-04, posterior a la
+    // aprobación original): OPT-IN, default false — el comportamiento ya
+    // aprobado (excluir externos, nunca tocarlos) sigue intacto salvo que
+    // el admin lo prenda a propósito en ESTE llamado puntual. Nunca se
+    // activa solo ni queda "recordado" de una corrida a otra.
+    const { candidateId, dryRun, incluirExternos } = request.data ?? {};
     const callerUid = requireAuth(request.auth);
     if (!candidateId) {
       throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
@@ -512,6 +517,7 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
       .where("type", "==", "expense").where("status", "==", "confirmed").get();
     const cis = new Set<string>();
     const nombrePorCI = new Map<string, string>();
+    const voterIdPorCI = new Map<string, string>();
     let movimientosConCI = 0;
     movSnap.forEach((d) => {
       const data = d.data();
@@ -520,6 +526,7 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
       movimientosConCI++;
       cis.add(ci);
       if (!nombrePorCI.has(ci)) nombrePorCI.set(ci, data.beneficiaryName || "");
+      if (!voterIdPorCI.has(ci) && data.beneficiaryVoterId) voterIdPorCI.set(ci, data.beneficiaryVoterId);
     });
     const duplicadosEliminadosPorCI = movimientosConCI - cis.size;
 
@@ -561,6 +568,35 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
     const yaVotaron = propios.filter((r) => controlByVoterId.get(r.id)?.status === "voted");
     const pendientes = propios.filter((r) => controlByVoterId.get(r.id)?.status !== "voted");
 
+    // 4) Solo si el admin prendió incluirExternos: resolver contra el
+    // padrón REAL (/voters, raíz, por el beneficiaryVoterId que el pago
+    // ya validó al momento de pagar) los datos mínimos (nombre/local/
+    // mesa/seccional/orden) para poder crear un savedRecords nuevo, sin
+    // dueño (uid:null — nunca se le adivina un dirigente), por cada
+    // externo. Si no hay beneficiaryVoterId o el /voters ya no existe,
+    // queda reportado aparte y NUNCA se crea nada para esa CI.
+    const externosResolubles = new Map<string, { voterId: string; data: FirebaseFirestore.DocumentData }>();
+    const externosSinDatos: string[] = [];
+    if (incluirExternos && noPropios.length > 0) {
+      const voterIdsExternos = noPropios
+        .map((ci) => ({ ci, voterId: voterIdPorCI.get(ci) }))
+        .filter((x): x is { ci: string; voterId: string } => !!x.voterId);
+      const voterDataById = new Map<string, FirebaseFirestore.DocumentData>();
+      const idsUnicos = [...new Set(voterIdsExternos.map((x) => x.voterId))];
+      for (let i = 0; i < idsUnicos.length; i += IN_CHUNK) {
+        const chunk = idsUnicos.slice(i, i + IN_CHUNK);
+        if (chunk.length === 0) continue;
+        const snap = await db().collection("voters").where(FieldPath.documentId(), "in", chunk).get();
+        snap.forEach((d) => voterDataById.set(d.id, d.data()));
+      }
+      for (const ci of noPropios) {
+        const voterId = voterIdPorCI.get(ci);
+        const data = voterId ? voterDataById.get(voterId) : undefined;
+        if (voterId && data) externosResolubles.set(ci, { voterId, data });
+        else externosSinDatos.push(ci);
+      }
+    }
+
     const resumenBase = {
       pagosConfirmadosUnicos: cis.size,
       nuestrosBeneficiarios: propios.length + inconsistentes.length, // antes de descartar ambiguos
@@ -573,6 +609,12 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
       inconsistenciasDetalle: inconsistentes.slice(0, 100).map(([ci, docs]) => ({
         cedula: ci, nombre: nombrePorCI.get(ci) || "", docs: docs.map((d) => d.id),
       })),
+      incluirExternos: !!incluirExternos,
+      ...(incluirExternos ? {
+        externosACrearYMarcar: externosResolubles.size,
+        externosSinDatosDeVotante: externosSinDatos.length,
+        externosSinDatosDetalle: externosSinDatos.slice(0, 100).map((ci) => ({ cedula: ci, nombre: nombrePorCI.get(ci) || "" })),
+      } : {}),
     };
 
     if (dryRun) {
@@ -615,6 +657,88 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
       }
     }
 
+    // ── EXTERNOS (solo si incluirExternos) — crear savedRecords nuevo
+    // (uid:null, sin dueño) + marcar voted, reusando ejecutarCambioEstadoVoto
+    // tal cual. La creación va en una transacción que RE-CHEQUEA que
+    // todavía no exista ningún savedRecords con esa cédula (por si otro
+    // dirigente lo capturó mientras tanto, o esta misma herramienta corrió
+    // 2 veces en paralelo) — si ya existe, se salta esta CI sin crear un
+    // duplicado; la próxima corrida la verá como "propia" normal.
+    let externosCreadosYMarcados = 0;
+    let externosYaResueltosPorOtraVia = 0;
+    const erroresExternos: Array<{ cedula: string; error: string }> = [];
+    if (incluirExternos && externosResolubles.size > 0) {
+      const entradas = [...externosResolubles.entries()];
+      for (let i = 0; i < entradas.length; i += EXEC_CONCURRENCY) {
+        const lote = entradas.slice(i, i + EXEC_CONCURRENCY);
+        const resultados = await Promise.all(lote.map(async ([ci, { voterId, data: voterData }]) => {
+          try {
+            const savedRecordsCol = candidateRef(candidateId).collection("savedRecords");
+            const nuevoRef = savedRecordsCol.doc();
+            const creado = await db().runTransaction(async (tx) => {
+              const existeSnap = await tx.get(savedRecordsCol.where("cedula", "==", ci));
+              if (!existeSnap.empty) return null;
+              const nombre = voterData.nombre || nombrePorCI.get(ci) || "";
+              const payload = {
+                uid: null,
+                createdBy: callerUid,
+                teamId: null,
+                cedula: ci,
+                nombre,
+                nombre_upper: String(nombre).toUpperCase(),
+                direccion: "",
+                telefono: "",
+                nota: "",
+                requiresPickup: false,
+                canBeDriver: false,
+                wantsToBeMesario: false,
+                ccAssignedUserId: null,
+                importadoDesdeExcel: false,
+                conciliadoConPadron: true,
+                mesa: voterData.mesa || "",
+                seccional: voterData.seccional || "",
+                local: voterData.local || "",
+                orden: voterData.orden || "",
+                voterId,
+                createdAt: FieldValue.serverTimestamp(),
+                savedAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
+                // Auditoría/reversibilidad (pedido explícito 2026-10-04):
+                // distingue estos registros de una captura real de
+                // dirigente — nunca se borran ni revierten solos, pero
+                // quedan filtrables si hace falta.
+                creadoDesde: "verificarBeneficiariosYMarcarVoto",
+                creadoPor: callerUid,
+              };
+              tx.set(nuevoRef, payload);
+              return payload;
+            });
+            if (!creado) return { ok: true as const, creado: false };
+
+            const ctx: Contexto = {
+              roles,
+              record: creado,
+              recordExists: true,
+              control: undefined,
+              controlExists: false,
+              controlRef: candidateRef(candidateId).collection("electionDayControl").doc(nuevoRef.id),
+              recordRef: nuevoRef,
+            };
+            await ejecutarCambioEstadoVoto(
+              candidateId, nuevoRef.id, "voted", callerUid, "campaign_admin", ctx, "FINANZAS_BENEFICIARIOS_EXTERNO"
+            );
+            return { ok: true as const, creado: true };
+          } catch (e: any) {
+            return { ok: false as const, cedula: ci, error: e.message || String(e) };
+          }
+        }));
+        for (const r of resultados) {
+          if (!r.ok) { erroresExternos.push({ cedula: r.cedula, error: r.error }); continue; }
+          if (r.creado) externosCreadosYMarcados++; else externosYaResueltosPorOtraVia++;
+        }
+      }
+    }
+
     // Auditoría de la ejecución completa — un solo doc resumen, reusa
     // financeAuditLogs (mismo criterio que Cajeros DD).
     const auditRef = candidateRef(candidateId).collection("financeAuditLogs").doc();
@@ -631,6 +755,11 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
         yaVotadosAlEjecutar,
         errores: errores.length,
         erroresDetalle: errores.slice(0, 20),
+        incluirExternos: !!incluirExternos,
+        externosCreadosYMarcados,
+        externosYaResueltosPorOtraVia,
+        erroresExternos: erroresExternos.length,
+        erroresExternosDetalle: erroresExternos.slice(0, 20),
       },
       reason: "",
       createdAt: FieldValue.serverTimestamp(),
@@ -644,6 +773,10 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
       yaVotadosAlEjecutar,
       errores: errores.length,
       erroresDetalle: errores.slice(0, 20),
+      externosCreadosYMarcados,
+      externosYaResueltosPorOtraVia,
+      erroresExternos: erroresExternos.length,
+      erroresExternosDetalle: erroresExternos.slice(0, 20),
     };
   }
 );

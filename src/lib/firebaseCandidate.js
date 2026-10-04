@@ -2397,9 +2397,9 @@ export async function reportarIncidenciaDiaDViaFn(candidateId, record, type, des
 // idempotencia vía ejecutarCambioEstadoVoto). dryRun:true nunca escribe;
 // dryRun:false recalcula el cruce de cero antes de marcar, nunca reusa el
 // resultado de una vista previa anterior.
-export async function verificarBeneficiariosYMarcarVotoViaFn(candidateId, dryRun) {
+export async function verificarBeneficiariosYMarcarVotoViaFn(candidateId, dryRun, incluirExternos = false) {
   const fn = httpsCallable(functionsInstance, 'verificarBeneficiariosYMarcarVoto')
-  const res = await fn({ candidateId, dryRun: !!dryRun })
+  const res = await fn({ candidateId, dryRun: !!dryRun, incluirExternos: !!incluirExternos })
   return res.data
 }
 

@@ -1245,11 +1245,18 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
     document.body.appendChild(modal)
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove() })
     const body = modal.querySelector('#cdd-vv-body')
+    // MEJORA 2026-10-04 (post-aprobación original) — opt-in explícito,
+    // apagado por default: el comportamiento ya aprobado (excluir
+    // externos) sigue siendo lo que se ve al abrir el modal. Solo si el
+    // admin tilda esto, la vista previa (y luego la confirmación) pasan a
+    // incluir la creación de un savedRecords nuevo (sin dueño) + marcar
+    // voto para cada externo.
+    let incluirExternosActivo = false
 
     async function cargarVistaPrevia() {
       body.innerHTML = '<p style="color:#999;">Calculando vista previa (no escribe nada todavía)...</p>'
       try {
-        const r = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, true)
+        const r = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, true, incluirExternosActivo)
         renderVistaPrevia(r)
       } catch (err) {
         body.innerHTML = `<div style="color:#c62828; padding:10px;">Error calculando vista previa: ${escapeHtml(err.message)}</div>
@@ -1281,6 +1288,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
           <td style="padding:6px 8px;">${escapeHtml(label)}</td>
           <td style="padding:6px 8px; text-align:right; font-weight:700; ${color ? `color:${color};` : ''}">${valor}</td>
         </tr>`
+      const totalAMarcar = r.pendientesAMarcar + (r.incluirExternos ? (r.externosACrearYMarcar || 0) : 0)
       body.innerHTML = `
         <table style="width:100%; border-collapse:collapse; font-size:.85rem; margin-bottom:6px;">
           ${fila('Pagos confirmados únicos (por CI)', r.pagosConfirmadosUnicos)}
@@ -1289,35 +1297,54 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
           ${fila('Ya están VOTÓ', r.yaVotaron, '#2e7d32')}
           ${fila('Pendientes que pasarían a VOTÓ', r.pendientesAMarcar, '#1565c0')}
           ${fila('Beneficiarios externos / no propios', r.beneficiariosExternos, '#777')}
+          ${r.incluirExternos ? fila('→ de esos externos, se crearían y marcarían', r.externosACrearYMarcar, '#6a1b9a') : ''}
+          ${r.incluirExternos && r.externosSinDatosDeVotante > 0 ? fila('→ externos sin datos resolubles en el padrón (no se tocan)', r.externosSinDatosDeVotante, '#c62828') : ''}
           ${fila('Inconsistencias (CI con más de un registro — se excluyen)', r.inconsistencias, r.inconsistencias > 0 ? '#c62828' : '#777')}
         </table>
+        <label style="display:flex; align-items:flex-start; gap:8px; font-size:.78rem; color:#444; background:#f3e5f5; border:1px solid #ce93d8; border-radius:6px; padding:8px 10px; margin:10px 0; cursor:pointer;">
+          <input type="checkbox" id="cdd-vv-incluir-externos" ${incluirExternosActivo ? 'checked' : ''} style="margin-top:2px;">
+          <span>Incluir también beneficiarios externos/no propios: crea un <strong>savedRecords nuevo, sin dirigente asignado (uid vacío)</strong>, para cada uno y recién ahí lo marca VOTÓ. Aumenta el total de "comprometidos" del candidato.</span>
+        </label>
         ${filaDetalle('Ver beneficiarios externos / no propios', r.externosDetalle, '#777')}
+        ${r.incluirExternos ? filaDetalle('Ver externos sin datos resolubles en el padrón', r.externosSinDatosDetalle, '#c62828') : ''}
         ${filaDetalle('Ver inconsistencias excluidas', r.inconsistenciasDetalle, '#c62828')}
         ${r.inconsistencias > 0 ? `<p style="font-size:.78rem; color:#c62828; margin-top:10px;">⚠️ Hay ${r.inconsistencias} cédula(s) con más de un registro — quedan excluidas del marcado, nunca se les asigna dueño automáticamente.</p>` : ''}
         <div id="cdd-vv-msg" style="font-size:.85rem; margin:12px 0 0;"></div>
         <div style="display:flex; gap:8px; margin-top:12px;">
-          <button id="cdd-vv-confirmar" style="flex:1; background:${r.pendientesAMarcar > 0 ? '#2e7d32' : '#aaa'}; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;" ${r.pendientesAMarcar > 0 ? '' : 'disabled'}>✅ CONFIRMAR Y MARCAR ${r.pendientesAMarcar} VOTO${r.pendientesAMarcar === 1 ? '' : 'S'}</button>
+          <button id="cdd-vv-confirmar" style="flex:1; background:${totalAMarcar > 0 ? '#2e7d32' : '#aaa'}; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;" ${totalAMarcar > 0 ? '' : 'disabled'}>✅ CONFIRMAR Y MARCAR ${totalAMarcar} VOTO${totalAMarcar === 1 ? '' : 'S'}</button>
           <button id="cdd-vv-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
         </div>
       `
       const msg = body.querySelector('#cdd-vv-msg')
+      body.querySelector('#cdd-vv-incluir-externos').addEventListener('change', (e) => {
+        incluirExternosActivo = e.target.checked
+        cargarVistaPrevia() // re-consulta de cero con el flag nuevo, nunca reusa este resumen
+      })
       body.querySelector('#cdd-vv-cancelar').addEventListener('click', () => modal.remove())
       body.querySelector('#cdd-vv-confirmar')?.addEventListener('click', async (e) => {
         const btnConfirmar = e.currentTarget
-        if (!confirm(`¿Confirmás marcar como VOTÓ a los beneficiarios pendientes? El sistema vuelve a verificar el estado de cada uno justo antes de escribir (si alguien ya votó en el ínterin, no se duplica).`)) return
+        const confirmMsg = incluirExternosActivo
+          ? `¿Confirmás marcar como VOTÓ a los beneficiarios pendientes Y crear+marcar a los externos (sin dirigente asignado)? El sistema vuelve a verificar el estado de cada uno justo antes de escribir (si alguien ya votó o ya fue capturado en el ínterin, no se duplica).`
+          : `¿Confirmás marcar como VOTÓ a los beneficiarios pendientes? El sistema vuelve a verificar el estado de cada uno justo antes de escribir (si alguien ya votó en el ínterin, no se duplica).`
+        if (!confirm(confirmMsg)) return
         btnConfirmar.disabled = true
         body.querySelector('#cdd-vv-cancelar').disabled = true
+        body.querySelector('#cdd-vv-incluir-externos').disabled = true
         msg.textContent = 'Marcando votos...'
         try {
-          const res = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, false)
+          const res = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, false, incluirExternosActivo)
           body.innerHTML = `
             <table style="width:100%; border-collapse:collapse; font-size:.9rem;">
               ${fila('Pendientes previstos para marcar', res.pendientesPrevistos)}
               ${fila('Marcados efectivamente ahora', res.marcadosAhora, '#2e7d32')}
               ${fila('Ya estaban votados al ejecutar', res.yaVotadosAlEjecutar, '#1565c0')}
               ${fila('Errores', res.errores, res.errores > 0 ? '#c62828' : '#777')}
+              ${res.incluirExternos ? fila('Externos creados y marcados', res.externosCreadosYMarcados, '#6a1b9a') : ''}
+              ${res.incluirExternos ? fila('Externos ya resueltos por otra vía (no duplicados)', res.externosYaResueltosPorOtraVia, '#1565c0') : ''}
+              ${res.incluirExternos ? fila('Errores en externos', res.erroresExternos, res.erroresExternos > 0 ? '#c62828' : '#777') : ''}
             </table>
             ${res.errores > 0 ? `<p style="font-size:.78rem; color:#c62828; margin-top:8px;">${(res.erroresDetalle || []).map(e => `CI ${escapeHtml(e.cedula)}: ${escapeHtml(e.error)}`).join('<br>')}</p>` : ''}
+            ${res.erroresExternos > 0 ? `<p style="font-size:.78rem; color:#c62828; margin-top:8px;">${(res.erroresExternosDetalle || []).map(e => `CI ${escapeHtml(e.cedula)}: ${escapeHtml(e.error)}`).join('<br>')}</p>` : ''}
             <button id="cdd-vv-cerrar2" style="margin-top:14px; width:100%; background:#00695c; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Cerrar</button>
           `
           body.querySelector('#cdd-vv-cerrar2').addEventListener('click', async () => { modal.remove(); await pintarCajerosDiaDAdmin(document.getElementById('fin-body')) })
@@ -1325,6 +1352,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
           msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
           btnConfirmar.disabled = false
           body.querySelector('#cdd-vv-cancelar').disabled = false
+          body.querySelector('#cdd-vv-incluir-externos').disabled = false
         }
       })
     }
