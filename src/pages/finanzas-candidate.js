@@ -75,6 +75,7 @@ import {
   cerrarCuentaCajero,
   reabrirCuentaCajero,
   autorizarExcepcionBeneficiario,
+  verificarBeneficiariosYMarcarVotoViaFn,
   getCajerosDiaDAccounts,
   getCajeroDiaDAccountByResponsible,
   getCajeroDiaDAccountSummary,
@@ -187,6 +188,12 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
   const puedeGestionarCuentaCajero = permitir('finance.cashier_funds.manage_account', ['campaign_admin', 'finance_admin'])
   const puedeResolverAnulacionCajero = permitir('finance.cashier_funds.resolve_void', ['campaign_admin', 'finance_admin'])
   const puedeAutorizarExcepcionCajero = permitir('finance.cashier_funds.authorize_exception', ['campaign_admin', 'finance_admin'])
+  // Herramienta manual/eventual (pedido 2026-10-04) — mismo gate que exige
+  // el backend (verificarBeneficiariosYMarcarVoto): solo campaign_admin/
+  // coordinator, NUNCA finance_admin/auditor (acá es acción que marca
+  // votos, no solo ver/gestionar fondos). El servidor vuelve a verificar
+  // esto igual, esto es solo UX.
+  const puedeVerificarBeneficiariosYVoto = permitir('finance.cashier_funds.view_all', ['campaign_admin', 'coordinator'])
   // isFieldCashier ("cajero de campo", auto-enrolado desde un dirigente
   // que tildó "necesita ayuda") se suma acá como un OR más, nunca
   // reemplaza el chequeo de role/permiso — mismo criterio que el resto de
@@ -1056,7 +1063,10 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
       body.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
           <h3 style="margin:0; font-size:.95rem;">💵 Cajeros Día D</h3>
-          ${puedeGestionarCuentaCajero ? `<button id="cdd-btn-nueva-cuenta" style="background:#00695c; color:white; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-weight:700;">➕ Nueva cuenta de cajero</button>` : ''}
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${puedeVerificarBeneficiariosYVoto ? `<button id="cdd-btn-verificar-voto" style="background:#4527a0; color:white; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-weight:700;">🗳️ Verificar beneficiarios y marcar votos</button>` : ''}
+            ${puedeGestionarCuentaCajero ? `<button id="cdd-btn-nueva-cuenta" style="background:#00695c; color:white; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-weight:700;">➕ Nueva cuenta de cajero</button>` : ''}
+          </div>
         </div>
         <div style="overflow-x:auto;">
           <table style="width:100%; border-collapse:collapse; font-size:.83rem;">
@@ -1082,6 +1092,7 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         <div id="cdd-drilldown" style="margin-top:20px;"></div>
       `
       document.getElementById('cdd-btn-nueva-cuenta')?.addEventListener('click', () => mostrarModalNuevaCuentaCajero())
+      document.getElementById('cdd-btn-verificar-voto')?.addEventListener('click', () => mostrarModalVerificarBeneficiarios())
       body.querySelectorAll('.cdd-btn-operaciones, .cdd-fila-cuenta').forEach(el => {
         el.addEventListener('click', (e) => {
           e.stopPropagation()
@@ -1210,6 +1221,114 @@ export async function renderFinanzasCandidate(container, candidateId, user, myRo
         msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
       }
     })
+  }
+
+  // Herramienta manual/eventual (pedido 2026-10-04) — NUNCA se dispara
+  // sola, solo por este botón y acción explícita del administrador. Flujo
+  // en 2 pasos estrictos: 1) vista previa (cero escrituras, ver
+  // verificarBeneficiariosYMarcarVoto en functions/src/diaDControl.ts) y
+  // 2) confirmar — recién ahí el servidor recalcula todo de cero (nunca
+  // reusa este resumen) y marca. Si hay inconsistencias (CI con más de un
+  // savedRecords), se muestran en la vista previa y quedan EXCLUIDAS del
+  // conteo a marcar — nunca se les adivina un dueño.
+  async function mostrarModalVerificarBeneficiarios() {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 20px; overflow-y:auto;'
+    modal.innerHTML = `
+      <div style="background: white; border-radius: 8px; max-width: 640px; width: 100%; padding: 24px; max-height:90vh; overflow-y:auto;">
+        <h3 style="margin:0 0 4px;">🗳️ Verificar beneficiarios y marcar votos</h3>
+        <p style="margin:0 0 16px; font-size:.8rem; color:#777;">Cruza los pagos confirmados de Cajeros DD contra el estado de Día D, por cédula. Herramienta manual — no se ejecuta sola ni se asocia a futuros pagos.</p>
+        <div id="cdd-vv-body"><p style="color:#999;">Calculando vista previa (no escribe nada todavía)...</p></div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove() })
+    const body = modal.querySelector('#cdd-vv-body')
+
+    async function cargarVistaPrevia() {
+      body.innerHTML = '<p style="color:#999;">Calculando vista previa (no escribe nada todavía)...</p>'
+      try {
+        const r = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, true)
+        renderVistaPrevia(r)
+      } catch (err) {
+        body.innerHTML = `<div style="color:#c62828; padding:10px;">Error calculando vista previa: ${escapeHtml(err.message)}</div>
+          <button id="cdd-vv-cerrar" style="margin-top:10px; background:#999; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">Cerrar</button>`
+        body.querySelector('#cdd-vv-cerrar').addEventListener('click', () => modal.remove())
+      }
+    }
+
+    function filaDetalle(titulo, items, colorBorde) {
+      if (!items || items.length === 0) return ''
+      return `
+        <details style="margin-top:8px; border:1px solid ${colorBorde}; border-radius:6px; padding:8px 10px;">
+          <summary style="cursor:pointer; font-weight:700; color:${colorBorde};">${escapeHtml(titulo)} (${items.length})</summary>
+          <div style="max-height:160px; overflow-y:auto; margin-top:8px;">
+            <table style="width:100%; border-collapse:collapse; font-size:.76rem;">
+              <thead><tr style="text-align:left; border-bottom:1px solid #eee;"><th>CI</th><th>Nombre</th>${items[0].docs ? '<th>Registros</th>' : ''}</tr></thead>
+              <tbody>
+                ${items.map(it => `<tr><td>${escapeHtml(it.cedula)}</td><td>${escapeHtml(it.nombre || '')}</td>${it.docs ? `<td>${it.docs.length}</td>` : ''}</tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      `
+    }
+
+    function renderVistaPrevia(r) {
+      const fila = (label, valor, color) => `
+        <tr style="border-bottom:1px solid #eee;">
+          <td style="padding:6px 8px;">${escapeHtml(label)}</td>
+          <td style="padding:6px 8px; text-align:right; font-weight:700; ${color ? `color:${color};` : ''}">${valor}</td>
+        </tr>`
+      body.innerHTML = `
+        <table style="width:100%; border-collapse:collapse; font-size:.85rem; margin-bottom:6px;">
+          ${fila('Pagos confirmados únicos (por CI)', r.pagosConfirmadosUnicos)}
+          ${fila('Duplicados eliminados por CI (mismo beneficiario, 2+ pagos)', r.duplicadosEliminadosPorCI)}
+          ${fila('Nuestros beneficiarios (en savedRecords)', r.nuestrosBeneficiarios)}
+          ${fila('Ya están VOTÓ', r.yaVotaron, '#2e7d32')}
+          ${fila('Pendientes que pasarían a VOTÓ', r.pendientesAMarcar, '#1565c0')}
+          ${fila('Beneficiarios externos / no propios', r.beneficiariosExternos, '#777')}
+          ${fila('Inconsistencias (CI con más de un registro — se excluyen)', r.inconsistencias, r.inconsistencias > 0 ? '#c62828' : '#777')}
+        </table>
+        ${filaDetalle('Ver beneficiarios externos / no propios', r.externosDetalle, '#777')}
+        ${filaDetalle('Ver inconsistencias excluidas', r.inconsistenciasDetalle, '#c62828')}
+        ${r.inconsistencias > 0 ? `<p style="font-size:.78rem; color:#c62828; margin-top:10px;">⚠️ Hay ${r.inconsistencias} cédula(s) con más de un registro — quedan excluidas del marcado, nunca se les asigna dueño automáticamente.</p>` : ''}
+        <div id="cdd-vv-msg" style="font-size:.85rem; margin:12px 0 0;"></div>
+        <div style="display:flex; gap:8px; margin-top:12px;">
+          <button id="cdd-vv-confirmar" style="flex:1; background:${r.pendientesAMarcar > 0 ? '#2e7d32' : '#aaa'}; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;" ${r.pendientesAMarcar > 0 ? '' : 'disabled'}>✅ CONFIRMAR Y MARCAR ${r.pendientesAMarcar} VOTO${r.pendientesAMarcar === 1 ? '' : 'S'}</button>
+          <button id="cdd-vv-cancelar" style="flex:1; background:#999; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer;">Cancelar</button>
+        </div>
+      `
+      const msg = body.querySelector('#cdd-vv-msg')
+      body.querySelector('#cdd-vv-cancelar').addEventListener('click', () => modal.remove())
+      body.querySelector('#cdd-vv-confirmar')?.addEventListener('click', async (e) => {
+        const btnConfirmar = e.currentTarget
+        if (!confirm(`¿Confirmás marcar como VOTÓ a los beneficiarios pendientes? El sistema vuelve a verificar el estado de cada uno justo antes de escribir (si alguien ya votó en el ínterin, no se duplica).`)) return
+        btnConfirmar.disabled = true
+        body.querySelector('#cdd-vv-cancelar').disabled = true
+        msg.textContent = 'Marcando votos...'
+        try {
+          const res = await verificarBeneficiariosYMarcarVotoViaFn(candidateId, false)
+          body.innerHTML = `
+            <table style="width:100%; border-collapse:collapse; font-size:.9rem;">
+              ${fila('Pendientes previstos para marcar', res.pendientesPrevistos)}
+              ${fila('Marcados efectivamente ahora', res.marcadosAhora, '#2e7d32')}
+              ${fila('Ya estaban votados al ejecutar', res.yaVotadosAlEjecutar, '#1565c0')}
+              ${fila('Errores', res.errores, res.errores > 0 ? '#c62828' : '#777')}
+            </table>
+            ${res.errores > 0 ? `<p style="font-size:.78rem; color:#c62828; margin-top:8px;">${(res.erroresDetalle || []).map(e => `CI ${escapeHtml(e.cedula)}: ${escapeHtml(e.error)}`).join('<br>')}</p>` : ''}
+            <button id="cdd-vv-cerrar2" style="margin-top:14px; width:100%; background:#00695c; color:white; border:none; padding:10px; border-radius:4px; cursor:pointer; font-weight:700;">Cerrar</button>
+          `
+          body.querySelector('#cdd-vv-cerrar2').addEventListener('click', async () => { modal.remove(); await pintarCajerosDiaDAdmin(document.getElementById('fin-body')) })
+        } catch (err) {
+          msg.innerHTML = `<span style="color:#c62828;">❌ ${escapeHtml(err.message)}</span>`
+          btnConfirmar.disabled = false
+          body.querySelector('#cdd-vv-cancelar').disabled = false
+        }
+      })
+    }
+
+    await cargarVistaPrevia()
   }
 
   async function pintarCajeroDrillDown(cashAccountId) {

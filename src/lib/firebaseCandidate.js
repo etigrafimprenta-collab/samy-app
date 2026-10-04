@@ -2390,6 +2390,18 @@ export async function reportarIncidenciaDiaDViaFn(candidateId, record, type, des
   await fn({ candidateId, voterId: record.id, type, description })
 }
 
+// Finanzas → Cajeros DD → "Verificar beneficiarios y marcar votos" — ver
+// functions/src/diaDControl.ts (verificarBeneficiariosYMarcarVoto) para el
+// diseño completo (cruce por cédula normalizada, inconsistencias excluidas,
+// idempotencia vía ejecutarCambioEstadoVoto). dryRun:true nunca escribe;
+// dryRun:false recalcula el cruce de cero antes de marcar, nunca reusa el
+// resultado de una vista previa anterior.
+export async function verificarBeneficiariosYMarcarVotoViaFn(candidateId, dryRun) {
+  const fn = httpsCallable(functionsInstance, 'verificarBeneficiariosYMarcarVoto')
+  const res = await fn({ candidateId, dryRun: !!dryRun })
+  return res.data
+}
+
 // Reasignación — exclusiva de campaign_admin/coordinator (ver firestore.
 // rules). Mirror a savedRecords.chofer_asignado para que Día D Admin siga
 // mostrando "faltantes por chofer" correctamente sin tener que migrarlo.

@@ -34,7 +34,7 @@
 // el mismo documento.
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, FieldPath } from "firebase-admin/firestore";
 import { Auth } from "./lib";
 
 function db() {
@@ -261,6 +261,88 @@ function construirUpdateVotes(
     : { voted: false, unmarkedBy: callerUid, unmarkedAt: FieldValue.serverTimestamp() };
 }
 
+// AUDITORÍA 2026-10-04 — extraído de setDiaDStatusFn tal cual estaba
+// (mismo orden de lecturas, misma transacción, mismo chequeo de
+// idempotencia) para que "Verificar beneficiarios y marcar votos"
+// (Cajeros DD → Finanzas) reuse EXACTAMENTE esta lógica en vez de
+// reimplementarla — pedido explícito: "reutilizar setDiaDStatusFn o la
+// lógica transaccional/idempotente equivalente existente". `roleLabel` es
+// lo que antes se recalculaba inline con rolParaRegistro(ctx.roles) — se
+// pasa ya resuelto porque el llamante masivo no vuelve a derivar roles
+// por cada votante. `source`, si viene, queda en electionDayMovements
+// como rastro de qué disparó el cambio (null = comportamiento de
+// siempre, no cambia nada para setDiaDStatusFn).
+async function ejecutarCambioEstadoVoto(
+  candidateId: string,
+  voterId: string,
+  newStatus: string,
+  callerUid: string,
+  roleLabel: string,
+  ctx: Contexto,
+  source: string | null = null
+): Promise<{ ok: true; changed: boolean; previousStatus: string | null }> {
+  const record = ctx.record;
+  const tieneUbicacion = !!(record?.mesa && (record?.seccional || record?.local));
+  const votesRef = tieneUbicacion
+    ? candidateRef(candidateId).collection("diaD").doc("current").collection("votes")
+        .doc(`${record!.seccional ?? ""}_${record!.mesa}_${record!.cedula}`)
+    : null;
+  const diaDConfigRef = candidateRef(candidateId).collection("diaD").doc("current");
+
+  const resultado = await db().runTransaction(async (tx) => {
+    // TODAS las lecturas de la transacción van primero (requisito de
+    // Firestore: ningún get() después del primer set()/update()).
+    const [controlSnap, configSnap, votesSnap] = await Promise.all([
+      tx.get(ctx.controlRef),
+      votesRef ? tx.get(diaDConfigRef) : Promise.resolve(null),
+      votesRef ? tx.get(votesRef) : Promise.resolve(null),
+    ]);
+    const previousStatus = controlSnap.exists ? controlSnap.data()?.status ?? null : null;
+
+    if (previousStatus === newStatus) {
+      return { changed: false, previousStatus };
+    }
+
+    const base = controlSnap.exists ? {} : baseElectionDayControl(candidateId, voterId, ctx);
+
+    tx.set(ctx.controlRef, {
+      ...base,
+      status: newStatus,
+      lastMovementAt: FieldValue.serverTimestamp(),
+      lastUpdatedBy: callerUid,
+      lastUpdatedRole: roleLabel,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    tx.set(candidateRef(candidateId).collection("electionDayMovements").doc(), {
+      candidateId,
+      voterId,
+      previousStatus,
+      newStatus,
+      updatedBy: callerUid,
+      role: roleLabel,
+      note: "",
+      location: null,
+      source: source,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    if (votesRef) {
+      if (newStatus === "voted") {
+        if (configSnap?.exists && configSnap.data()?.enabled === true) {
+          tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, true), { merge: true });
+        }
+      } else if (previousStatus === "voted" && votesSnap?.exists) {
+        tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, false), { merge: true });
+      }
+    }
+
+    return { changed: true, previousStatus };
+  });
+
+  return { ok: true, ...resultado };
+}
+
 export const setDiaDStatusFn = functions.https.onCall(
   DIA_D_OPTS,
   async (request: functions.https.CallableRequest<any>) => {
@@ -271,69 +353,7 @@ export const setDiaDStatusFn = functions.https.onCall(
     }
 
     const ctx = await resolverContexto(candidateId, voterId, callerUid);
-    const record = ctx.record;
-    // BUG REAL (encontrado probando la sincronización de mesario por
-    // local+mesa): esto exigía `seccional` SIEMPRE — `seccional` queda
-    // vacío a propósito para perfiles/votantes del mecanismo nuevo
-    // (local es la fuente de verdad).
-    const tieneUbicacion = !!(record?.mesa && (record?.seccional || record?.local));
-    const votesRef = tieneUbicacion
-      ? candidateRef(candidateId).collection("diaD").doc("current").collection("votes")
-          .doc(`${record!.seccional ?? ""}_${record!.mesa}_${record!.cedula}`)
-      : null;
-    const diaDConfigRef = candidateRef(candidateId).collection("diaD").doc("current");
-
-    const resultado = await db().runTransaction(async (tx) => {
-      // TODAS las lecturas de la transacción van primero (requisito de
-      // Firestore: ningún get() después del primer set()/update()).
-      const [controlSnap, configSnap, votesSnap] = await Promise.all([
-        tx.get(ctx.controlRef),
-        votesRef ? tx.get(diaDConfigRef) : Promise.resolve(null),
-        votesRef ? tx.get(votesRef) : Promise.resolve(null),
-      ]);
-      const previousStatus = controlSnap.exists ? controlSnap.data()?.status ?? null : null;
-
-      if (previousStatus === newStatus) {
-        return { changed: false, previousStatus };
-      }
-
-      const base = controlSnap.exists ? {} : baseElectionDayControl(candidateId, voterId, ctx);
-
-      tx.set(ctx.controlRef, {
-        ...base,
-        status: newStatus,
-        lastMovementAt: FieldValue.serverTimestamp(),
-        lastUpdatedBy: callerUid,
-        lastUpdatedRole: rolParaRegistro(ctx.roles),
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      tx.set(candidateRef(candidateId).collection("electionDayMovements").doc(), {
-        candidateId,
-        voterId,
-        previousStatus,
-        newStatus,
-        updatedBy: callerUid,
-        role: rolParaRegistro(ctx.roles),
-        note: "",
-        location: null,
-        createdAt: FieldValue.serverTimestamp(),
-      });
-
-      if (votesRef) {
-        if (newStatus === "voted") {
-          if (configSnap?.exists && configSnap.data()?.enabled === true) {
-            tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, true), { merge: true });
-          }
-        } else if (previousStatus === "voted" && votesSnap?.exists) {
-          tx.set(votesRef, construirUpdateVotes(record!, voterId, callerUid, false), { merge: true });
-        }
-      }
-
-      return { changed: true, previousStatus };
-    });
-
-    return { ok: true, ...resultado };
+    return ejecutarCambioEstadoVoto(candidateId, voterId, newStatus, callerUid, rolParaRegistro(ctx.roles), ctx);
   }
 );
 
@@ -398,5 +418,213 @@ export const reportarIncidenciaDiaDFn = functions.https.onCall(
     ]);
 
     return { ok: true };
+  }
+);
+
+// AUDITORÍA 2026-10-04: quita espacios/puntos/guiones/cualquier no-dígito
+// — nunca toca la secuencia de dígitos en sí (un cero a la izquierda
+// real, parte de la cédula, se conserva tal cual). Mismo criterio que
+// normalizarCedula del script de import de hoy, centralizado acá porque
+// ahora hace falta aplicarlo a los 2 lados del cruce (beneficiaryCI y
+// cedula) antes de compararlos, para que un espacio o guión de cualquiera
+// de los 2 orígenes no produzca un falso "no encontrado".
+function normalizarCedula(c: unknown): string {
+  return String(c ?? "").replace(/\D/g, "");
+}
+
+// ── verificarBeneficiariosYMarcarVoto ────────────────────────────────────
+// NUEVA FUNCIÓN EVENTUAL (pedido explícito 2026-10-04) — admin-only,
+// manual, NUNCA se dispara sola ni desde ningún pago de Cajeros DD (cero
+// referencias a esta función fuera de este archivo y del botón dedicado
+// en Finanzas → Cajeros DD).
+//
+// Cruce: cashierMovements (expense, confirmed) trae beneficiaryVoterId,
+// que es el id del padrón COMPARTIDO (/voters) — una colección DISTINTA
+// de savedRecords, así que NO se puede cruzar por ese id. El cruce real
+// es por CI normalizada (beneficiaryCI vs. cedula), igual que ya hace
+// buscarBeneficiarioCajero — de ahí sale el id real a usar en
+// electionDayControl (mismo id que savedRecords, ver resolverContexto).
+//
+// "Ya votó" se determina SOLO contra electionDayControl.status==='voted'
+// (la fuente transaccional, nunca el espejo diaD/votes, que puede quedar
+// desincronizado — ver auditoría del reset de esta misma mañana).
+//
+// Inconsistencias: una CI pagada que matchea MÁS DE UN savedRecords (ya
+// confirmado contra datos reales: existen 18 cédulas así hoy) no se
+// resuelve sola — no hay forma automática de saber a cuál de los 2
+// dirigentes corresponde. Se excluye de "pendientes" y se reporta aparte,
+// nunca se le adivina un dueño.
+//
+// Marcar reusa ejecutarCambioEstadoVoto tal cual (misma transacción/
+// idempotencia que setDiaDStatusFn) — la propia transacción vuelve a leer
+// `status` FRESCO justo antes de escribir, así que si entre la vista
+// previa y la confirmación un mesario/dirigente ya marcó a ese elector,
+// la transacción lo detecta sola (previousStatus === newStatus) y no
+// escribe nada — eso es lo que distingue "marcados efectivamente ahora"
+// de "ya estaban votados al ejecutar" en el resultado final.
+//
+// dryRun:true  -> solo lee, calcula el resumen, no escribe nada.
+// dryRun:false -> recalcula el cruce FRESCO (nunca reusa un resumen viejo
+//                 que el cliente pudiera tener cacheado) y recién ahí
+//                 marca los pendientes, uno por uno.
+const IN_CHUNK = 30;
+
+export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
+  async (request: functions.https.CallableRequest<any>) => {
+    const { candidateId, dryRun } = request.data ?? {};
+    const callerUid = requireAuth(request.auth);
+    if (!candidateId) {
+      throw new functions.https.HttpsError("invalid-argument", "Falta candidateId");
+    }
+
+    const [platformSnap, memberSnap] = await Promise.all([
+      db().collection("platformUsers").doc(callerUid).get(),
+      candidateRef(candidateId).collection("users").doc(callerUid).get(),
+    ]);
+    const isSuperAdmin = platformSnap.data()?.globalRole === "superadmin";
+    const memberData = memberSnap.data();
+    const roleIds: string[] = Array.isArray(memberData?.roleIds) ? memberData!.roleIds : [];
+    const roles = new Set<string>([memberData?.role, ...roleIds].filter(Boolean));
+    const isAdmin = isSuperAdmin || roles.has("campaign_admin") || roles.has("coordinator");
+    if (!isAdmin) {
+      throw new functions.https.HttpsError(
+        "permission-denied",
+        "Solo campaign_admin/coordinator pueden usar esta función"
+      );
+    }
+
+    // 1) Pagos confirmados de Cajeros DD — CI normalizada, deduplicada.
+    // "Duplicados eliminados por CI" = movimientos totales − CI únicas
+    // (un beneficiario con reasistencia, 2 pagos, cuenta una sola vez).
+    const movSnap = await candidateRef(candidateId).collection("cashierMovements")
+      .where("type", "==", "expense").where("status", "==", "confirmed").get();
+    const cis = new Set<string>();
+    const nombrePorCI = new Map<string, string>();
+    let movimientosConCI = 0;
+    movSnap.forEach((d) => {
+      const data = d.data();
+      const ci = normalizarCedula(data.beneficiaryCI);
+      if (!ci) return;
+      movimientosConCI++;
+      cis.add(ci);
+      if (!nombrePorCI.has(ci)) nombrePorCI.set(ci, data.beneficiaryName || "");
+    });
+    const duplicadosEliminadosPorCI = movimientosConCI - cis.size;
+
+    // 2) ¿Cuáles son "nuestro" votante? (savedRecords por cédula
+    // normalizada, en tandas de 30 — límite del operador "in"). Si una CI
+    // matchea más de un doc, es una inconsistencia — se excluye, no se
+    // adivina a qué dirigente pertenece.
+    const ciList = [...cis];
+    const docsPorCedula = new Map<string, Array<{ id: string; data: FirebaseFirestore.DocumentData }>>();
+    for (let i = 0; i < ciList.length; i += IN_CHUNK) {
+      const chunk = ciList.slice(i, i + IN_CHUNK);
+      if (chunk.length === 0) continue;
+      const snap = await candidateRef(candidateId).collection("savedRecords").where("cedula", "in", chunk).get();
+      snap.forEach((d) => {
+        const ci = normalizarCedula(d.data().cedula);
+        if (!docsPorCedula.has(ci)) docsPorCedula.set(ci, []);
+        docsPorCedula.get(ci)!.push({ id: d.id, data: d.data() });
+      });
+    }
+
+    const noPropios = ciList.filter((ci) => !docsPorCedula.has(ci));
+    const inconsistentes = [...docsPorCedula.entries()].filter(([, docs]) => docs.length > 1);
+    const propios = [...docsPorCedula.entries()]
+      .filter(([, docs]) => docs.length === 1)
+      .map(([ci, docs]) => ({ ci, id: docs[0].id, data: docs[0].data }));
+
+    // 3) Estado efectivo actual de cada "nuestro" sin ambigüedad
+    // (electionDayControl por id de documento, en tandas de 30).
+    const voterIds = propios.map((r) => r.id);
+    const controlByVoterId = new Map<string, FirebaseFirestore.DocumentData>();
+    for (let i = 0; i < voterIds.length; i += IN_CHUNK) {
+      const chunk = voterIds.slice(i, i + IN_CHUNK);
+      if (chunk.length === 0) continue;
+      const snap = await candidateRef(candidateId).collection("electionDayControl")
+        .where(FieldPath.documentId(), "in", chunk).get();
+      snap.forEach((d) => controlByVoterId.set(d.id, d.data()));
+    }
+
+    const yaVotaron = propios.filter((r) => controlByVoterId.get(r.id)?.status === "voted");
+    const pendientes = propios.filter((r) => controlByVoterId.get(r.id)?.status !== "voted");
+
+    const resumenBase = {
+      pagosConfirmadosUnicos: cis.size,
+      nuestrosBeneficiarios: propios.length + inconsistentes.length, // antes de descartar ambiguos
+      yaVotaron: yaVotaron.length,
+      pendientesAMarcar: pendientes.length,
+      beneficiariosExternos: noPropios.length,
+      duplicadosEliminadosPorCI,
+      inconsistencias: inconsistentes.length,
+      externosDetalle: noPropios.slice(0, 100).map((ci) => ({ cedula: ci, nombre: nombrePorCI.get(ci) || "" })),
+      inconsistenciasDetalle: inconsistentes.slice(0, 100).map(([ci, docs]) => ({
+        cedula: ci, nombre: nombrePorCI.get(ci) || "", docs: docs.map((d) => d.id),
+      })),
+    };
+
+    if (dryRun) {
+      return { dryRun: true, ...resumenBase };
+    }
+
+    // ── EJECUCIÓN — solo llega acá después de que el admin confirmó ────
+    // "pendientesAMarcar" de ESTE recalculo (no el de una vista previa
+    // anterior) es el universo intentado. Cada intento re-lee `status`
+    // DENTRO de su propia transacción (ejecutarCambioEstadoVoto) — si ya
+    // pasó a 'voted' en el ínterin, `changed:false` y no se cuenta como
+    // nuevo marcado ni se escribe nada de más.
+    let marcadosAhora = 0;
+    let yaVotadosAlEjecutar = 0;
+    const errores: Array<{ cedula: string; error: string }> = [];
+    for (const rec of pendientes) {
+      try {
+        const ctx: Contexto = {
+          roles,
+          record: rec.data,
+          recordExists: true,
+          control: controlByVoterId.get(rec.id),
+          controlExists: controlByVoterId.has(rec.id),
+          controlRef: candidateRef(candidateId).collection("electionDayControl").doc(rec.id),
+          recordRef: candidateRef(candidateId).collection("savedRecords").doc(rec.id),
+        };
+        const r = await ejecutarCambioEstadoVoto(
+          candidateId, rec.id, "voted", callerUid, "campaign_admin", ctx, "FINANZAS_BENEFICIARIOS"
+        );
+        if (r.changed) marcadosAhora++; else yaVotadosAlEjecutar++;
+      } catch (e: any) {
+        errores.push({ cedula: rec.data.cedula, error: e.message || String(e) });
+      }
+    }
+
+    // Auditoría de la ejecución completa — un solo doc resumen, reusa
+    // financeAuditLogs (mismo criterio que Cajeros DD).
+    const auditRef = candidateRef(candidateId).collection("financeAuditLogs").doc();
+    await auditRef.set({
+      candidateId,
+      entityType: "diaDBulkVoteSync",
+      entityId: auditRef.id,
+      action: "cashier_beneficiaries_vote_sync",
+      performedBy: callerUid,
+      previousData: null,
+      newData: {
+        pendientesPrevistos: pendientes.length,
+        marcadosAhora,
+        yaVotadosAlEjecutar,
+        errores: errores.length,
+        erroresDetalle: errores.slice(0, 20),
+      },
+      reason: "",
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    return {
+      dryRun: false,
+      ...resumenBase,
+      pendientesPrevistos: pendientes.length,
+      marcadosAhora,
+      yaVotadosAlEjecutar,
+      errores: errores.length,
+      erroresDetalle: errores.slice(0, 20),
+    };
   }
 );
