@@ -468,8 +468,20 @@ function normalizarCedula(c: unknown): string {
 //                 que el cliente pudiera tener cacheado) y recién ahí
 //                 marca los pendientes, uno por uno.
 const IN_CHUNK = 30;
+// INCIDENTE 2026-10-04 16:38 (producción): con 1453 pendientes reales, el
+// marcado secuencial (uno por uno) tardaba ~2.3s por transacción -> ~56min
+// totales, muy por encima de cualquier timeout razonable. El cliente dio
+// "Error INTERNAL" a los ~19min aunque el servidor seguía escribiendo de
+// fondo (486 marcados reales, sin duplicados, atribución intacta — ver
+// auditoría del incidente). Fix mínimo: cada pendiente toca documentos
+// DISTINTOS (su propio electionDayControl/movimiento/voto), así que no hay
+// contención posible entre ellos -> procesarlos en lotes paralelos es
+// seguro y no cambia ninguna garantía de idempotencia/atribución, solo
+// reduce el tiempo total ~20x. timeoutSeconds:300 como margen adicional.
+const EXEC_CONCURRENCY = 25;
 
 export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
+  { timeoutSeconds: 300 },
   async (request: functions.https.CallableRequest<any>) => {
     const { candidateId, dryRun } = request.data ?? {};
     const callerUid = requireAuth(request.auth);
@@ -576,23 +588,30 @@ export const verificarBeneficiariosYMarcarVoto = functions.https.onCall(
     let marcadosAhora = 0;
     let yaVotadosAlEjecutar = 0;
     const errores: Array<{ cedula: string; error: string }> = [];
-    for (const rec of pendientes) {
-      try {
-        const ctx: Contexto = {
-          roles,
-          record: rec.data,
-          recordExists: true,
-          control: controlByVoterId.get(rec.id),
-          controlExists: controlByVoterId.has(rec.id),
-          controlRef: candidateRef(candidateId).collection("electionDayControl").doc(rec.id),
-          recordRef: candidateRef(candidateId).collection("savedRecords").doc(rec.id),
-        };
-        const r = await ejecutarCambioEstadoVoto(
-          candidateId, rec.id, "voted", callerUid, "campaign_admin", ctx, "FINANZAS_BENEFICIARIOS"
-        );
+    for (let i = 0; i < pendientes.length; i += EXEC_CONCURRENCY) {
+      const lote = pendientes.slice(i, i + EXEC_CONCURRENCY);
+      const resultados = await Promise.all(lote.map(async (rec) => {
+        try {
+          const ctx: Contexto = {
+            roles,
+            record: rec.data,
+            recordExists: true,
+            control: controlByVoterId.get(rec.id),
+            controlExists: controlByVoterId.has(rec.id),
+            controlRef: candidateRef(candidateId).collection("electionDayControl").doc(rec.id),
+            recordRef: candidateRef(candidateId).collection("savedRecords").doc(rec.id),
+          };
+          const r = await ejecutarCambioEstadoVoto(
+            candidateId, rec.id, "voted", callerUid, "campaign_admin", ctx, "FINANZAS_BENEFICIARIOS"
+          );
+          return { ok: true as const, changed: r.changed };
+        } catch (e: any) {
+          return { ok: false as const, cedula: rec.data.cedula, error: e.message || String(e) };
+        }
+      }));
+      for (const r of resultados) {
+        if (!r.ok) { errores.push({ cedula: r.cedula, error: r.error }); continue; }
         if (r.changed) marcadosAhora++; else yaVotadosAlEjecutar++;
-      } catch (e: any) {
-        errores.push({ cedula: rec.data.cedula, error: e.message || String(e) });
       }
     }
 
